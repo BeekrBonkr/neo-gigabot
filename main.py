@@ -23,6 +23,7 @@ COGS = [
 class GigaBot(commands.Bot):
     def __init__(self) -> None:
         self.config = load_config()
+
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
@@ -40,18 +41,21 @@ class GigaBot(commands.Bot):
 
         self.project_root = Path(__file__).resolve().parent
         self.storage_path = self.project_root / "storage"
+        self.logger = logging.getLogger(__name__)
 
     async def setup_hook(self) -> None:
         ensure_storage_layout(self.storage_path)
 
         for extension in COGS:
             await self.load_extension(extension)
-            logging.getLogger(__name__).info("Loaded extension: %s", extension)
+            self.logger.info("Loaded extension: %s", extension)
 
         synced = await self.tree.sync()
-        logging.getLogger(__name__).info("Synced %s application commands", len(synced))
+        self.logger.info("Synced %s application commands", len(synced))
 
-    async def get_dynamic_prefix(self, message: discord.Message) -> list[str]:
+    async def get_dynamic_prefix(
+        self, bot: commands.Bot, message: discord.Message
+    ) -> list[str]:
         prefix = self.config.default_prefix
 
         if message.guild is not None:
@@ -60,10 +64,10 @@ class GigaBot(commands.Bot):
             guild_settings = get_guild_settings(self.storage_path, message.guild.id)
             prefix = guild_settings.get("prefix", self.config.default_prefix)
 
-        return commands.when_mentioned_or(prefix)(self, message)
+        return commands.when_mentioned_or(prefix)(bot, message)
 
     async def on_ready(self) -> None:
-        logging.getLogger(__name__).info(
+        self.logger.info(
             "Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown"
         )
 
