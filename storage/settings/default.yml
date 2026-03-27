@@ -1,0 +1,13 @@
+prefix: '!'
+bot_channels: []
+blocked_commands: []
+logging:
+  enabled: false
+  channel_id: null
+  ignored_channels: []
+  ignored_users: []
+welcome:
+  enabled: false
+  channel_id: null
+  message: Welcome to the server, {member_mention}!
+  autoroles: []
