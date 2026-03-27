@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import discord
 from discord.ext import commands
@@ -29,15 +29,7 @@ class EmbedPayload:
 
 
 class EmbedManager:
-    """Central helper for building, sending, and editing embeds.
-
-    Usage examples:
-
-        await bot.embeds.success(ctx, "Saved", "Prefix updated.")
-        embed = bot.embeds.create(title="Info", description="Hello")
-        await bot.embeds.send(ctx, embed=embed)
-        await bot.embeds.edit(message, description="Updated")
-    """
+    """Central helper for creating, sending, editing, and responding with embeds."""
 
     def __init__(self, bot: commands.Bot | None = None) -> None:
         self.bot = bot
@@ -105,7 +97,7 @@ class EmbedManager:
             embed.set_footer(text=footer)
 
         if author_name:
-            embed.set_author(name=author_name, icon_url=author_icon_url or discord.Embed.Empty)
+            embed.set_author(name=author_name, icon_url=author_icon_url or None)
 
         if thumbnail_url:
             embed.set_thumbnail(url=thumbnail_url)
@@ -146,7 +138,6 @@ class EmbedManager:
         content: str | None = None,
         **kwargs: Any,
     ) -> discord.Message:
-        messageable = self._resolve_messageable(target)
         final_embed = self._resolve_embed(
             embed=embed,
             payload=payload,
@@ -161,7 +152,59 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
-        return await messageable.send(content=content, embed=final_embed, **kwargs)
+        return await target.send(content=content, embed=final_embed, **kwargs)
+
+    async def respond(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed | None = None,
+        payload: EmbedPayload | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        color: discord.Color | int | None = None,
+        fields: Sequence[EmbedField] | None = None,
+        footer: str | None = None,
+        author_name: str | None = None,
+        author_icon_url: str | None = None,
+        thumbnail_url: str | None = None,
+        image_url: str | None = None,
+        timestamp: bool = False,
+        content: str | None = None,
+        ephemeral: bool = False,
+        **kwargs: Any,
+    ) -> discord.Message | None:
+        final_embed = self._resolve_embed(
+            embed=embed,
+            payload=payload,
+            title=title,
+            description=description,
+            color=color,
+            fields=fields,
+            footer=footer,
+            author_name=author_name,
+            author_icon_url=author_icon_url,
+            thumbnail_url=thumbnail_url,
+            image_url=image_url,
+            timestamp=timestamp,
+        )
+
+        if interaction.response.is_done():
+            return await interaction.followup.send(
+                content=content,
+                embed=final_embed,
+                ephemeral=ephemeral,
+                wait=True,
+                **kwargs,
+            )
+
+        await interaction.response.send_message(
+            content=content,
+            embed=final_embed,
+            ephemeral=ephemeral,
+            **kwargs,
+        )
+        return None
 
     async def edit(
         self,
@@ -180,46 +223,58 @@ class EmbedManager:
         image_url: str | None = None,
         timestamp: bool = False,
         content: str | None = None,
-        clear_fields: bool = False,
         **kwargs: Any,
     ) -> discord.Message:
-        if embed is None and payload is None and all(
-            value is None
-            for value in [
-                title,
-                description,
-                color,
-                fields,
-                footer,
-                author_name,
-                author_icon_url,
-                thumbnail_url,
-                image_url,
-            ]
-        ):
-            base_embed = message.embeds[0].copy() if message.embeds else self.create()
-            if clear_fields:
-                base_embed.clear_fields()
-            if description is not None:
-                base_embed.description = description
-            final_embed = base_embed
-        else:
-            final_embed = self._resolve_embed(
-                embed=embed,
-                payload=payload,
-                title=title,
-                description=description,
-                color=color,
-                fields=fields,
-                footer=footer,
-                author_name=author_name,
-                author_icon_url=author_icon_url,
-                thumbnail_url=thumbnail_url,
-                image_url=image_url,
-                timestamp=timestamp,
-            )
-
+        final_embed = self._resolve_embed(
+            embed=embed,
+            payload=payload,
+            title=title,
+            description=description,
+            color=color,
+            fields=fields,
+            footer=footer,
+            author_name=author_name,
+            author_icon_url=author_icon_url,
+            thumbnail_url=thumbnail_url,
+            image_url=image_url,
+            timestamp=timestamp,
+        )
         return await message.edit(content=content, embed=final_embed, **kwargs)
+
+    async def edit_interaction_response(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed | None = None,
+        payload: EmbedPayload | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        color: discord.Color | int | None = None,
+        fields: Sequence[EmbedField] | None = None,
+        footer: str | None = None,
+        author_name: str | None = None,
+        author_icon_url: str | None = None,
+        thumbnail_url: str | None = None,
+        image_url: str | None = None,
+        timestamp: bool = False,
+        content: str | None = None,
+        **kwargs: Any,
+    ) -> discord.InteractionMessage:
+        final_embed = self._resolve_embed(
+            embed=embed,
+            payload=payload,
+            title=title,
+            description=description,
+            color=color,
+            fields=fields,
+            footer=footer,
+            author_name=author_name,
+            author_icon_url=author_icon_url,
+            thumbnail_url=thumbnail_url,
+            image_url=image_url,
+            timestamp=timestamp,
+        )
+        return await interaction.edit_original_response(content=content, embed=final_embed, **kwargs)
 
     async def success(self, target: commands.Context | discord.abc.Messageable, title: str, description: str, **kwargs: Any) -> discord.Message:
         return await self.send(target, embed=self.success_embed(title, description), **kwargs)
@@ -232,6 +287,18 @@ class EmbedManager:
 
     async def info(self, target: commands.Context | discord.abc.Messageable, title: str, description: str, **kwargs: Any) -> discord.Message:
         return await self.send(target, embed=self.info_embed(title, description), **kwargs)
+
+    async def success_interaction(self, interaction: discord.Interaction, title: str, description: str, **kwargs: Any) -> discord.Message | None:
+        return await self.respond(interaction, embed=self.success_embed(title, description), **kwargs)
+
+    async def error_interaction(self, interaction: discord.Interaction, title: str, description: str, **kwargs: Any) -> discord.Message | None:
+        return await self.respond(interaction, embed=self.error_embed(title, description), **kwargs)
+
+    async def warning_interaction(self, interaction: discord.Interaction, title: str, description: str, **kwargs: Any) -> discord.Message | None:
+        return await self.respond(interaction, embed=self.warning_embed(title, description), **kwargs)
+
+    async def info_interaction(self, interaction: discord.Interaction, title: str, description: str, **kwargs: Any) -> discord.Message | None:
+        return await self.respond(interaction, embed=self.info_embed(title, description), **kwargs)
 
     def _resolve_embed(
         self,
@@ -278,14 +345,6 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
-
-    def _resolve_messageable(
-        self,
-        target: commands.Context | discord.abc.Messageable,
-    ) -> discord.abc.Messageable:
-        if isinstance(target, commands.Context):
-            return target
-        return target
 
     def _coerce_color(self, color: discord.Color | int | None) -> discord.Color:
         if color is None:

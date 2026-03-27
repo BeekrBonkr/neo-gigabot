@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import discord
+from discord import app_commands
 from discord.ext import commands
 
 
@@ -21,20 +23,22 @@ class Music(commands.Cog):
     def get_state(self, guild_id: int) -> GuildMusicState:
         return self.guild_states.setdefault(guild_id, GuildMusicState())
 
-    @commands.command(name="queue")
-    async def queue(self, ctx: commands.Context) -> None:
-        if ctx.guild is None:
-            await self.bot.embeds.error(
-                ctx,
+    @app_commands.command(name="queue", description="Show the current music queue.")
+    @app_commands.guild_only()
+    async def queue(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(
+                interaction,
                 "Server Only",
                 "This command can only be used in a server.",
+                ephemeral=True,
             )
             return
 
-        state = self.get_state(ctx.guild.id)
+        state = self.get_state(interaction.guild.id)
         if not state.queue:
-            await self.bot.embeds.info(
-                ctx,
+            await self.bot.embeds.info_interaction(
+                interaction,
                 "Queue",
                 "The queue is empty.",
             )
@@ -43,8 +47,8 @@ class Music(commands.Cog):
         fields = [
             self.bot.embeds.field("Upcoming", "\n".join(f"- {item}" for item in state.queue[:10]))
         ]
-        await self.bot.embeds.send(
-            ctx,
+        await self.bot.embeds.respond(
+            interaction,
             title="Current Queue",
             description=(
                 f"Now playing: `{state.now_playing}`"
