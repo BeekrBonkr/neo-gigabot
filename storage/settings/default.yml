@@ -11,3 +11,13 @@ welcome:
   channel_id: null
   message: Welcome to the server, {member_mention}!
   autoroles: []
+suggestion_channel_ids: []
+listen_to_bots: false
+logging_enabled: false
+logging_channel_id: ''
+ignored_log_channels: []
+ignored_users: []
+join_message: Welcome {mention} to {server}!
+leave_message: '{mention} has left the server.'
+welcome_channel_ids: []
+autoroles: []
