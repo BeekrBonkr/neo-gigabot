@@ -16,12 +16,22 @@ class Moderation(commands.Cog):
     @commands.check(is_guild_context)
     @commands.has_permissions(manage_messages=True)
     async def say(self, ctx: commands.Context, *, message: str) -> None:
-        await ctx.send(message)
+        embed = self.bot.embeds.create(
+            title="Message",
+            description=message,
+            author_name=str(ctx.author),
+            author_icon_url=ctx.author.display_avatar.url,
+        )
+        await self.bot.embeds.send(ctx, embed=embed)
 
     @say.error
     async def say_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("You need `Manage Messages` to use this command.")
+            await self.bot.embeds.error(
+                ctx,
+                "Missing Permission",
+                "You need `Manage Messages` to use this command.",
+            )
             return
         raise error
 

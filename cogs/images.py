@@ -11,7 +11,11 @@ class Images(commands.Cog):
 
     @commands.command(name="imageinfo")
     async def image_info(self, ctx: commands.Context) -> None:
-        await ctx.send("Image cog is loaded. Legacy image commands can be migrated here.")
+        await self.bot.embeds.info(
+            ctx,
+            "Images Cog",
+            "Image cog is loaded. Legacy image commands can be migrated here.",
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
