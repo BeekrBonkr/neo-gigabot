@@ -15,7 +15,11 @@ class Owner(commands.Cog):
     @commands.command(name="reload")
     async def reload_extension(self, ctx: commands.Context, extension: str) -> None:
         await self.bot.reload_extension(extension)
-        await ctx.send(f"Reloaded `{extension}`")
+        await self.bot.embeds.success(
+            ctx,
+            "Reloaded Extension",
+            f"Reloaded `{extension}` successfully.",
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

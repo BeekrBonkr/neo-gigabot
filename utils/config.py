@@ -15,6 +15,7 @@ class Config:
     log_level: str = "INFO"
 
 
+
 def load_config() -> Config:
     project_root = Path(__file__).resolve().parents[1]
     env_path = project_root / ".env"
@@ -26,7 +27,9 @@ def load_config() -> Config:
     log_level = os.getenv("LOG_LEVEL", "INFO")
 
     if not token:
-        raise RuntimeError("DISCORD_TOKEN is missing. Create gigabot/.env from gigabot/.env.example.")
+        raise RuntimeError(
+            "DISCORD_TOKEN is missing. Create gigabot/.env from gigabot/.env.example."
+        )
 
     return Config(
         token=token,

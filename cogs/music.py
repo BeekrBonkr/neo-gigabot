@@ -24,15 +24,35 @@ class Music(commands.Cog):
     @commands.command(name="queue")
     async def queue(self, ctx: commands.Context) -> None:
         if ctx.guild is None:
-            await ctx.send("This command can only be used in a server.")
+            await self.bot.embeds.error(
+                ctx,
+                "Server Only",
+                "This command can only be used in a server.",
+            )
             return
 
         state = self.get_state(ctx.guild.id)
         if not state.queue:
-            await ctx.send("The queue is empty.")
+            await self.bot.embeds.info(
+                ctx,
+                "Queue",
+                "The queue is empty.",
+            )
             return
 
-        await ctx.send("Current queue:\n" + "\n".join(f"- {item}" for item in state.queue[:10]))
+        fields = [
+            self.bot.embeds.field("Upcoming", "\n".join(f"- {item}" for item in state.queue[:10]))
+        ]
+        await self.bot.embeds.send(
+            ctx,
+            title="Current Queue",
+            description=(
+                f"Now playing: `{state.now_playing}`"
+                if state.now_playing
+                else "Nothing is currently playing."
+            ),
+            fields=fields,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
