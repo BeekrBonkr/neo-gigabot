@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import discord
+from discord import app_commands
 from discord.ext import commands
 
 
@@ -9,10 +11,10 @@ class Images(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @commands.command(name="imageinfo")
-    async def image_info(self, ctx: commands.Context) -> None:
-        await self.bot.embeds.info(
-            ctx,
+    @app_commands.command(name="imageinfo", description="Show the current image cog status.")
+    async def image_info(self, interaction: discord.Interaction) -> None:
+        await self.bot.embeds.info_interaction(
+            interaction,
             "Images Cog",
             "Image cog is loaded. Legacy image commands can be migrated here.",
         )

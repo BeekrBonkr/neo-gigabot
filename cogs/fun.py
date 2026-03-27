@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import discord
+from discord import app_commands
 from discord.ext import commands
 
 
@@ -9,11 +11,11 @@ class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @commands.command(name="ping")
-    async def ping(self, ctx: commands.Context) -> None:
+    @app_commands.command(name="ping", description="Check the bot's gateway latency.")
+    async def ping(self, interaction: discord.Interaction) -> None:
         latency_ms = round(self.bot.latency * 1000)
-        await self.bot.embeds.info(
-            ctx,
+        await self.bot.embeds.info_interaction(
+            interaction,
             "Pong",
             f"Gateway latency: `{latency_ms}ms`",
         )

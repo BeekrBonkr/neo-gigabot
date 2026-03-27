@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from utils.config import load_config
@@ -26,15 +27,12 @@ class GigaBot(commands.Bot):
         self.config = load_config()
 
         intents = discord.Intents.default()
-        intents.message_content = True
         intents.members = True
         intents.guilds = True
-        intents.messages = True
-        intents.reactions = True
         intents.voice_states = True
 
         super().__init__(
-            command_prefix=self.get_dynamic_prefix,
+            command_prefix=commands.when_mentioned,
             intents=intents,
             help_command=None,
             case_insensitive=True,
@@ -44,6 +42,7 @@ class GigaBot(commands.Bot):
         self.storage_path = self.project_root / "storage"
         self.logger = logging.getLogger(__name__)
         self.embeds = EmbedManager(self)
+        self.tree.on_error = self.on_app_command_error
 
     async def setup_hook(self) -> None:
         ensure_storage_layout(self.storage_path)
@@ -54,26 +53,53 @@ class GigaBot(commands.Bot):
         synced = await self.tree.sync()
         self.logger.info("Synced %s application commands", len(synced))
 
-    async def get_dynamic_prefix(
-        self,
-        bot: commands.Bot,
-        message: discord.Message,
-    ) -> list[str]:
-        prefix = self.config.default_prefix
-
-        if message.guild is not None:
-            from utils.settings import get_guild_settings
-
-            guild_settings = get_guild_settings(self.storage_path, message.guild.id)
-            prefix = guild_settings.get("prefix", self.config.default_prefix)
-
-        return commands.when_mentioned_or(prefix)(bot, message)
-
     async def on_ready(self) -> None:
         self.logger.info(
             "Logged in as %s (%s)",
             self.user,
             self.user.id if self.user else "unknown",
+        )
+
+    async def on_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        self.logger.exception("Unhandled app command error", exc_info=error)
+
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await self.embeds.error_interaction(
+                interaction,
+                "Slow Down",
+                f"Try again in `{error.retry_after:.1f}` seconds.",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(error, app_commands.MissingPermissions):
+            missing = ", ".join(error.missing_permissions)
+            await self.embeds.error_interaction(
+                interaction,
+                "Missing Permissions",
+                f"You are missing: `{missing}`.",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(error, app_commands.CheckFailure):
+            await self.embeds.error_interaction(
+                interaction,
+                "You Cannot Use That",
+                "You do not meet the requirements to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        await self.embeds.error_interaction(
+            interaction,
+            "Command Failed",
+            "Something went wrong while running that command.",
+            ephemeral=True,
         )
 
 

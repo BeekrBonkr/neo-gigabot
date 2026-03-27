@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from utils.settings import (
@@ -12,235 +13,284 @@ from utils.settings import (
 )
 
 
-class Settings(commands.Cog):
+class Settings(commands.GroupCog, group_name="settings", group_description="Per-server configuration commands"):
     """Per-guild settings and configuration commands."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        super().__init__()
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
         create_guild_settings(self.bot.storage_path, guild.id)
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        if message.guild is None or self.bot.user is None:
+    @app_commands.command(name="show", description="Show this server's current bot settings.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.guild_only()
+    async def show(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "Server Only",
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
             return
 
-        mention_variants = {f"<@{self.bot.user.id}>", f"<@!{self.bot.user.id}>"}
-        if message.content.strip() in mention_variants:
-            settings = get_guild_settings(self.bot.storage_path, message.guild.id)
-            prefix = settings.get("prefix", self.bot.config.default_prefix)
-            await self.bot.embeds.info(
-                message.channel,
-                "Prefix Information",
-                f"My prefix for this server is `{prefix}`.\nAdmins can change it with `{prefix}prefix <new_prefix>`.",
-            )
+        server_data = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        suggestion_ids = server_data.get("suggestion_channel_ids", []) or []
+        bot_channel_ids = server_data.get("bot_channels", []) or []
+        blocked_commands = server_data.get("blocked_commands", []) or []
 
-    @commands.command(usage="on/off #channel")
-    @commands.has_permissions(administrator=True)
+        def format_channels(channel_ids: list[str] | list[int]) -> str:
+            if not channel_ids:
+                return "None"
+            return ", ".join(f"<#{int(channel_id)}>" for channel_id in channel_ids)
+
+        fields = [
+            self.bot.embeds.field("Prefix", f"`{server_data.get('prefix', self.bot.config.default_prefix)}`", True),
+            self.bot.embeds.field("Suggestion Channels", format_channels(suggestion_ids)),
+            self.bot.embeds.field("Bot Channels", format_channels(bot_channel_ids)),
+            self.bot.embeds.field(
+                "Blocked Commands",
+                ", ".join(f"`{name}`" for name in blocked_commands) if blocked_commands else "None",
+            ),
+        ]
+        await self.bot.embeds.respond(
+            interaction,
+            title="Server Settings",
+            description=f"Settings for **{interaction.guild.name}**.",
+            fields=fields,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="suggestion", description="Configure suggestion channels for this server.")
+    @app_commands.describe(option="Turn suggestion channels on or off", channels="One or more channels to use when turning this on")
+    @app_commands.choices(option=[
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+    ])
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.guild_only()
     async def suggestion(
         self,
-        ctx: commands.Context,
-        option: str,
-        *channels: discord.TextChannel,
+        interaction: discord.Interaction,
+        option: app_commands.Choice[str],
+        channels: str | None = None,
     ) -> None:
-        """Set or unset the suggestion channel."""
-        if ctx.guild is None:
-            await self.bot.embeds.error(ctx, "Server Only", "This command can only be used in a server.")
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(interaction, "Server Only", "This command can only be used in a server.", ephemeral=True)
             return
 
-        server_data = get_guild_settings(self.bot.storage_path, ctx.guild.id)
-        option = option.lower()
+        server_data = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        selected = option.value.lower()
 
-        if option == "on":
+        if selected == "on":
             if not channels:
-                await self.bot.embeds.error(
-                    ctx,
+                await self.bot.embeds.error_interaction(
+                    interaction,
                     "Missing Channels",
-                    "Provide one or more channels to set as suggestion channels.",
+                    "Provide one or more channels, like `#suggestions #staff-suggestions`.",
+                    ephemeral=True,
                 )
                 return
 
-            channel_ids = [str(channel.id) for channel in channels]
+            resolved_channels = []
+            for token in channels.split():
+                channel_id = token.strip().removeprefix("<#").removesuffix(">")
+                if channel_id.isdigit():
+                    channel = interaction.guild.get_channel(int(channel_id))
+                    if isinstance(channel, discord.TextChannel):
+                        resolved_channels.append(channel)
+
+            if not resolved_channels:
+                await self.bot.embeds.error_interaction(
+                    interaction,
+                    "No Valid Channels",
+                    "I could not resolve any valid text channels from that input.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_ids = [str(channel.id) for channel in resolved_channels]
             server_data["suggestion_channel_ids"] = channel_ids
-            save_guild_settings(self.bot.storage_path, ctx.guild.id, server_data)
-            await self.bot.embeds.success(
-                ctx,
+            save_guild_settings(self.bot.storage_path, interaction.guild.id, server_data)
+            await self.bot.embeds.success_interaction(
+                interaction,
                 "Suggestion Channels Updated",
-                f"Set the suggestion channel(s) to {', '.join(channel.mention for channel in channels)}.",
+                f"Set the suggestion channel(s) to {', '.join(channel.mention for channel in resolved_channels)}.",
+                ephemeral=True,
             )
             return
 
-        if option == "off":
-            if server_data.get("suggestion_channel_ids"):
-                server_data["suggestion_channel_ids"] = []
-                save_guild_settings(self.bot.storage_path, ctx.guild.id, server_data)
-                await self.bot.embeds.success(
-                    ctx,
-                    "Suggestion Channels Cleared",
-                    "The suggestion channel(s) have been unset.",
-                )
-            else:
-                await self.bot.embeds.warning(
-                    ctx,
-                    "Nothing To Clear",
-                    "There are no suggestion channels to unset.",
-                )
-            return
+        if server_data.get("suggestion_channel_ids"):
+            server_data["suggestion_channel_ids"] = []
+            save_guild_settings(self.bot.storage_path, interaction.guild.id, server_data)
+            await self.bot.embeds.success_interaction(
+                interaction,
+                "Suggestion Channels Cleared",
+                "The suggestion channel(s) have been unset.",
+                ephemeral=True,
+            )
+        else:
+            await self.bot.embeds.warning_interaction(
+                interaction,
+                "Nothing To Clear",
+                "There are no suggestion channels to unset.",
+                ephemeral=True,
+            )
 
-        await self.bot.embeds.error(
-            ctx,
-            "Invalid Option",
-            "Please use `on` or `off`.",
-        )
-
-    @commands.command(usage="<new_prefix>")
-    @commands.has_permissions(administrator=True)
-    async def prefix(self, ctx: commands.Context, new_prefix: str) -> None:
-        if ctx.guild is None:
-            await self.bot.embeds.error(ctx, "Server Only", "This command can only be used in a server.")
+    @app_commands.command(name="prefix", description="Update this server's stored prefix setting.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.guild_only()
+    async def prefix(self, interaction: discord.Interaction, new_prefix: str) -> None:
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(interaction, "Server Only", "This command can only be used in a server.", ephemeral=True)
             return
 
         if not new_prefix or not all(c in ALLOWED_PREFIX_CHARS for c in new_prefix):
-            await self.bot.embeds.error(
-                ctx,
+            await self.bot.embeds.error_interaction(
+                interaction,
                 "Invalid Prefix",
                 f"Only the following characters are allowed: {ALLOWED_PREFIX_CHARS}",
+                ephemeral=True,
             )
             return
 
-        update_guild_settings(self.bot.storage_path, ctx.guild.id, {"prefix": new_prefix})
-        await self.bot.embeds.success(
-            ctx,
+        update_guild_settings(self.bot.storage_path, interaction.guild.id, {"prefix": new_prefix})
+        await self.bot.embeds.success_interaction(
+            interaction,
             "Prefix Updated",
-            f"Prefix updated to `{new_prefix}`.",
+            f"Stored prefix updated to `{new_prefix}`. This bot now uses slash commands only, so this is mainly for legacy compatibility.",
+            ephemeral=True,
         )
 
-    @commands.command(name="command", usage="block/allow <command_name>")
-    @commands.has_permissions(administrator=True)
+    @app_commands.command(name="command", description="Allow or block a command in this server.")
+    @app_commands.choices(permission_type=[
+        app_commands.Choice(name="block", value="block"),
+        app_commands.Choice(name="allow", value="allow"),
+    ])
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.guild_only()
     async def command_permission(
         self,
-        ctx: commands.Context,
-        permission_type: str,
+        interaction: discord.Interaction,
+        permission_type: app_commands.Choice[str],
         command_name: str,
     ) -> None:
-        """Allow or block a command in this server."""
-        if ctx.guild is None:
-            await self.bot.embeds.error(ctx, "Server Only", "This command can only be used in a server.")
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(interaction, "Server Only", "This command can only be used in a server.", ephemeral=True)
             return
 
-        server_data = get_guild_settings(self.bot.storage_path, ctx.guild.id)
+        server_data = get_guild_settings(self.bot.storage_path, interaction.guild.id)
         blocked_commands = server_data.get("blocked_commands", []) or []
 
-        if command_name.startswith("!"):
-            await self.bot.embeds.error(
-                ctx,
+        if command_name.startswith("/") or command_name.startswith("!"):
+            await self.bot.embeds.error_interaction(
+                interaction,
                 "Invalid Command Name",
-                'Command name cannot start with the `!` character.',
+                "Command name should not start with `/` or `!`.",
+                ephemeral=True,
             )
             return
 
-        permission_type = permission_type.lower()
-        if permission_type == "block":
+        selected = permission_type.value.lower()
+        if selected == "block":
             if command_name not in blocked_commands:
                 blocked_commands.append(command_name)
                 server_data["blocked_commands"] = blocked_commands
-                save_guild_settings(self.bot.storage_path, ctx.guild.id, server_data)
-                await self.bot.embeds.success(
-                    ctx,
+                save_guild_settings(self.bot.storage_path, interaction.guild.id, server_data)
+                await self.bot.embeds.success_interaction(
+                    interaction,
                     "Command Blocked",
                     f"The `{command_name}` command has been blocked.",
+                    ephemeral=True,
                 )
             else:
-                await self.bot.embeds.warning(
-                    ctx,
+                await self.bot.embeds.warning_interaction(
+                    interaction,
                     "Already Blocked",
                     f"The `{command_name}` command is already blocked.",
+                    ephemeral=True,
                 )
             return
 
-        if permission_type == "allow":
-            if command_name in blocked_commands:
-                blocked_commands.remove(command_name)
-                server_data["blocked_commands"] = blocked_commands
-                save_guild_settings(self.bot.storage_path, ctx.guild.id, server_data)
-                await self.bot.embeds.success(
-                    ctx,
-                    "Command Allowed",
-                    f"The `{command_name}` command has been allowed.",
-                )
-            else:
-                await self.bot.embeds.warning(
-                    ctx,
-                    "Not Blocked",
-                    f"The `{command_name}` command is not blocked.",
-                )
-            return
+        if command_name in blocked_commands:
+            blocked_commands.remove(command_name)
+            server_data["blocked_commands"] = blocked_commands
+            save_guild_settings(self.bot.storage_path, interaction.guild.id, server_data)
+            await self.bot.embeds.success_interaction(
+                interaction,
+                "Command Allowed",
+                f"The `{command_name}` command has been allowed.",
+                ephemeral=True,
+            )
+        else:
+            await self.bot.embeds.warning_interaction(
+                interaction,
+                "Not Blocked",
+                f"The `{command_name}` command is not blocked.",
+                ephemeral=True,
+            )
 
-        await self.bot.embeds.error(
-            ctx,
-            "Invalid Permission Type",
-            'Please use `block` or `allow`.',
-        )
-
-    @commands.command(name="botchannel", usage="add/remove #channel")
-    @commands.has_permissions(administrator=True)
+    @app_commands.command(name="botchannel", description="Add or remove a bot channel for this server.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="add", value="add"),
+        app_commands.Choice(name="remove", value="remove"),
+    ])
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.guild_only()
     async def manage_bot_channel(
         self,
-        ctx: commands.Context,
-        action: str,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
         channel: discord.TextChannel,
     ) -> None:
-        if ctx.guild is None:
-            await self.bot.embeds.error(ctx, "Server Only", "This command can only be used in a server.")
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(interaction, "Server Only", "This command can only be used in a server.", ephemeral=True)
             return
 
-        server_data = get_guild_settings(self.bot.storage_path, ctx.guild.id)
+        server_data = get_guild_settings(self.bot.storage_path, interaction.guild.id)
         bot_channels = server_data.get("bot_channels", []) or []
-        action = action.lower()
+        selected = action.value.lower()
 
-        if action == "add":
+        if selected == "add":
             if channel.id not in bot_channels:
                 bot_channels.append(channel.id)
                 server_data["bot_channels"] = bot_channels
-                save_guild_settings(self.bot.storage_path, ctx.guild.id, server_data)
-                await self.bot.embeds.success(
-                    ctx,
+                save_guild_settings(self.bot.storage_path, interaction.guild.id, server_data)
+                await self.bot.embeds.success_interaction(
+                    interaction,
                     "Bot Channel Added",
                     f"Added {channel.mention} to the bot channels list.",
+                    ephemeral=True,
                 )
             else:
-                await self.bot.embeds.warning(
-                    ctx,
+                await self.bot.embeds.warning_interaction(
+                    interaction,
                     "Already Added",
                     f"{channel.mention} is already a bot channel.",
+                    ephemeral=True,
                 )
             return
 
-        if action == "remove":
-            if channel.id in bot_channels:
-                bot_channels.remove(channel.id)
-                server_data["bot_channels"] = bot_channels
-                save_guild_settings(self.bot.storage_path, ctx.guild.id, server_data)
-                await self.bot.embeds.success(
-                    ctx,
-                    "Bot Channel Removed",
-                    f"Removed {channel.mention} from the bot channels list.",
-                )
-            else:
-                await self.bot.embeds.warning(
-                    ctx,
-                    "Not Present",
-                    f"{channel.mention} is not currently a bot channel.",
-                )
-            return
-
-        await self.bot.embeds.error(
-            ctx,
-            "Invalid Action",
-            "Please use `add` or `remove`.",
-        )
+        if channel.id in bot_channels:
+            bot_channels.remove(channel.id)
+            server_data["bot_channels"] = bot_channels
+            save_guild_settings(self.bot.storage_path, interaction.guild.id, server_data)
+            await self.bot.embeds.success_interaction(
+                interaction,
+                "Bot Channel Removed",
+                f"Removed {channel.mention} from the bot channels list.",
+                ephemeral=True,
+            )
+        else:
+            await self.bot.embeds.warning_interaction(
+                interaction,
+                "Not Present",
+                f"{channel.mention} is not currently a bot channel.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
