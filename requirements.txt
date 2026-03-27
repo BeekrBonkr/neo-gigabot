@@ -1,0 +1,6 @@
+discord.py
+PyYAML
+python-dotenv
+yt-dlp
+Pillow
+aiohttp
