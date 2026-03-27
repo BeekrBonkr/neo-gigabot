@@ -6,3 +6,5 @@ venv/
 .env
 storage/cache/
 storage/temp/
+storage/settings.db
+
