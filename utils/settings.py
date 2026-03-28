@@ -4,7 +4,7 @@ import json
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -30,9 +30,6 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
 ALLOWED_PREFIX_CHARS = "!$%&*.<>"
 
 
-# ==============================
-# paths
-# ==============================
 def _default_settings_path(storage_path: Path) -> Path:
     return storage_path / "settings" / "default.yml"
 
@@ -41,9 +38,6 @@ def _settings_db_path(storage_path: Path) -> Path:
     return storage_path / "settings.db"
 
 
-# ==============================
-# default schema helpers
-# ==============================
 def _merge_missing_defaults(loaded: Any, built_in: Any) -> Any:
     if isinstance(loaded, dict) and isinstance(built_in, dict):
         merged: dict[str, Any] = deepcopy(loaded)
@@ -56,13 +50,10 @@ def _merge_missing_defaults(loaded: Any, built_in: Any) -> Any:
     return deepcopy(loaded)
 
 
-# strict schema sync:
-# - add missing keys from defaults
-# - remove keys not present in defaults
-# - keep existing values for keys that still exist
-# - recurse into nested dicts
-
-def sync_with_default(server_data: dict[str, Any], default_data: dict[str, Any]) -> dict[str, Any]:
+def sync_with_default(
+    server_data: dict[str, Any],
+    default_data: dict[str, Any],
+) -> dict[str, Any]:
     synced: dict[str, Any] = {}
     source = server_data or {}
 
@@ -107,9 +98,6 @@ def get_default_settings(storage_path: Path) -> dict[str, Any]:
     return _merge_missing_defaults(loaded, DEFAULT_GUILD_SETTINGS)
 
 
-# ==============================
-# sqlite helpers
-# ==============================
 def _connect(storage_path: Path) -> sqlite3.Connection:
     db_path = _settings_db_path(storage_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +132,10 @@ def _deserialize(payload: str) -> dict[str, Any]:
     return {}
 
 
-def _fetch_raw_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, Any] | None:
+def _fetch_raw_guild_settings(
+    storage_path: Path,
+    guild_id: int | str,
+) -> dict[str, Any] | None:
     ensure_settings_database(storage_path)
     with _connect(storage_path) as connection:
         row = connection.execute(
@@ -158,7 +149,11 @@ def _fetch_raw_guild_settings(storage_path: Path, guild_id: int | str) -> dict[s
     return _deserialize(row["data"])
 
 
-def _upsert_guild_settings(storage_path: Path, guild_id: int | str, data: dict[str, Any]) -> None:
+def _upsert_guild_settings(
+    storage_path: Path,
+    guild_id: int | str,
+    data: dict[str, Any],
+) -> None:
     ensure_settings_database(storage_path)
     payload = _serialize(data)
     with _connect(storage_path) as connection:
@@ -175,9 +170,6 @@ def _upsert_guild_settings(storage_path: Path, guild_id: int | str, data: dict[s
         connection.commit()
 
 
-# ==============================
-# guild settings helpers
-# ==============================
 def guild_settings_exists(storage_path: Path, guild_id: int | str) -> bool:
     return _fetch_raw_guild_settings(storage_path, guild_id) is not None
 
@@ -191,7 +183,10 @@ def create_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, 
 def delete_guild_settings(storage_path: Path, guild_id: int | str) -> None:
     ensure_settings_database(storage_path)
     with _connect(storage_path) as connection:
-        connection.execute("DELETE FROM guild_settings WHERE guild_id = ?", (int(guild_id),))
+        connection.execute(
+            "DELETE FROM guild_settings WHERE guild_id = ?",
+            (int(guild_id),),
+        )
         connection.commit()
 
 
@@ -227,6 +222,12 @@ def update_guild_settings(
     return get_guild_settings(storage_path, guild_id)
 
 
+def reset_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, Any]:
+    defaults = get_default_settings(storage_path)
+    _upsert_guild_settings(storage_path, guild_id, defaults)
+    return deepcopy(defaults)
+
+
 def sync_all_guild_settings(storage_path: Path) -> int:
     defaults = get_default_settings(storage_path)
     ensure_settings_database(storage_path)
@@ -246,26 +247,44 @@ def sync_all_guild_settings(storage_path: Path) -> int:
     return updated_count
 
 
-# ==============================
-# convenience helpers used by other cogs
-# ==============================
+def normalize_id_list(values: Iterable[int | str]) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0 or parsed in seen:
+            continue
+        normalized.append(parsed)
+        seen.add(parsed)
+    return normalized
+
+
+def normalize_command_name(value: str) -> str:
+    return value.strip().lower().lstrip("/!")
+
+
 def get_guild_prefix(storage_path: Path, guild_id: int | str, fallback: str = "!") -> str:
     settings = get_guild_settings(storage_path, guild_id)
-    return settings.get("prefix", fallback)
+    return str(settings.get("prefix", fallback))
 
 
-def command_is_blocked(storage_path: Path, guild_id: int | str, command_name: str) -> bool:
+def command_is_blocked(
+    storage_path: Path,
+    guild_id: int | str,
+    command_name: str,
+) -> bool:
     settings = get_guild_settings(storage_path, guild_id)
     blocked = settings.get("blocked_commands", []) or []
-    return command_name.lower() in {str(name).lower() for name in blocked}
+    normalized = {normalize_command_name(str(name)) for name in blocked}
+    return normalize_command_name(command_name) in normalized
 
 
 def is_bot_channel(storage_path: Path, guild_id: int | str, channel_id: int) -> bool:
     settings = get_guild_settings(storage_path, guild_id)
-    bot_channels = settings.get("bot_channels", []) or []
-
+    bot_channels = normalize_id_list(settings.get("bot_channels", []) or [])
     if not bot_channels:
         return True
-
-    normalized_bot_channels = {int(value) for value in bot_channels}
-    return int(channel_id) in normalized_bot_channels
+    return int(channel_id) in set(bot_channels)

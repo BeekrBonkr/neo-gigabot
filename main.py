@@ -29,6 +29,8 @@ class GigaBot(commands.Bot):
         intents = discord.Intents.default()
         intents.members = True
         intents.guilds = True
+        intents.messages = True
+        intents.message_content = False
         intents.voice_states = True
 
         super().__init__(
@@ -45,13 +47,19 @@ class GigaBot(commands.Bot):
         self.tree.on_error = self.on_app_command_error
 
     async def setup_hook(self) -> None:
-        ensure_storage_layout(self.storage_path)
+        updated_guilds = ensure_storage_layout(self.storage_path)
+        self.logger.info("Storage ready. Synced %s guild setting records.", updated_guilds)
+
         for extension in COGS:
             await self.load_extension(extension)
             self.logger.info("Loaded extension: %s", extension)
 
         synced = await self.tree.sync()
         self.logger.info("Synced %s application commands", len(synced))
+
+    async def close(self) -> None:
+        self.logger.info("Closing bot connection.")
+        await super().close()
 
     async def on_ready(self) -> None:
         self.logger.info(
@@ -82,6 +90,16 @@ class GigaBot(commands.Bot):
                 interaction,
                 "Missing Permissions",
                 f"You are missing: `{missing}`.",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(error, app_commands.BotMissingPermissions):
+            missing = ", ".join(error.missing_permissions)
+            await self.embeds.error_interaction(
+                interaction,
+                "Bot Missing Permissions",
+                f"I am missing: `{missing}`.",
                 ephemeral=True,
             )
             return
@@ -119,4 +137,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        logging.getLogger(__name__).info("Shutdown requested by keyboard interrupt.")
