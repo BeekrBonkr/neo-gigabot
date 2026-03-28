@@ -1,17 +1,6 @@
-prefix: '!'
+suggestion_channel_ids: []
 bot_channels: []
 blocked_commands: []
-logging:
-  enabled: false
-  channel_id: null
-  ignored_channels: []
-  ignored_users: []
-welcome:
-  enabled: false
-  channel_id: null
-  message: Welcome to the server, {member_mention}!
-  autoroles: []
-suggestion_channel_ids: []
 listen_to_bots: false
 logging_enabled: false
 logging_channel_id: ''
@@ -21,3 +10,6 @@ join_message: Welcome {mention} to {server}!
 leave_message: '{mention} has left the server.'
 welcome_channel_ids: []
 autoroles: []
+music_dj_enabled: false
+music_dj_role_name: dj
+music_default_volume: 50

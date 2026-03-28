@@ -14,7 +14,8 @@ import yt_dlp
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel, update_guild_settings
+from utils.command_policy import ensure_command_allowed
+from utils.settings import get_guild_settings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -137,21 +138,17 @@ class Music(commands.Cog):
         state.volume = config["default_volume"] / 100
 
     async def ensure_music_allowed(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
-        if interaction.guild is None or interaction.channel is None:
-            return False, "This command can only be used in a server."
-
         command_name = interaction.command.qualified_name if interaction.command else "music"
-        if command_is_blocked(self.bot.storage_path, interaction.guild.id, command_name):
-            return False, f"`/{command_name}` is blocked in this server."
+        allowed = await ensure_command_allowed(
+            self.bot,
+            interaction,
+            command_name,
+            allow_dm=False,
+        )
+        if not allowed:
+            return False, None
 
-        if not is_bot_channel(self.bot.storage_path, interaction.guild.id, interaction.channel.id):
-            settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
-            bot_channels = settings.get("bot_channels", []) or []
-            if bot_channels:
-                mentions = ", ".join(f"<#{channel_id}>" for channel_id in bot_channels)
-                return False, f"This command can only be used in {mentions}."
-            return False, "This command is not allowed in this channel."
-
+        assert interaction.guild is not None
         config = self.get_music_settings(interaction.guild.id)
         if not config["dj_enabled"]:
             return True, None
@@ -766,71 +763,6 @@ class Music(commands.Cog):
             f"Volume set to `{percent}%` for this voice session. It will reset the next time I join.",
         )
 
-    @app_commands.command(name="musicdj", description="Enable or disable DJ mode.")
-    @app_commands.describe(enabled="Whether DJ mode should be enabled")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.guild_only()
-    async def musicdj(self, interaction: discord.Interaction, enabled: bool) -> None:
-        if interaction.guild is None:
-            await self.bot.embeds.error_interaction(interaction, "Settings Error", "This command can only be used in a server.", ephemeral=True)
-            return
-
-        update_guild_settings(
-            self.bot.storage_path,
-            interaction.guild.id,
-            {"music_dj_enabled": enabled},
-        )
-
-        await self.bot.embeds.success_interaction(
-            interaction,
-            "DJ Mode Updated",
-            f"DJ mode is now {'enabled' if enabled else 'disabled'}.",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="musicdjrole", description="Set the role name used for DJ mode.")
-    @app_commands.describe(role_name="Exact server role name")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.guild_only()
-    async def musicdjrole(self, interaction: discord.Interaction, role_name: str) -> None:
-        if interaction.guild is None:
-            await self.bot.embeds.error_interaction(interaction, "Settings Error", "This command can only be used in a server.", ephemeral=True)
-            return
-
-        update_guild_settings(
-            self.bot.storage_path,
-            interaction.guild.id,
-            {"music_dj_role_name": role_name},
-        )
-
-        await self.bot.embeds.success_interaction(
-            interaction,
-            "DJ Role Updated",
-            f"Music DJ role name set to `{role_name}`.",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="musicdefaultvolume", description="Set the default volume used each time the bot joins voice.")
-    @app_commands.describe(percent="Default volume percentage")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.guild_only()
-    async def musicdefaultvolume(self, interaction: discord.Interaction, percent: app_commands.Range[int, 0, 100]) -> None:
-        if interaction.guild is None:
-            await self.bot.embeds.error_interaction(interaction, "Settings Error", "This command can only be used in a server.", ephemeral=True)
-            return
-
-        update_guild_settings(
-            self.bot.storage_path,
-            interaction.guild.id,
-            {"music_default_volume": int(percent)},
-        )
-
-        await self.bot.embeds.success_interaction(
-            interaction,
-            "Default Volume Updated",
-            f"Default music volume is now `{percent}%` whenever I freshly join a voice channel.",
-            ephemeral=True,
-        )
 
 
 async def setup(bot: commands.Bot) -> None:

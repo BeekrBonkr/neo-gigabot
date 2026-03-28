@@ -12,7 +12,8 @@ import pyfiglet
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel
+from utils.command_policy import ensure_command_allowed
+from utils.settings import get_guild_settings
 
 try:
     import apraw  # type: ignore
@@ -219,34 +220,12 @@ class Fun(commands.Cog):
         interaction: discord.Interaction,
         command_name: str,
     ) -> bool:
-        if interaction.guild is None or interaction.channel is None:
-            return True
-
-        if command_is_blocked(self.bot.storage_path, interaction.guild.id, command_name):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Command Blocked",
-                f"`/{command_name}` is blocked in this server.",
-                ephemeral=True,
-            )
-            return False
-
-        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
-        bot_channels = settings.get("bot_channels", []) or []
-        if bot_channels and not is_bot_channel(
-            self.bot.storage_path,
-            interaction.guild.id,
-            interaction.channel.id,
-        ):
-            await self.bot.embeds.warning_interaction(
-                interaction,
-                "Wrong Channel",
-                "This command can only be used in a configured bot channel.",
-                ephemeral=True,
-            )
-            return False
-
-        return True
+        return await ensure_command_allowed(
+            self.bot,
+            interaction,
+            command_name,
+            allow_dm=True,
+        )
 
     async def _fetch_json(self, url: str) -> dict | list | None:
         timeout = aiohttp.ClientTimeout(total=10)

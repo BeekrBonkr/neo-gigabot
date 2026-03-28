@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import get_guild_settings, sync_all_guild_settings
+from utils.settings import get_guild_settings, reset_guild_settings, sync_all_guild_settings
 
 
 class Owner(
@@ -45,15 +45,31 @@ class Owner(
 
     @app_commands.command(name="reloadall", description="Reload all configured cogs.")
     async def reload_all(self, interaction: discord.Interaction) -> None:
-        results: list[str] = []
-        for extension in self.bot.extensions.copy():
-            await self.bot.reload_extension(extension)
-            results.append(extension)
+        succeeded: list[str] = []
+        failed: list[str] = []
+        for extension in list(self.bot.extensions):
+            try:
+                await self.bot.reload_extension(extension)
+                succeeded.append(extension)
+            except Exception as exc:
+                failed.append(f"`{extension}`: `{type(exc).__name__}: {exc}`")
 
+        fields = [
+            self.bot.embeds.field(
+                "Reloaded",
+                "\n".join(f"- `{name}`" for name in succeeded) or "None",
+                False,
+            ),
+            self.bot.embeds.field(
+                "Failed",
+                "\n".join(failed) or "None",
+                False,
+            ),
+        ]
         await self.bot.embeds.respond(
             interaction,
-            title="Reloaded All Extensions",
-            description="\n".join(f"- `{name}`" for name in results) or "No extensions were loaded.",
+            title="Reload All Complete",
+            fields=fields,
             ephemeral=True,
         )
 
@@ -99,6 +115,27 @@ class Owner(
             ephemeral=True,
         )
 
+    @app_commands.command(name="resyncguild", description="Reset one guild to the current default settings schema.")
+    async def resync_guild(self, interaction: discord.Interaction, guild_id: str) -> None:
+        try:
+            parsed_guild_id = int(guild_id)
+        except ValueError:
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "Invalid Guild ID",
+                "Provide a numeric guild ID.",
+                ephemeral=True,
+            )
+            return
+
+        reset_guild_settings(self.bot.storage_path, parsed_guild_id)
+        await self.bot.embeds.success_interaction(
+            interaction,
+            "Guild Settings Reset",
+            f"Reset settings for guild `{parsed_guild_id}` to the current defaults.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="storage", description="Show storage paths and resync settings schema.")
     async def storage(self, interaction: discord.Interaction) -> None:
         updated = sync_all_guild_settings(self.bot.storage_path)
@@ -110,6 +147,43 @@ class Owner(
         await self.bot.embeds.respond(
             interaction,
             title="Storage Status",
+            fields=fields,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="extensions", description="List loaded extensions.")
+    async def extensions(self, interaction: discord.Interaction) -> None:
+        loaded = sorted(self.bot.extensions)
+        await self.bot.embeds.respond(
+            interaction,
+            title="Loaded Extensions",
+            description="\n".join(f"- `{name}`" for name in loaded) or "No extensions loaded.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="guilds", description="List guilds the bot is currently in.")
+    async def guilds(self, interaction: discord.Interaction) -> None:
+        rows = [f"- `{guild.id}` • **{guild.name}** • `{guild.member_count or 0}` members" for guild in sorted(self.bot.guilds, key=lambda g: g.name.lower())]
+        await self.bot.embeds.respond(
+            interaction,
+            title="Connected Guilds",
+            description="\n".join(rows[:50]) or "The bot is not in any guilds.",
+            footer=f"Showing {min(len(rows), 50)} of {len(rows)} guild(s)",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="health", description="Show simple bot health diagnostics.")
+    async def health(self, interaction: discord.Interaction) -> None:
+        latency_ms = round(self.bot.latency * 1000)
+        fields = [
+            self.bot.embeds.field("Guilds", str(len(self.bot.guilds)), True),
+            self.bot.embeds.field("Users Cached", str(len(self.bot.users)), True),
+            self.bot.embeds.field("Latency", f"`{latency_ms} ms`", True),
+            self.bot.embeds.field("Loaded Extensions", str(len(self.bot.extensions)), True),
+        ]
+        await self.bot.embeds.respond(
+            interaction,
+            title="Bot Health",
             fields=fields,
             ephemeral=True,
         )
