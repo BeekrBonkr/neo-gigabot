@@ -8,3 +8,5 @@ storage/cache/
 storage/temp/
 storage/settings.db
 
+
+storage/logs/

@@ -7,7 +7,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.settings import (
-    ALLOWED_PREFIX_CHARS,
     create_guild_settings,
     get_guild_settings,
     normalize_command_name,
@@ -28,6 +27,29 @@ class Settings(
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         super().__init__()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        guild = interaction.guild
+        if guild is None:
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "Server Only",
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return False
+
+        allowed = interaction.user.id == self.bot.config.owner_id or interaction.user.id == guild.owner_id
+        if allowed:
+            return True
+
+        await self.bot.embeds.error_interaction(
+            interaction,
+            "Owner Only",
+            "Only the server owner or configured bot owner can use `/settings`.",
+            ephemeral=True,
+        )
+        return False
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
@@ -139,11 +161,6 @@ class Settings(
                 f"`{int(data.get('music_default_volume', 50))}%`",
                 True,
             ),
-            self.bot.embeds.field(
-                "Legacy Prefix",
-                f"`{data.get('prefix', '!')}`",
-                True,
-            ),
         ]
 
         await self.bot.embeds.respond(
@@ -253,40 +270,6 @@ class Settings(
             interaction,
             "Nothing To Clear",
             "There are no suggestion channels to unset.",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="prefix", description="Store a legacy text-command prefix for this server.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.guild_only()
-    async def prefix(self, interaction: discord.Interaction, new_prefix: str) -> None:
-        guild = interaction.guild
-        if guild is None:
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Server Only",
-                "This command can only be used in a server.",
-                ephemeral=True,
-            )
-            return
-
-        if not new_prefix or not all(character in ALLOWED_PREFIX_CHARS for character in new_prefix):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Invalid Prefix",
-                f"Only the following characters are allowed: `{ALLOWED_PREFIX_CHARS}`",
-                ephemeral=True,
-            )
-            return
-
-        update_guild_settings(self.bot.storage_path, guild.id, {"prefix": new_prefix})
-        await self.bot.embeds.success_interaction(
-            interaction,
-            "Prefix Updated",
-            (
-                f"Stored legacy prefix updated to `{new_prefix}`. "
-                "The bot itself uses slash commands."
-            ),
             ephemeral=True,
         )
 

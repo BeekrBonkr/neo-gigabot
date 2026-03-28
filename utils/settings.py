@@ -9,7 +9,6 @@ from typing import Any, Iterable
 import yaml
 
 DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
-    "prefix": "!",
     "suggestion_channel_ids": [],
     "bot_channels": [],
     "blocked_commands": [],
@@ -26,8 +25,6 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "music_dj_role_name": "dj",
     "music_default_volume": 50,
 }
-
-ALLOWED_PREFIX_CHARS = "!$%&*.<>"
 
 
 def _default_settings_path(storage_path: Path) -> Path:
@@ -264,11 +261,6 @@ def normalize_id_list(values: Iterable[int | str]) -> list[int]:
 
 def normalize_command_name(value: str) -> str:
     return value.strip().lower().lstrip("/!")
-
-
-def get_guild_prefix(storage_path: Path, guild_id: int | str, fallback: str = "!") -> str:
-    settings = get_guild_settings(storage_path, guild_id)
-    return str(settings.get("prefix", fallback))
 
 
 def command_is_blocked(

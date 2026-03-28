@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import command_is_blocked, is_bot_channel
+from utils.command_policy import ensure_command_allowed
 
 
 class Moderation(commands.Cog):
@@ -20,34 +20,12 @@ class Moderation(commands.Cog):
         interaction: discord.Interaction,
         command_name: str,
     ) -> bool:
-        if interaction.guild is None or interaction.channel is None:
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Server Only",
-                "This command can only be used in a server.",
-                ephemeral=True,
-            )
-            return False
-
-        if command_is_blocked(self.bot.storage_path, interaction.guild.id, command_name):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Command Blocked",
-                f"`/{command_name}` is blocked in this server.",
-                ephemeral=True,
-            )
-            return False
-
-        if not is_bot_channel(self.bot.storage_path, interaction.guild.id, interaction.channel.id):
-            await self.bot.embeds.warning_interaction(
-                interaction,
-                "Wrong Channel",
-                "This command can only be used in a configured bot channel.",
-                ephemeral=True,
-            )
-            return False
-
-        return True
+        return await ensure_command_allowed(
+            self.bot,
+            interaction,
+            command_name,
+            allow_dm=False,
+        )
 
     @app_commands.command(name="say", description="Send an embed containing your message.")
     @app_commands.checks.has_permissions(manage_messages=True)
