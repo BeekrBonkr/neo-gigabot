@@ -18,6 +18,7 @@ COGS = [
     "cogs.moderation",
     "cogs.music",
     "cogs.settings",
+    "cogs.help",
     "cogs.owner",
 ]
 
