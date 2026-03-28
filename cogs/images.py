@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import math
 import random
+import re
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -15,12 +17,38 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel
 
 
+SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+SOURCE_TTL_SECONDS = 60 * 15
+MESSAGE_LINK_RE = re.compile(
+    r"^https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/"
+    r"(?P<guild_id>@me|\d+)/(?P<channel_id>\d+)/(?P<message_id>\d+)$"
+)
+
+
 class Images(commands.Cog):
-    """Slash-command image manipulation and meme commands."""
+    """Slash-command image manipulation and quote commands."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.assets_dir = self.bot.project_root / "assets" / "images"
+        self._selected_sources: dict[int, dict[str, int | float]] = {}
+
+        self.set_image_source_menu = app_commands.ContextMenu(
+            name="Set Image Source",
+            callback=self.set_image_source_context,
+        )
+        self.clear_image_source_menu = app_commands.ContextMenu(
+            name="Clear Image Source",
+            callback=self.clear_image_source_context,
+        )
+
+    async def cog_load(self) -> None:
+        self.bot.tree.add_command(self.set_image_source_menu)
+        self.bot.tree.add_command(self.clear_image_source_menu)
+
+    async def cog_unload(self) -> None:
+        self.bot.tree.remove_command(self.set_image_source_menu.name, type=self.set_image_source_menu.type)
+        self.bot.tree.remove_command(self.clear_image_source_menu.name, type=self.clear_image_source_menu.type)
 
     # ---------- access / validation helpers ----------
 
@@ -82,7 +110,44 @@ class Images(commands.Cog):
         else:
             await self.bot.embeds.error_interaction(interaction, title, description, ephemeral=True)
 
-    # ---------- image source helpers ----------
+    async def _send_success(self, interaction: discord.Interaction, title: str, description: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=self.bot.embeds.success_embed(title, description), ephemeral=True)
+        else:
+            await self.bot.embeds.success_interaction(interaction, title, description, ephemeral=True)
+
+    # ---------- source selection helpers ----------
+
+    def _prune_sources(self) -> None:
+        now = time.time()
+        stale = [user_id for user_id, data in self._selected_sources.items() if now - float(data["timestamp"]) > SOURCE_TTL_SECONDS]
+        for user_id in stale:
+            self._selected_sources.pop(user_id, None)
+
+    def _remember_source(self, user_id: int, channel_id: int, message_id: int) -> None:
+        self._selected_sources[user_id] = {
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "timestamp": time.time(),
+        }
+
+    def _clear_source(self, user_id: int) -> bool:
+        return self._selected_sources.pop(user_id, None) is not None
+
+    def _supported_attachment(self, attachment: discord.Attachment) -> bool:
+        content_type = attachment.content_type or ""
+        name = attachment.filename.lower()
+        return content_type.startswith("image/") or name.endswith(SUPPORTED_EXTENSIONS)
+
+    def _message_has_image(self, message: discord.Message) -> bool:
+        if any(self._supported_attachment(attachment) for attachment in message.attachments):
+            return True
+
+        for embed in message.embeds:
+            if (embed.image and embed.image.url) or (embed.thumbnail and embed.thumbnail.url):
+                return True
+
+        return False
 
     async def _fetch_bytes_from_url(self, url: str) -> bytes:
         timeout = aiohttp.ClientTimeout(total=20)
@@ -91,42 +156,201 @@ class Images(commands.Cog):
                 response.raise_for_status()
                 return await response.read()
 
-    async def _history_image_url(self, interaction: discord.Interaction) -> tuple[str | None, str | None]:
+    def _parse_message_link(self, message_link: str) -> tuple[str, int, int]:
+        match = MESSAGE_LINK_RE.match(message_link.strip())
+        if not match:
+            raise ValueError("That is not a valid Discord message link.")
+
+        guild_id = match.group("guild_id")
+        channel_id = int(match.group("channel_id"))
+        message_id = int(match.group("message_id"))
+        return guild_id, channel_id, message_id
+
+    async def _get_channel_for_link(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        channel_id: int,
+    ) -> discord.abc.Messageable:
+        channel = None
+
+        if guild_id == "@me":
+            channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    raise ValueError("I could not access that DM channel.")
+            return channel
+
+        guild_id_int = int(guild_id)
+        guild = interaction.guild if interaction.guild and interaction.guild.id == guild_id_int else self.bot.get_guild(guild_id_int)
+        if guild is None:
+            try:
+                guild = await self.bot.fetch_guild(guild_id_int)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                raise ValueError("I am not in that server or I cannot access it.")
+
+        channel = guild.get_channel(channel_id) or guild.get_thread(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                raise ValueError("I could not access the channel from that message link.")
+
+        return channel
+
+    async def _fetch_message_from_link(
+        self,
+        interaction: discord.Interaction,
+        message_link: str,
+    ) -> discord.Message:
+        guild_id, channel_id, message_id = self._parse_message_link(message_link)
+        channel = await self._get_channel_for_link(interaction, guild_id, channel_id)
+
+        if not hasattr(channel, "fetch_message"):
+            raise ValueError("That message link does not point to a fetchable text channel.")
+
+        try:
+            return await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            raise ValueError("I could not fetch that message. Make sure the link is valid and I can view that channel.")
+
+    async def _extract_image_from_message(self, message: discord.Message) -> tuple[bytes, str]:
+        for attachment in message.attachments:
+            if self._supported_attachment(attachment):
+                return await attachment.read(), attachment.filename
+
+        for embed in message.embeds:
+            if embed.image and embed.image.url:
+                return await self._fetch_bytes_from_url(embed.image.url), "embedded_image.png"
+            if embed.thumbnail and embed.thumbnail.url:
+                return await self._fetch_bytes_from_url(embed.thumbnail.url), "embedded_thumbnail.png"
+
+        raise ValueError("That message does not contain a supported image.")
+
+    async def _selected_message_image(self, interaction: discord.Interaction) -> tuple[bytes, str] | None:
+        self._prune_sources()
+        source = self._selected_sources.get(interaction.user.id)
+        if not source:
+            return None
+
+        channel_id = int(source["channel_id"])
+        message_id = int(source["message_id"])
+
+        if interaction.guild is not None:
+            channel = interaction.guild.get_channel(channel_id) or interaction.guild.get_thread(channel_id)
+        else:
+            channel = self.bot.get_channel(channel_id)
+
+        if channel is None or not hasattr(channel, "fetch_message"):
+            self._selected_sources.pop(interaction.user.id, None)
+            return None
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            self._selected_sources.pop(interaction.user.id, None)
+            return None
+
+        return await self._extract_image_from_message(message)
+
+    async def _history_image(self, interaction: discord.Interaction) -> tuple[bytes, str]:
         channel = interaction.channel
         if channel is None or not hasattr(channel, "history"):
-            return None, None
+            raise ValueError("I could not inspect recent messages in this channel.")
 
         async for message in channel.history(limit=50):
-            for attachment in message.attachments:
-                content_type = attachment.content_type or ""
-                name = attachment.filename.lower()
-                if content_type.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")):
-                    return attachment.url, attachment.filename
+            if not self._message_has_image(message):
+                continue
+            return await self._extract_image_from_message(message)
 
-            for embed in message.embeds:
-                if embed.image and embed.image.url:
-                    return embed.image.url, "embedded_image"
-                if embed.thumbnail and embed.thumbnail.url:
-                    return embed.thumbnail.url, "embedded_thumbnail"
-
-        return None, None
+        raise ValueError("No recent image was found in the last 50 messages.")
 
     async def _get_source_image(
         self,
         interaction: discord.Interaction,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
     ) -> tuple[bytes, str]:
         if attachment is not None:
-            content_type = attachment.content_type or ""
-            name = attachment.filename.lower()
-            if not (content_type.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))):
+            if not self._supported_attachment(attachment):
                 raise ValueError("That attachment is not a supported image.")
             return await attachment.read(), attachment.filename
 
-        url, filename = await self._history_image_url(interaction)
-        if not url:
-            raise ValueError("No recent image was found in the last 50 messages.")
-        return await self._fetch_bytes_from_url(url), filename or "image"
+        if message_link:
+            message = await self._fetch_message_from_link(interaction, message_link)
+            return await self._extract_image_from_message(message)
+
+        selected = await self._selected_message_image(interaction)
+        if selected is not None:
+            return selected
+
+        return await self._history_image(interaction)
+
+    # ---------- image context menu commands ----------
+
+    async def set_image_source_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        if not await self._ensure_image_command_allowed(interaction, "imageinfo"):
+            return
+
+        if not self._message_has_image(message):
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "No Image Found",
+                "That message does not contain an image attachment or embedded image.",
+                ephemeral=True,
+            )
+            return
+
+        self._remember_source(interaction.user.id, message.channel.id, message.id)
+        await self._send_success(
+            interaction,
+            "Image Source Set",
+            "That message is now your temporary image source for image commands.\n\n"
+            "Priority order is: attachment, message link, selected message, then most recent image in the channel.",
+        )
+
+    async def clear_image_source_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        if not await self._ensure_image_command_allowed(interaction, "imageinfo"):
+            return
+
+        cleared = self._clear_source(interaction.user.id)
+        if cleared:
+            await self._send_success(
+                interaction,
+                "Image Source Cleared",
+                "Your temporary image source has been cleared.",
+            )
+        else:
+            await self.bot.embeds.warning_interaction(
+                interaction,
+                "Nothing To Clear",
+                "You do not currently have a temporary image source selected.",
+                ephemeral=True,
+            )
+
+    @app_commands.command(name="clearimagesource", description="Clear your selected image source.")
+    async def clear_image_source(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_image_command_allowed(interaction, "imageinfo"):
+            return
+
+        cleared = self._clear_source(interaction.user.id)
+        if cleared:
+            await self._send_success(
+                interaction,
+                "Image Source Cleared",
+                "Your temporary image source has been cleared.",
+            )
+        else:
+            await self.bot.embeds.warning_interaction(
+                interaction,
+                "Nothing To Clear",
+                "You do not currently have a temporary image source selected.",
+                ephemeral=True,
+            )
+
+    # ---------- image format helpers ----------
 
     def _is_gif(self, image: Image.Image, filename: str | None = None) -> bool:
         fmt = (image.format or "").upper()
@@ -134,7 +358,7 @@ class Images(commands.Cog):
             return True
         if filename and filename.lower().endswith(".gif"):
             return True
-        return getattr(image, "is_animated", False)
+        return bool(getattr(image, "is_animated", False))
 
     def _gif_save_kwargs(self, image: Image.Image) -> dict:
         return {
@@ -150,6 +374,7 @@ class Images(commands.Cog):
         candidates = [
             str(self.bot.project_root / "assets" / "fonts" / "Impact.ttf"),
             str(self.bot.project_root / "assets" / "fonts" / "impact.ttf"),
+            str(self.bot.project_root / "assets" / "fonts" / "arial.ttf"),
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         ]
@@ -160,6 +385,32 @@ class Images(commands.Cog):
                 except OSError:
                     pass
         return ImageFont.load_default()
+
+    def _wrap_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        max_width: int,
+    ) -> list[str]:
+        lines: list[str] = []
+        for paragraph in text.splitlines() or [text]:
+            words = paragraph.split()
+            if not words:
+                lines.append("")
+                continue
+
+            current = words[0]
+            for word in words[1:]:
+                test = f"{current} {word}"
+                bbox = draw.textbbox((0, 0), test, font=font, stroke_width=3)
+                if bbox[2] - bbox[0] <= max_width:
+                    current = test
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+        return lines
 
     def _draw_meme_text(
         self,
@@ -174,16 +425,23 @@ class Images(commands.Cog):
 
         font_size = max(12, requested_size)
         font = self._get_font(font_size)
+        wrapped = self._wrap_text(draw, text, font, working.width - 20)
 
-        def measure(fnt: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> tuple[int, int]:
-            bbox = draw.textbbox((0, 0), text, font=fnt, stroke_width=3)
-            return bbox[2] - bbox[0], bbox[3] - bbox[1]
+        def measure(lines: list[str], fnt: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> tuple[int, int]:
+            widths = []
+            total_height = 0
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line, font=fnt, stroke_width=3)
+                widths.append(bbox[2] - bbox[0])
+                total_height += bbox[3] - bbox[1] + 6
+            return (max(widths) if widths else 0), max(0, total_height - 6)
 
-        text_width, text_height = measure(font)
-        while text_width > working.width - 20 and font_size > 12:
+        text_width, text_height = measure(wrapped, font)
+        while (text_width > working.width - 20 or text_height > working.height - 20) and font_size > 12:
             font_size -= 2
             font = self._get_font(font_size)
-            text_width, text_height = measure(font)
+            wrapped = self._wrap_text(draw, text, font, working.width - 20)
+            text_width, text_height = measure(wrapped, font)
 
         x = (working.width - text_width) // 2
         if position == "top":
@@ -193,14 +451,20 @@ class Images(commands.Cog):
         else:
             y = (working.height - text_height) // 2
 
-        draw.text(
-            (x, y),
-            text,
-            font=font,
-            fill=(255, 255, 255, 255),
-            stroke_width=3,
-            stroke_fill=(0, 0, 0, 255),
-        )
+        for line in wrapped:
+            bbox = draw.textbbox((0, 0), line, font=font, stroke_width=3)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3] - bbox[1]
+            line_x = (working.width - line_width) // 2
+            draw.text(
+                (line_x, y),
+                line,
+                font=font,
+                fill=(255, 255, 255, 255),
+                stroke_width=3,
+                stroke_fill=(0, 0, 0, 255),
+            )
+            y += line_height + 6
         return working
 
     # ---------- generic image processing helpers ----------
@@ -339,7 +603,7 @@ class Images(commands.Cog):
                 return output.getvalue(), "converted.gif"
 
             converted = image.convert("RGB") if target_format in {"jpg", "jpeg", "bmp"} else image.convert("RGBA")
-            converted.save(output, format="JPEG" if target_format == "jpg" else target_format.upper())
+            converted.save(output, format="JPEG" if target_format in {"jpg", "jpeg"} else target_format.upper())
             ext = "jpg" if target_format == "jpeg" else target_format
             return output.getvalue(), f"converted.{ext}"
 
@@ -355,13 +619,82 @@ class Images(commands.Cog):
             ext = (image.format or "PNG").lower()
             return output.getvalue(), f"extracted.{ext}"
 
-    # ---------- overlay / append helpers ----------
+    # ---------- quote helpers ----------
 
     def _asset_path(self, filename: str) -> Path:
         path = self.assets_dir / filename
         if not path.exists():
             raise FileNotFoundError(f"Missing asset: {filename}. Put the legacy overlay PNGs in `assets/images/`.")
         return path
+
+    async def _build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
+        content = (message.content or "").strip()
+        if not content:
+            raise ValueError("That message does not have any text to quote.")
+
+        avatar = message.author.display_avatar.replace(size=512)
+        avatar_bytes = await avatar.read()
+
+        with Image.open(io.BytesIO(avatar_bytes)) as avatar_image:
+            profile_pic = avatar_image.convert("RGBA").resize((400, 400), Image.LANCZOS)
+
+        vig = None
+        vig_path = self.assets_dir / "vig.png"
+        if vig_path.exists():
+            with Image.open(vig_path) as vig_image:
+                vig = vig_image.convert("RGBA").resize((400, 400), Image.LANCZOS)
+
+        if vig is not None:
+            img = Image.alpha_composite(profile_pic, vig)
+        else:
+            img = profile_pic
+
+        img = img.convert("RGB").filter(ImageFilter.GaussianBlur(radius=5)).convert("RGBA")
+
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 110))
+        img = Image.alpha_composite(img, overlay)
+
+        draw = ImageDraw.Draw(img)
+        font = self._get_font(23)
+        text = f'"{content}"\n\n- {message.author.display_name}'
+        max_width = int(img.width * 0.9)
+        lines = self._wrap_text(draw, text, font, max_width)
+
+        while len(lines) > 11:
+            shorter = content[: max(20, len(content) - 10)].rstrip() + "..."
+            text = f'"{shorter}"\n\n- {message.author.display_name}'
+            lines = self._wrap_text(draw, text, font, max_width)
+
+        line_metrics = []
+        total_height = 0
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3] - bbox[1]
+            line_metrics.append((line, line_width, line_height))
+            total_height += line_height + 6
+        total_height = max(0, total_height - 6)
+
+        y_text = img.height // 2 - total_height // 2
+        shadow_offset = 2
+
+        for line, line_width, line_height in line_metrics:
+            x_text = img.width // 2 - line_width // 2
+            for shadow_x, shadow_y in [
+                (x_text - shadow_offset, y_text - shadow_offset),
+                (x_text + shadow_offset, y_text + shadow_offset),
+                (x_text + shadow_offset, y_text - shadow_offset),
+                (x_text - shadow_offset, y_text + shadow_offset),
+            ]:
+                draw.text((shadow_x, shadow_y), line, font=font, fill=(0, 0, 0, 255))
+            draw.text((x_text, y_text), line, font=font, fill=(255, 255, 255, 255))
+            y_text += line_height + 6
+
+        output = io.BytesIO()
+        img.save(output, "PNG")
+        return output.getvalue(), "quote.png"
+
+    # ---------- overlay / append helpers ----------
 
     def _overlay_bytes(
         self,
@@ -476,19 +809,50 @@ class Images(commands.Cog):
             self.bot.embeds.field("Formats", "`/jpegify` `/convert` `/extract`"),
             self.bot.embeds.field("Meme Text", "`/toptext` `/middletext` `/bottomtext`"),
             self.bot.embeds.field("Template Overlays", "`/chimp` `/cooked` `/doom` `/craftify` `/halflife` `/murica` `/point` `/northkorea`"),
-            self.bot.embeds.field("Other", "`/deepfry` `/pfp`"),
+            self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
+            self.bot.embeds.field("Quote", "`/quote <message_link>` only uses a Discord message link."),
+            self.bot.embeds.field("Other", "`/deepfry` `/pfp` `/clearimagesource`"),
         ]
         await self.bot.embeds.respond(interaction, title="Image Commands", fields=fields)
 
-    @app_commands.command(name="extract", description="Re-upload the most recent image or GIF.")
-    @app_commands.describe(attachment="Optional image attachment. Leave empty to use the most recent image in chat.")
+    @app_commands.command(name="quote", description="Create a quote image from a Discord message link.")
+    @app_commands.describe(message_link="Paste a Discord message link.")
     @app_commands.checks.cooldown(1, 5.0)
-    async def extract(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def quote(self, interaction: discord.Interaction, message_link: str) -> None:
+        if not await self._ensure_image_command_allowed(interaction, "quote"):
+            return
+
+        try:
+            message = await self._fetch_message_from_link(interaction, message_link)
+            await self._defer(interaction)
+            data, filename = await self._build_quote_image(message)
+            await self._send_processed_file(
+                interaction,
+                data=data,
+                filename=filename,
+                title="Quote",
+                description=f"Quoted message from {message.author.mention}.",
+            )
+        except Exception as exc:
+            await self._send_error(interaction, "Quote Failed", str(exc))
+
+    @app_commands.command(name="extract", description="Re-upload the selected image or GIF.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
+    @app_commands.checks.cooldown(1, 5.0)
+    async def extract(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "extract"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._extract_bytes(image_bytes, filename)
             await self._defer(interaction)
             await self._send_processed_file(interaction, data=output, filename=out_name, title="Extracted Image")
@@ -496,19 +860,24 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Extract Failed", str(exc))
 
     @app_commands.command(name="jpegify", description="Crush image quality into cursed JPEG mush.")
-    @app_commands.describe(attachment="Optional image attachment.", quality="JPEG quality from 1 to 30.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        quality="JPEG quality from 1 to 30.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
     async def jpegify(
         self,
         interaction: discord.Interaction,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         quality: app_commands.Range[int, 1, 30] = 1,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "jpegify"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -523,19 +892,24 @@ class Images(commands.Cog):
             await self._send_error(interaction, "JPEGify Failed", str(exc))
 
     @app_commands.command(name="rotate", description="Rotate an image or GIF.")
-    @app_commands.describe(angle="Rotation angle in degrees.", attachment="Optional image attachment.")
+    @app_commands.describe(
+        angle="Rotation angle in degrees.",
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
     async def rotate(
         self,
         interaction: discord.Interaction,
         angle: float,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "rotate"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -550,14 +924,22 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Rotate Failed", str(exc))
 
     @app_commands.command(name="stretch", description="Double an image's width.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
-    async def stretch(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def stretch(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "stretch"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -572,14 +954,22 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Stretch Failed", str(exc))
 
     @app_commands.command(name="pull", description="Double an image's height.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
-    async def pull(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def pull(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "pull"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -594,14 +984,22 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Pull Failed", str(exc))
 
     @app_commands.command(name="squeeze", description="Halve an image's width.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
-    async def squeeze(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def squeeze(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "squeeze"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -616,14 +1014,22 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Squeeze Failed", str(exc))
 
     @app_commands.command(name="squash", description="Halve an image's height.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
-    async def squash(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def squash(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "squash"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -638,19 +1044,24 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Squash Failed", str(exc))
 
     @app_commands.command(name="swirl", description="Apply a swirl effect to an image or GIF.")
-    @app_commands.describe(attachment="Optional image attachment.", degrees="How strong the swirl should be.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        degrees="How strong the swirl should be.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
     async def swirl(
         self,
         interaction: discord.Interaction,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         degrees: app_commands.Range[int, 45, 720] = 180,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "swirl"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -665,19 +1076,24 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Swirl Failed", str(exc))
 
     @app_commands.command(name="shake", description="Turn an image into a shaky GIF.")
-    @app_commands.describe(attachment="Optional image attachment.", speed="Frame duration in milliseconds.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        speed="Frame duration in milliseconds.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
     async def shake(
         self,
         interaction: discord.Interaction,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         speed: app_commands.Range[int, 10, 250] = 50,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "shake"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._shake_bytes(image_bytes, filename, speed)
             await self._defer(interaction)
             await self._send_processed_file(interaction, data=output, filename=out_name, title="Shaken")
@@ -686,8 +1102,9 @@ class Images(commands.Cog):
 
     @app_commands.command(name="convert", description="Convert an image into another format.")
     @app_commands.describe(
-        attachment="Optional image attachment.",
         format="Target format: png, jpg, jpeg, bmp, gif, or webp.",
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
     )
     @app_commands.checks.cooldown(1, 3.0)
     async def convert(
@@ -695,12 +1112,13 @@ class Images(commands.Cog):
         interaction: discord.Interaction,
         format: str,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "convert"):
             return
 
         try:
-            image_bytes, _ = await self._get_source_image(interaction, attachment)
+            image_bytes, _ = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._convert_bytes(image_bytes, format)
             await self._defer(interaction)
             await self._send_processed_file(
@@ -714,19 +1132,24 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Convert Failed", str(exc))
 
     @app_commands.command(name="deepfry", description="Deepfry an image or GIF.")
-    @app_commands.describe(attachment="Optional image attachment.", sharpen_passes="How aggressive the deepfry should be.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        sharpen_passes="How aggressive the deepfry should be.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
     async def deepfry(
         self,
         interaction: discord.Interaction,
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         sharpen_passes: app_commands.Range[int, 1, 20] = 12,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "deepfry"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -741,40 +1164,58 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Deepfry Failed", str(exc))
 
     @app_commands.command(name="toptext", description="Add meme text to the top of an image or GIF.")
-    @app_commands.describe(text="The text to place.", attachment="Optional image attachment.", size="Requested font size.")
+    @app_commands.describe(
+        text="The text to place.",
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        size="Requested font size.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
     async def toptext(
         self,
         interaction: discord.Interaction,
         text: app_commands.Range[str, 1, 250],
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         size: app_commands.Range[int, 12, 120] = 50,
     ) -> None:
-        await self._text_command(interaction, "toptext", text, "top", attachment, size)
+        await self._text_command(interaction, "toptext", text, "top", attachment, message_link, size)
 
     @app_commands.command(name="middletext", description="Add meme text to the middle of an image or GIF.")
-    @app_commands.describe(text="The text to place.", attachment="Optional image attachment.", size="Requested font size.")
+    @app_commands.describe(
+        text="The text to place.",
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        size="Requested font size.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
     async def middletext(
         self,
         interaction: discord.Interaction,
         text: app_commands.Range[str, 1, 250],
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         size: app_commands.Range[int, 12, 120] = 50,
     ) -> None:
-        await self._text_command(interaction, "middletext", text, "middle", attachment, size)
+        await self._text_command(interaction, "middletext", text, "middle", attachment, message_link, size)
 
     @app_commands.command(name="bottomtext", description="Add meme text to the bottom of an image or GIF.")
-    @app_commands.describe(text="The text to place.", attachment="Optional image attachment.", size="Requested font size.")
+    @app_commands.describe(
+        text="The text to place.",
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+        size="Requested font size.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
     async def bottomtext(
         self,
         interaction: discord.Interaction,
         text: app_commands.Range[str, 1, 250],
         attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
         size: app_commands.Range[int, 12, 120] = 50,
     ) -> None:
-        await self._text_command(interaction, "bottomtext", text, "bottom", attachment, size)
+        await self._text_command(interaction, "bottomtext", text, "bottom", attachment, message_link, size)
 
     async def _text_command(
         self,
@@ -783,13 +1224,14 @@ class Images(commands.Cog):
         text: str,
         position: str,
         attachment: discord.Attachment | None,
+        message_link: str | None,
         size: int,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, command_name):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -804,14 +1246,22 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Text Failed", str(exc))
 
     @app_commands.command(name="flip", description="Flip an image vertically.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def flip(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def flip(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "flip"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -826,14 +1276,22 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Flip Failed", str(exc))
 
     @app_commands.command(name="flop", description="Flip an image horizontally.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def flop(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
+    async def flop(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
         if not await self._ensure_image_command_allowed(interaction, "flop"):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._process_image_bytes(
                 image_bytes,
                 filename,
@@ -867,16 +1325,32 @@ class Images(commands.Cog):
             await self._send_error(interaction, "Avatar Failed", str(exc))
 
     @app_commands.command(name="chimp", description="Append the chimp panel to the bottom of an image.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
-    async def chimp(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._append_template_command(interaction, "chimp", "chimp.png", attachment)
+    async def chimp(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._append_template_command(interaction, "chimp", "chimp.png", attachment, message_link)
 
     @app_commands.command(name="cooked", description="Append the cooked panel to the bottom of an image.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 3.0)
-    async def cooked(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._append_template_command(interaction, "cooked", "cooked.png", attachment)
+    async def cooked(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._append_template_command(interaction, "cooked", "cooked.png", attachment, message_link)
 
     async def _append_template_command(
         self,
@@ -884,12 +1358,13 @@ class Images(commands.Cog):
         command_name: str,
         asset_name: str,
         attachment: discord.Attachment | None,
+        message_link: str | None,
     ) -> None:
         if not await self._ensure_image_command_allowed(interaction, command_name):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._append_bytes(image_bytes, filename, self._asset_path(asset_name), placement="bottom")
             await self._defer(interaction)
             await self._send_processed_file(interaction, data=output, filename=out_name, title=command_name.title())
@@ -897,40 +1372,88 @@ class Images(commands.Cog):
             await self._send_error(interaction, f"{command_name.title()} Failed", str(exc))
 
     @app_commands.command(name="doom", description="Overlay the classic doom UI.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def doom(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._overlay_template_command(interaction, "doom", "doomui.png", attachment, placement="bottom", strategy="fit")
+    async def doom(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._overlay_template_command(interaction, "doom", "doomui.png", attachment, message_link, placement="bottom", strategy="fit")
 
     @app_commands.command(name="craftify", description="Overlay the crafty template.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def craftify(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._overlay_template_command(interaction, "craftify", "crafty.png", attachment, placement="bottom", strategy="fit")
+    async def craftify(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._overlay_template_command(interaction, "craftify", "crafty.png", attachment, message_link, placement="bottom", strategy="fit")
 
     @app_commands.command(name="halflife", description="Overlay the Half-Life HUD template.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def halflife(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._overlay_template_command(interaction, "halflife", "hl2.png", attachment, placement="bottom", strategy="fit")
+    async def halflife(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._overlay_template_command(interaction, "halflife", "hl2.png", attachment, message_link, placement="bottom", strategy="fit")
 
     @app_commands.command(name="murica", description="Stretch the patriotic overlay across the image.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def murica(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._overlay_template_command(interaction, "murica", "murica.png", attachment, placement="center", strategy="stretch")
+    async def murica(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._overlay_template_command(interaction, "murica", "murica.png", attachment, message_link, placement="center", strategy="stretch")
 
     @app_commands.command(name="point", description="Overlay the soyjak pointing template.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def point(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._overlay_template_command(interaction, "point", "point.png", attachment, placement="center", strategy="stretch")
+    async def point(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._overlay_template_command(interaction, "point", "point.png", attachment, message_link, placement="center", strategy="stretch")
 
     @app_commands.command(name="northkorea", description="Overlay the authoritarian template.")
-    @app_commands.describe(attachment="Optional image attachment.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
     @app_commands.checks.cooldown(1, 5.0)
-    async def northkorea(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None) -> None:
-        await self._overlay_template_command(interaction, "northkorea", "nk.png", attachment, placement="center", strategy="stretch")
+    async def northkorea(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._overlay_template_command(interaction, "northkorea", "nk.png", attachment, message_link, placement="center", strategy="stretch")
 
     async def _overlay_template_command(
         self,
@@ -938,6 +1461,7 @@ class Images(commands.Cog):
         command_name: str,
         asset_name: str,
         attachment: discord.Attachment | None,
+        message_link: str | None,
         *,
         placement: str,
         strategy: str,
@@ -946,7 +1470,7 @@ class Images(commands.Cog):
             return
 
         try:
-            image_bytes, filename = await self._get_source_image(interaction, attachment)
+            image_bytes, filename = await self._get_source_image(interaction, attachment, message_link)
             output, out_name = self._overlay_bytes(
                 image_bytes,
                 filename,
@@ -961,6 +1485,8 @@ class Images(commands.Cog):
             await self._send_error(interaction, f"{command_name.title()} Failed", str(exc))
 
     @imageinfo.error
+    @quote.error
+    @clear_image_source.error
     @extract.error
     @jpegify.error
     @rotate.error
