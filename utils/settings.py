@@ -263,4 +263,9 @@ def command_is_blocked(storage_path: Path, guild_id: int | str, command_name: st
 def is_bot_channel(storage_path: Path, guild_id: int | str, channel_id: int) -> bool:
     settings = get_guild_settings(storage_path, guild_id)
     bot_channels = settings.get("bot_channels", []) or []
-    return channel_id in bot_channels
+
+    if not bot_channels:
+        return True
+
+    normalized_bot_channels = {int(value) for value in bot_channels}
+    return int(channel_id) in normalized_bot_channels
