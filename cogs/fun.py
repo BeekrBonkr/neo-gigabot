@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import random
 from dataclasses import dataclass
 from typing import Final
@@ -82,13 +83,15 @@ MEME_SUBREDDITS: Final[list[str]] = [
 ]
 
 REDDIT_ICON_URL: Final[str] = "https://www.redditinc.com/assets/images/site/reddit-logo.png"
+HTTP_USER_AGENT: Final[str] = "neo-gigabot/1.0"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class RedditCredentials:
     client_id: str = ""
     client_secret: str = ""
-    user_agent: str = "neo-gigabot/1.0"
+    user_agent: str = HTTP_USER_AGENT
     username: str = ""
     password: str = ""
 
@@ -250,7 +253,7 @@ class Fun(commands.Cog):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
                 url,
-                headers={"User-Agent": "neo-gigabot/1.0"},
+                headers={"User-Agent": HTTP_USER_AGENT},
             ) as response:
                 if response.status != 200:
                     return None
@@ -261,7 +264,7 @@ class Fun(commands.Cog):
         return RedditCredentials(
             client_id=getattr(config, "reddit_client_id", ""),
             client_secret=getattr(config, "reddit_client_secret", ""),
-            user_agent=getattr(config, "reddit_user_agent", "neo-gigabot/1.0"),
+            user_agent=getattr(config, "reddit_user_agent", HTTP_USER_AGENT),
             username=getattr(config, "reddit_username", ""),
             password=getattr(config, "reddit_password", ""),
         )
@@ -305,7 +308,7 @@ class Fun(commands.Cog):
 
             return random.choice(submissions)
         except Exception as exc:
-            print(f"Reddit fetch failed for r/{subreddit_name}: {exc}")
+            LOGGER.warning("Reddit fetch failed for r/%s: %s", subreddit_name, exc)
             raise
 
     async def _send_reddit_submission(
@@ -324,6 +327,8 @@ class Fun(commands.Cog):
             pass
 
         description = submission.selftext if getattr(submission, "is_self", False) else ""
+        if description and len(description) > 3500:
+            description = description[:3497].rstrip() + "..."
         embed = self.bot.embeds.create(
             title=submission.title,
             description=description or None,
