@@ -17,12 +17,11 @@ REQUIRED_DIRS = [
 ]
 
 
-def ensure_storage_layout(storage_path: Path) -> None:
+def ensure_storage_layout(storage_path: Path) -> int:
     storage_path.mkdir(parents=True, exist_ok=True)
-
     for name in REQUIRED_DIRS:
         (storage_path / name).mkdir(parents=True, exist_ok=True)
 
     ensure_default_settings_file(storage_path)
     ensure_settings_database(storage_path)
-    sync_all_guild_settings(storage_path)
+    return sync_all_guild_settings(storage_path)
