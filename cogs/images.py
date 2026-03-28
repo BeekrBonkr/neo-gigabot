@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import math
 import random
 import re
@@ -17,7 +18,10 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from utils.settings import command_is_blocked, is_bot_channel
 
 
+LOGGER = logging.getLogger(__name__)
+
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+HTTP_USER_AGENT = "neo-gigabot/1.0"
 SOURCE_TTL_SECONDS = 60 * 15
 MESSAGE_LINK_RE = re.compile(
     r"^https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/"
@@ -150,7 +154,7 @@ class Images(commands.Cog):
     async def _fetch_bytes_from_url(self, url: str) -> bytes:
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers={"User-Agent": "neo-gigabot/1.0"}) as response:
+            async with session.get(url, headers={"User-Agent": HTTP_USER_AGENT}) as response:
                 response.raise_for_status()
                 return await response.read()
 
@@ -627,6 +631,8 @@ class Images(commands.Cog):
 
     async def _build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
         content = (message.content or "").strip()
+        if len(content) > 600:
+            content = content[:597].rstrip() + "..."
         if not content:
             raise ValueError("That message does not have any text to quote.")
 
