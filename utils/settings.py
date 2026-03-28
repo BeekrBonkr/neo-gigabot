@@ -22,6 +22,9 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "leave_message": "{mention} has left the server.",
     "welcome_channel_ids": [],
     "autoroles": [],
+    "music_dj_enabled": False,
+    "music_dj_role_name": "dj",
+    "music_default_volume": 50,
 }
 
 ALLOWED_PREFIX_CHARS = "!$%&*.<>"
@@ -30,7 +33,6 @@ ALLOWED_PREFIX_CHARS = "!$%&*.<>"
 # ==============================
 # paths
 # ==============================
-
 def _default_settings_path(storage_path: Path) -> Path:
     return storage_path / "settings" / "default.yml"
 
@@ -42,7 +44,6 @@ def _settings_db_path(storage_path: Path) -> Path:
 # ==============================
 # default schema helpers
 # ==============================
-
 def _merge_missing_defaults(loaded: Any, built_in: Any) -> Any:
     if isinstance(loaded, dict) and isinstance(built_in, dict):
         merged: dict[str, Any] = deepcopy(loaded)
@@ -109,7 +110,6 @@ def get_default_settings(storage_path: Path) -> dict[str, Any]:
 # ==============================
 # sqlite helpers
 # ==============================
-
 def _connect(storage_path: Path) -> sqlite3.Connection:
     db_path = _settings_db_path(storage_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +178,6 @@ def _upsert_guild_settings(storage_path: Path, guild_id: int | str, data: dict[s
 # ==============================
 # guild settings helpers
 # ==============================
-
 def guild_settings_exists(storage_path: Path, guild_id: int | str) -> bool:
     return _fetch_raw_guild_settings(storage_path, guild_id) is not None
 
@@ -250,7 +249,6 @@ def sync_all_guild_settings(storage_path: Path) -> int:
 # ==============================
 # convenience helpers used by other cogs
 # ==============================
-
 def get_guild_prefix(storage_path: Path, guild_id: int | str, fallback: str = "!") -> str:
     settings = get_guild_settings(storage_path, guild_id)
     return settings.get("prefix", fallback)
