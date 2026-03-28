@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import shutil
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,7 +14,7 @@ import yt_dlp
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import get_guild_settings, is_bot_channel, update_guild_settings
+from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel, update_guild_settings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ FFMPEG_OPTIONS = "-vn"
 IDLE_DISCONNECT_SECONDS = 180
 MAX_QUEUE_SIZE = 100
 MAX_TRACK_LENGTH_SECONDS = 60 * 60 * 3
+FFMPEG_EXECUTABLE = shutil.which("ffmpeg")
 
 
 def is_probably_url(value: str) -> bool:
@@ -137,6 +139,10 @@ class Music(commands.Cog):
     async def ensure_music_allowed(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
         if interaction.guild is None or interaction.channel is None:
             return False, "This command can only be used in a server."
+
+        command_name = interaction.command.qualified_name if interaction.command else "music"
+        if command_is_blocked(self.bot.storage_path, interaction.guild.id, command_name):
+            return False, f"`/{command_name}` is blocked in this server."
 
         if not is_bot_channel(self.bot.storage_path, interaction.guild.id, interaction.channel.id):
             settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
@@ -260,8 +266,12 @@ class Music(commands.Cog):
 
     async def create_source(self, track: Track, volume: float) -> discord.PCMVolumeTransformer:
         stream_url = track.stream_url or await self.refresh_stream_url(track)
+        if FFMPEG_EXECUTABLE is None:
+            raise RuntimeError("ffmpeg is not installed or not in PATH.")
+
         audio = discord.FFmpegPCMAudio(
             stream_url,
+            executable=FFMPEG_EXECUTABLE,
             before_options=FFMPEG_BEFORE_OPTIONS,
             options=FFMPEG_OPTIONS,
         )
@@ -294,6 +304,9 @@ class Music(commands.Cog):
                 if guild is None or guild.voice_client is None:
                     return
                 if guild.voice_client.is_playing() or guild.voice_client.is_paused():
+                    return
+
+                if any(not member.bot for member in guild.voice_client.channel.members):
                     return
 
                 state.clear_queue()
@@ -403,7 +416,10 @@ class Music(commands.Cog):
         return self.bot.embeds.info_embed(
             "Music Queue",
             description,
-            fields=[self.bot.embeds.field("Up Next", upcoming)],
+            fields=[
+                self.bot.embeds.field("Up Next", upcoming),
+                self.bot.embeds.field("Queued Tracks", str(len(state.queue)), True),
+            ],
             footer=f"Volume: {round(state.volume * 100)}%",
         )
 
@@ -443,6 +459,20 @@ class Music(commands.Cog):
             await voice_client.disconnect(force=False)
         except Exception:
             LOGGER.exception("Failed to disconnect after voice channel emptied.")
+
+    def _voice_channel_mismatch(
+        self,
+        interaction: discord.Interaction,
+    ) -> str | None:
+        guild = interaction.guild
+        if guild is None or guild.voice_client is None or guild.voice_client.channel is None:
+            return None
+        member = interaction.user
+        if not isinstance(member, discord.Member) or member.voice is None or member.voice.channel is None:
+            return None
+        if member.voice.channel.id != guild.voice_client.channel.id:
+            return f"You must be in {guild.voice_client.channel.mention} to control playback."
+        return None
 
     @app_commands.command(name="join", description="Join your current voice channel.")
     @app_commands.guild_only()
@@ -528,6 +558,11 @@ class Music(commands.Cog):
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
 
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
+            return
+
         embed = await self.build_queue_embed(interaction.guild_id)
         await self.bot.embeds.respond(interaction, embed=embed)
 
@@ -537,6 +572,11 @@ class Music(commands.Cog):
         allowed, reason = await self.ensure_music_allowed(interaction)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
             return
 
         state = self.get_state(interaction.guild_id)
@@ -565,6 +605,11 @@ class Music(commands.Cog):
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
 
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
+            return
+
         guild = interaction.guild
         if guild is None or guild.voice_client is None or not guild.voice_client.is_playing():
             await self.bot.embeds.info_interaction(interaction, "Skip", "Nothing is currently playing.")
@@ -579,6 +624,11 @@ class Music(commands.Cog):
         allowed, reason = await self.ensure_music_allowed(interaction)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
             return
 
         guild = interaction.guild
@@ -597,6 +647,11 @@ class Music(commands.Cog):
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
 
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
+            return
+
         guild = interaction.guild
         if guild is None or guild.voice_client is None or not guild.voice_client.is_paused():
             await self.bot.embeds.info_interaction(interaction, "Resume", "Playback is not paused.")
@@ -611,6 +666,11 @@ class Music(commands.Cog):
         allowed, reason = await self.ensure_music_allowed(interaction)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
             return
 
         guild = interaction.guild
@@ -635,6 +695,11 @@ class Music(commands.Cog):
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
 
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
+            return
+
         guild = interaction.guild
         if guild is None or guild.voice_client is None:
             await self.bot.embeds.info_interaction(interaction, "Leave", "I am not in a voice channel.")
@@ -656,6 +721,11 @@ class Music(commands.Cog):
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
 
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
+            return
+
         state = self.get_state(interaction.guild_id)
         if not state.queue:
             await self.bot.embeds.info_interaction(interaction, "Shuffle", "The queue is empty.")
@@ -674,6 +744,11 @@ class Music(commands.Cog):
         allowed, reason = await self.ensure_music_allowed(interaction)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        mismatch = self._voice_channel_mismatch(interaction)
+        if mismatch:
+            await self.bot.embeds.error_interaction(interaction, "Wrong Voice Channel", mismatch, ephemeral=True)
             return
 
         state = self.get_state(interaction.guild_id)
