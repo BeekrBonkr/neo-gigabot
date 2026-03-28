@@ -14,7 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageSequence
 
-from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel
+from utils.settings import command_is_blocked, is_bot_channel
 
 
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
@@ -69,9 +69,7 @@ class Images(commands.Cog):
             )
             return False
 
-        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
-        bot_channels = settings.get("bot_channels", []) or []
-        if bot_channels and not is_bot_channel(
+        if not is_bot_channel(
             self.bot.storage_path,
             interaction.guild.id,
             interaction.channel.id,

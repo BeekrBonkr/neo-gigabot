@@ -10,7 +10,7 @@ import pyfiglet
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel
+from utils.settings import command_is_blocked, is_bot_channel
 
 EIGHT_BALL_RESPONSES: Final[list[str]] = [
     "It is certain.",
@@ -90,9 +90,7 @@ class Fun(commands.Cog):
             )
             return False
 
-        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
-        bot_channels = settings.get("bot_channels", []) or []
-        if bot_channels and not is_bot_channel(
+        if not is_bot_channel(
             self.bot.storage_path,
             interaction.guild.id,
             interaction.channel.id,
