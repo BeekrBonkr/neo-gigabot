@@ -1,15 +1,243 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.durations import parse_duration
+from utils.settings import (
+    get_guild_settings,
+    get_mod_log_channel_id,
+    is_mod_log_enabled,
+    save_guild_settings,
+)
+from utils.sticky_roles import pop_roles as pop_sticky_roles
+from utils.sticky_roles import save_roles as save_sticky_roles
+from utils.warnings import add_warning, list_warnings
+
+MAX_TIMEOUT = timedelta(days=28)
+
+MASS_ACTION_DELAY_SECONDS = 0.5
+MASS_ACTION_PROGRESS_INTERVAL = 10
+MAX_MASS_ACTION_TARGETS = 300
+
+PRUNE_MODE_CHOICES = [
+    app_commands.Choice(name="default", value="default"),
+    app_commands.Choice(name="specific", value="specific"),
+    app_commands.Choice(name="exclude", value="exclude"),
+]
+ROLE_ACTION_CHOICES = [
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+]
+AUTOROLE_ACTION_CHOICES = [
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+    app_commands.Choice(name="apply", value="apply"),
+]
+
+
+class ConfirmView(discord.ui.View):
+    """Generic Confirm/Cancel view for destructive actions - replaces the old
+    bot's "type yes to confirm" plain-message prompts, which don't map to
+    slash commands well."""
+
+    def __init__(self, *, author_id: int, timeout: float = 30.0) -> None:
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.value: bool | None = None
+        self.message: discord.Message | None = None
+
+        confirm_button = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.danger)
+        confirm_button.callback = self._on_confirm
+        cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel_button.callback = self._on_cancel
+        self.add_item(confirm_button)
+        self.add_item(cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This confirmation isn't yours.", ephemeral=True)
+            return False
+        return True
+
+    async def _finish(self, interaction: discord.Interaction, value: bool) -> None:
+        self.value = value
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    async def _on_confirm(self, interaction: discord.Interaction) -> None:
+        await self._finish(interaction, True)
+
+    async def _on_cancel(self, interaction: discord.Interaction) -> None:
+        await self._finish(interaction, False)
+
+    async def on_timeout(self) -> None:
+        self.value = False
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class PollView(discord.ui.View):
+    """Button-based yes/no poll with live tallies - replaces the old bot's
+    thumbsup/thumbsdown reaction poll (no vote count visible without counting
+    reactions, and nothing stopped someone from reacting to both)."""
+
+    def __init__(self, *, timeout: float = 300.0) -> None:
+        super().__init__(timeout=timeout)
+        self.yes_voters: set[int] = set()
+        self.no_voters: set[int] = set()
+        self.message: discord.Message | None = None
+
+        self.yes_button = discord.ui.Button(label="👍 0", style=discord.ButtonStyle.success)
+        self.yes_button.callback = self._on_yes
+        self.no_button = discord.ui.Button(label="👎 0", style=discord.ButtonStyle.danger)
+        self.no_button.callback = self._on_no
+        self.add_item(self.yes_button)
+        self.add_item(self.no_button)
+
+    async def _on_yes(self, interaction: discord.Interaction) -> None:
+        self.no_voters.discard(interaction.user.id)
+        self.yes_voters.symmetric_difference_update({interaction.user.id})
+        await self._refresh(interaction)
+
+    async def _on_no(self, interaction: discord.Interaction) -> None:
+        self.yes_voters.discard(interaction.user.id)
+        self.no_voters.symmetric_difference_update({interaction.user.id})
+        await self._refresh(interaction)
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        self.yes_button.label = f"👍 {len(self.yes_voters)}"
+        self.no_button.label = f"👎 {len(self.no_voters)}"
+        await interaction.response.edit_message(view=self)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
 
 class Moderation(commands.Cog):
-    """Moderation commands and listeners."""
+    """Moderation commands: member actions, channel/message cleanup, and mass
+    role management."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    async def _try_dm(self, user: discord.abc.User, embed: discord.Embed) -> None:
+        try:
+            await user.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _log_mod_action(
+        self,
+        guild: discord.Guild,
+        *,
+        title: str,
+        color: discord.Color,
+        target: discord.abc.User,
+        moderator: discord.abc.User,
+        reason: str | None,
+        duration: str | None = None,
+    ) -> None:
+        """Send a moderation action to the configured mod-log channel, if enabled.
+        Deliberately separate from cogs/logging.py's activity log - that's a
+        general audit trail admins opt into per-channel/per-user; this is
+        specifically for kick/ban/mute/warn actions, which nothing previously
+        recorded anywhere persistent."""
+        if not is_mod_log_enabled(self.bot.storage_path, guild.id):
+            return
+        channel_id = get_mod_log_channel_id(self.bot.storage_path, guild.id)
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if not isinstance(channel, discord.TextChannel):
+            return
+
+        description = f"**Member:** {target.mention} (`{target.id}`)\n**Moderator:** {moderator.mention}"
+        if duration:
+            description += f"\n**Duration:** {duration}"
+        description += f"\n**Reason:** {reason or 'No reason provided.'}"
+
+        try:
+            await channel.send(embed=self.bot.embeds.create(title=title, description=description, color=color, timestamp=True))
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _maybe_escalate_warning(self, interaction: discord.Interaction, user: discord.Member, warning_count: int) -> None:
+        """Automatically mute/kick/ban a member once their warning count reaches
+        this guild's configured threshold. A no-op unless an admin has opted in
+        via the settings dashboard (warn_threshold > 0 and warn_action != "none")."""
+        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        threshold = int(settings.get("warn_threshold", 0) or 0)
+        action = settings.get("warn_action", "none")
+        if threshold <= 0 or action == "none" or warning_count < threshold:
+            return
+        if user.top_role >= interaction.guild.me.top_role:
+            return
+
+        reason = f"Automatic action: reached {warning_count} warning(s) (threshold {threshold})"
+
+        if action == "mute":
+            delta = parse_duration(str(settings.get("warn_mute_duration", "1h"))) or timedelta(hours=1)
+            if delta > MAX_TIMEOUT:
+                delta = MAX_TIMEOUT
+            try:
+                await user.timeout(delta, reason=reason)
+            except discord.Forbidden:
+                return
+            await self._try_dm(
+                user,
+                self.bot.embeds.warning_embed(
+                    "You Were Muted", f"You were automatically muted in **{interaction.guild.name}** after reaching {warning_count} warnings."
+                ),
+            )
+            await self.bot.embeds.info_interaction(
+                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically muted."
+            )
+            await self._log_mod_action(
+                interaction.guild, title="🔇 Auto-Muted (Warning Threshold)", color=self.bot.embeds.warning_color,
+                target=user, moderator=self.bot.user, reason=reason,
+            )
+        elif action == "kick":
+            try:
+                await user.kick(reason=reason)
+            except discord.Forbidden:
+                return
+            await self.bot.embeds.info_interaction(
+                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically kicked."
+            )
+            await self._log_mod_action(
+                interaction.guild, title="👢 Auto-Kicked (Warning Threshold)", color=self.bot.embeds.warning_color,
+                target=user, moderator=self.bot.user, reason=reason,
+            )
+        elif action == "ban":
+            try:
+                await user.ban(reason=reason)
+            except discord.Forbidden:
+                return
+            await self.bot.embeds.info_interaction(
+                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically banned."
+            )
+            await self._log_mod_action(
+                interaction.guild, title="🔨 Auto-Banned (Warning Threshold)", color=self.bot.embeds.error_color,
+                target=user, moderator=self.bot.user, reason=reason,
+            )
+
+    # ---------- basic member actions ----------
 
     @app_commands.command(name="say", description="Send an embed containing your message.")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -22,6 +250,521 @@ class Moderation(commands.Cog):
             author_icon_url=interaction.user.display_avatar.url,
         )
         await self.bot.embeds.respond(interaction, embed=embed)
+
+    @app_commands.command(name="kick", description="Kick a member from the server.")
+    @app_commands.describe(user="Member to kick", reason="Reason (shown to the member and in the audit log)")
+    @app_commands.checks.has_permissions(kick_members=True)
+    @app_commands.checks.bot_has_permissions(kick_members=True)
+    @app_commands.guild_only()
+    async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+        if user.id == interaction.user.id:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't kick yourself.", ephemeral=True)
+            return
+        if user.top_role >= interaction.guild.me.top_role:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) mine.", ephemeral=True
+            )
+            return
+
+        await self._try_dm(
+            user,
+            self.bot.embeds.warning_embed("You Were Kicked", f"You were kicked from **{interaction.guild.name}**.\nReason: {reason or 'No reason provided.'}"),
+        )
+
+        try:
+            await user.kick(reason=f"By {interaction.user} ({interaction.user.id}): {reason or 'No reason provided.'}")
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Kick Failed", "I don't have permission to kick that member.", ephemeral=True)
+            return
+
+        await self.bot.embeds.success_interaction(interaction, "Member Kicked", f"{user.mention} has been kicked.\nReason: {reason or 'No reason provided.'}")
+        await self._log_mod_action(
+            interaction.guild, title="👢 Member Kicked", color=self.bot.embeds.warning_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+
+    @app_commands.command(name="ban", description="Ban a member from the server.")
+    @app_commands.describe(
+        user="Member to ban",
+        reason="Reason (shown to the member and in the audit log)",
+        delete_message_days="Delete this many days of their recent messages (0-7, default 0)",
+    )
+    @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.checks.bot_has_permissions(ban_members=True)
+    @app_commands.guild_only()
+    async def ban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str | None = None,
+        delete_message_days: app_commands.Range[int, 0, 7] = 0,
+    ) -> None:
+        if user.id == interaction.user.id:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't ban yourself.", ephemeral=True)
+            return
+        if user.top_role >= interaction.guild.me.top_role:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) mine.", ephemeral=True
+            )
+            return
+
+        await self._try_dm(
+            user,
+            self.bot.embeds.error_embed("You Were Banned", f"You were banned from **{interaction.guild.name}**.\nReason: {reason or 'No reason provided.'}"),
+        )
+
+        try:
+            await user.ban(
+                reason=f"By {interaction.user} ({interaction.user.id}): {reason or 'No reason provided.'}",
+                delete_message_seconds=delete_message_days * 86400,
+            )
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Ban Failed", "I don't have permission to ban that member.", ephemeral=True)
+            return
+
+        await self.bot.embeds.success_interaction(interaction, "Member Banned", f"{user.mention} has been banned.\nReason: {reason or 'No reason provided.'}")
+        await self._log_mod_action(
+            interaction.guild, title="🔨 Member Banned", color=self.bot.embeds.error_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+
+    @app_commands.command(name="unban", description="Unban a user by their ID.")
+    @app_commands.describe(user_id="The banned user's ID", reason="Optional reason")
+    @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.checks.bot_has_permissions(ban_members=True)
+    @app_commands.guild_only()
+    async def unban(self, interaction: discord.Interaction, user_id: str, reason: str | None = None) -> None:
+        if not user_id.isdigit():
+            await self.bot.embeds.error_interaction(interaction, "Invalid ID", "That doesn't look like a valid user ID.", ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+        except discord.NotFound:
+            await self.bot.embeds.error_interaction(interaction, "Not Found", "No Discord user has that ID.", ephemeral=True)
+            return
+
+        try:
+            await interaction.guild.unban(user, reason=reason)
+        except discord.NotFound:
+            await self.bot.embeds.error_interaction(interaction, "Not Banned", f"{user} isn't banned here.", ephemeral=True)
+            return
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Unban Failed", "I don't have permission to unban.", ephemeral=True)
+            return
+
+        await self.bot.embeds.success_interaction(interaction, "Member Unbanned", f"{user} has been unbanned.")
+        await self._log_mod_action(
+            interaction.guild, title="🔓 Member Unbanned", color=self.bot.embeds.success_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+
+    @app_commands.command(name="mute", description="Temporarily prevent a member from sending messages or speaking.")
+    @app_commands.describe(user="Member to mute", duration="e.g. 10m, 2h, 1d (max 28 days)", reason="Optional reason")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.checks.bot_has_permissions(moderate_members=True)
+    @app_commands.guild_only()
+    async def mute(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: str | None = None) -> None:
+        delta = parse_duration(duration)
+        if delta is None:
+            await self.bot.embeds.error_interaction(
+                interaction, "Invalid Duration", "Use something like `10m`, `2h`, `1d`, or `1d12h`.", ephemeral=True
+            )
+            return
+        if delta > MAX_TIMEOUT:
+            await self.bot.embeds.error_interaction(interaction, "Too Long", "Discord timeouts can't exceed 28 days.", ephemeral=True)
+            return
+        if user.top_role >= interaction.guild.me.top_role:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) mine.", ephemeral=True
+            )
+            return
+
+        try:
+            await user.timeout(delta, reason=f"By {interaction.user} ({interaction.user.id}): {reason or 'No reason provided.'}")
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Mute Failed", "I don't have permission to time out that member.", ephemeral=True)
+            return
+
+        await self._try_dm(
+            user,
+            self.bot.embeds.warning_embed(
+                "You Were Muted", f"You were muted in **{interaction.guild.name}** for {duration}.\nReason: {reason or 'No reason provided.'}"
+            ),
+        )
+        await self.bot.embeds.success_interaction(interaction, "Member Muted", f"{user.mention} has been muted for {duration}.")
+        await self._log_mod_action(
+            interaction.guild, title="🔇 Member Muted", color=self.bot.embeds.warning_color,
+            target=user, moderator=interaction.user, reason=reason, duration=duration,
+        )
+
+    @app_commands.command(name="unmute", description="Remove an active mute from a member.")
+    @app_commands.describe(user="Member to unmute", reason="Optional reason")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.checks.bot_has_permissions(moderate_members=True)
+    @app_commands.guild_only()
+    async def unmute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+        if user.timed_out_until is None:
+            await self.bot.embeds.info_interaction(interaction, "Not Muted", f"{user.mention} isn't currently muted.")
+            return
+
+        try:
+            await user.timeout(None, reason=f"By {interaction.user} ({interaction.user.id}): {reason or 'No reason provided.'}")
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Unmute Failed", "I don't have permission to do that.", ephemeral=True)
+            return
+
+        await self.bot.embeds.success_interaction(interaction, "Member Unmuted", f"{user.mention} has been unmuted.")
+        await self._log_mod_action(
+            interaction.guild, title="🔊 Member Unmuted", color=self.bot.embeds.success_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+
+    @app_commands.command(name="warn", description="Issue a warning to a member.")
+    @app_commands.describe(user="Member to warn", reason="Reason for the warning")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.guild_only()
+    async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: str) -> None:
+        add_warning(self.bot.storage_path, interaction.guild.id, user.id, interaction.user.id, reason)
+        warning_count = len(list_warnings(self.bot.storage_path, interaction.guild.id, user.id))
+
+        await self._try_dm(
+            user,
+            self.bot.embeds.warning_embed("You Were Warned", f"You were warned in **{interaction.guild.name}**.\nReason: {reason}"),
+        )
+        await self.bot.embeds.success_interaction(
+            interaction, "Member Warned", f"{user.mention} has been warned.\nReason: {reason}\n\n({warning_count} total warning(s))"
+        )
+        await self._log_mod_action(
+            interaction.guild, title="⚠️ Member Warned", color=self.bot.embeds.warning_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+        await self._maybe_escalate_warning(interaction, user, warning_count)
+
+    @app_commands.command(name="warnings", description="Show a member's warning history.")
+    @app_commands.describe(user="Member to look up")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.guild_only()
+    async def warnings(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        entries = list_warnings(self.bot.storage_path, interaction.guild.id, user.id)
+        if not entries:
+            await self.bot.embeds.info_interaction(interaction, "No Warnings", f"{user.mention} has no warnings on record.", ephemeral=True)
+            return
+
+        lines = []
+        for entry in entries[:15]:
+            moderator = interaction.guild.get_member(entry["moderator_id"])
+            mod_label = moderator.mention if moderator else f"<@{entry['moderator_id']}>"
+            lines.append(f"**#{entry['id']}** by {mod_label} - {entry['reason']}\n{entry['created_at']}")
+
+        embed = self.bot.embeds.info_embed(f"Warnings for {user} ({len(entries)} total)", "\n\n".join(lines))
+        await self.bot.embeds.respond(interaction, embed=embed, ephemeral=True)
+
+    @app_commands.command(name="nick", description="Change the bot's nickname in this server.")
+    @app_commands.describe(nickname="New nickname (leave empty to reset)")
+    @app_commands.checks.has_permissions(manage_nicknames=True)
+    @app_commands.checks.bot_has_permissions(change_nickname=True)
+    @app_commands.guild_only()
+    async def nick(self, interaction: discord.Interaction, nickname: app_commands.Range[str, 0, 32] | None = None) -> None:
+        await interaction.guild.me.edit(nick=nickname or None)
+        message = f'My nickname is now "{nickname}".' if nickname else "My nickname has been reset."
+        await self.bot.embeds.success_interaction(interaction, "Nickname Updated", message, ephemeral=True)
+
+    @app_commands.command(name="poll", description="Create a quick yes/no poll.")
+    @app_commands.describe(prompt="The poll question")
+    @app_commands.guild_only()
+    async def poll(self, interaction: discord.Interaction, prompt: app_commands.Range[str, 1, 250]) -> None:
+        view = PollView()
+        embed = self.bot.embeds.create(
+            title="📊 Poll",
+            description=prompt,
+            color=discord.Color.blurple(),
+            author_name=str(interaction.user),
+            author_icon_url=interaction.user.display_avatar.url,
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
+
+    # ---------- channel / message cleanup ----------
+
+    @app_commands.command(name="purge", description="Bulk-delete recent messages in this channel.")
+    @app_commands.describe(count="How many messages to delete (max 100)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.checks.bot_has_permissions(manage_messages=True)
+    @app_commands.guild_only()
+    async def purge(self, interaction: discord.Interaction, count: app_commands.Range[int, 1, 100]) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        deleted = await interaction.channel.purge(limit=count)
+        await interaction.followup.send(embed=self.bot.embeds.success_embed("Purged", f"Deleted {len(deleted)} message(s)."))
+
+    @app_commands.command(name="clean", description="Delete this bot's own recent messages in this channel.")
+    @app_commands.describe(count="How many of the bot's messages to look through (max 200)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.checks.bot_has_permissions(manage_messages=True)
+    @app_commands.guild_only()
+    async def clean(self, interaction: discord.Interaction, count: app_commands.Range[int, 1, 200] = 50) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        deleted = await interaction.channel.purge(limit=count, check=lambda m: m.author.id == self.bot.user.id)
+        await interaction.followup.send(embed=self.bot.embeds.success_embed("Cleaned", f"Deleted {len(deleted)} of my own message(s)."))
+
+    @app_commands.command(name="lock", description="Prevent @everyone from sending messages in a channel.")
+    @app_commands.describe(channel="Channel to lock (defaults to the current channel)")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def lock(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None) -> None:
+        target = channel or interaction.channel
+        everyone = interaction.guild.default_role
+        overwrite = target.overwrites_for(everyone)
+
+        if overwrite.send_messages is False:
+            await self.bot.embeds.info_interaction(interaction, "Already Locked", f"{target.mention} is already locked.", ephemeral=True)
+            return
+
+        overwrite.send_messages = False
+        await target.set_permissions(everyone, overwrite=overwrite, reason=f"Locked by {interaction.user}")
+        await self.bot.embeds.success_interaction(interaction, "Channel Locked", f"{target.mention} is now locked.")
+
+    @app_commands.command(name="unlock", description="Allow @everyone to send messages in a channel again.")
+    @app_commands.describe(channel="Channel to unlock (defaults to the current channel)")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def unlock(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None) -> None:
+        target = channel or interaction.channel
+        everyone = interaction.guild.default_role
+        overwrite = target.overwrites_for(everyone)
+
+        if overwrite.send_messages is not False:
+            await self.bot.embeds.info_interaction(interaction, "Already Unlocked", f"{target.mention} isn't locked.", ephemeral=True)
+            return
+
+        overwrite.send_messages = None
+        await target.set_permissions(everyone, overwrite=overwrite, reason=f"Unlocked by {interaction.user}")
+        await self.bot.embeds.success_interaction(interaction, "Channel Unlocked", f"{target.mention} is now unlocked.")
+
+    # ---------- mass actions ----------
+
+    async def _mass_apply(
+        self,
+        interaction: discord.Interaction,
+        members: list[discord.Member],
+        action,
+        *,
+        verb: str,
+    ) -> int:
+        """Run `action(member)` over a capped list of members with rate-limit-friendly
+        pacing and periodic progress updates. Returns how many succeeded."""
+        capped = members[:MAX_MASS_ACTION_TARGETS]
+        done = 0
+        for member in capped:
+            try:
+                await action(member)
+                done += 1
+            except discord.HTTPException:
+                pass
+            if done % MASS_ACTION_PROGRESS_INTERVAL == 0:
+                await interaction.edit_original_response(
+                    embed=self.bot.embeds.info_embed(f"{verb}...", f"{done}/{len(capped)} done so far.")
+                )
+            await asyncio.sleep(MASS_ACTION_DELAY_SECONDS)
+        return done
+
+    @app_commands.command(name="role", description="Add or remove a role for every non-bot member.")
+    @app_commands.describe(action="add or remove", role="The role to apply")
+    @app_commands.choices(action=ROLE_ACTION_CHOICES)
+    @app_commands.checks.has_permissions(manage_roles=True)
+    @app_commands.checks.bot_has_permissions(manage_roles=True)
+    @app_commands.guild_only()
+    async def role(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role) -> None:
+        if role >= interaction.guild.me.top_role:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "That role is above (or equal to) my highest role.", ephemeral=True)
+            return
+
+        adding = action.value == "add"
+        targets = [m for m in interaction.guild.members if not m.bot and (role not in m.roles if adding else role in m.roles)]
+
+        if not targets:
+            await self.bot.embeds.info_interaction(interaction, "Nothing To Do", "No members matched.", ephemeral=True)
+            return
+        if len(targets) > MAX_MASS_ACTION_TARGETS:
+            await self.bot.embeds.warning_interaction(
+                interaction,
+                "Large Operation",
+                f"{len(targets)} members match, only the first {MAX_MASS_ACTION_TARGETS} will be processed in this run. Re-run to continue.",
+            )
+
+        await interaction.response.send_message(
+            embed=self.bot.embeds.info_embed("Starting...", f"{'Adding' if adding else 'Removing'} {role.mention} for {min(len(targets), MAX_MASS_ACTION_TARGETS)} member(s).")
+        )
+
+        reason = f"Mass role {'add' if adding else 'remove'} by {interaction.user}"
+        action_fn = (lambda m: m.add_roles(role, reason=reason)) if adding else (lambda m: m.remove_roles(role, reason=reason))
+        done = await self._mass_apply(interaction, targets, action_fn, verb="Updating roles")
+
+        await interaction.edit_original_response(
+            embed=self.bot.embeds.success_embed("Done", f"{'Added' if adding else 'Removed'} {role.mention} for {done} member(s).")
+        )
+
+    @app_commands.command(name="autorole", description="Manage roles automatically assigned to new members.")
+    @app_commands.describe(action="add, remove, or apply to everyone right now", role="The role (not needed for 'apply')")
+    @app_commands.choices(action=AUTOROLE_ACTION_CHOICES)
+    @app_commands.checks.has_permissions(manage_roles=True)
+    @app_commands.checks.bot_has_permissions(manage_roles=True)
+    @app_commands.guild_only()
+    async def autorole(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role | None = None) -> None:
+        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        autoroles = settings.get("autoroles", []) or []
+
+        if action.value == "add":
+            if role is None:
+                await self.bot.embeds.error_interaction(interaction, "Missing Role", "Provide a role to add.", ephemeral=True)
+                return
+            if role.id in autoroles:
+                await self.bot.embeds.warning_interaction(interaction, "Already An Autorole", f"{role.mention} is already an autorole.", ephemeral=True)
+                return
+            autoroles.append(role.id)
+            settings["autoroles"] = autoroles
+            save_guild_settings(self.bot.storage_path, interaction.guild.id, settings)
+            await self.bot.embeds.success_interaction(interaction, "Autorole Added", f"{role.mention} will now be given to new members.", ephemeral=True)
+            return
+
+        if action.value == "remove":
+            if role is None:
+                await self.bot.embeds.error_interaction(interaction, "Missing Role", "Provide a role to remove.", ephemeral=True)
+                return
+            if role.id not in autoroles:
+                await self.bot.embeds.warning_interaction(interaction, "Not An Autorole", f"{role.mention} isn't currently an autorole.", ephemeral=True)
+                return
+            autoroles.remove(role.id)
+            settings["autoroles"] = autoroles
+            save_guild_settings(self.bot.storage_path, interaction.guild.id, settings)
+            await self.bot.embeds.success_interaction(interaction, "Autorole Removed", f"{role.mention} will no longer be given to new members.", ephemeral=True)
+            return
+
+        # apply
+        if not autoroles:
+            await self.bot.embeds.info_interaction(interaction, "No Autoroles Configured", "Add one with `/autorole add` first.", ephemeral=True)
+            return
+
+        roles = [interaction.guild.get_role(rid) for rid in autoroles]
+        roles = [r for r in roles if r is not None and r < interaction.guild.me.top_role]
+        if not roles:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "None of the configured autoroles are below my highest role.", ephemeral=True)
+            return
+
+        targets = [m for m in interaction.guild.members if not m.bot and any(r not in m.roles for r in roles)]
+        if not targets:
+            await self.bot.embeds.info_interaction(interaction, "Nothing To Do", "Everyone already has the configured autoroles.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(embed=self.bot.embeds.info_embed("Starting...", f"Applying autoroles to {min(len(targets), MAX_MASS_ACTION_TARGETS)} member(s)."))
+
+        async def _apply(member: discord.Member) -> None:
+            missing = [r for r in roles if r not in member.roles]
+            if missing:
+                await member.add_roles(*missing, reason="Autorole apply")
+
+        done = await self._mass_apply(interaction, targets, _apply, verb="Applying autoroles")
+        await interaction.edit_original_response(embed=self.bot.embeds.success_embed("Done", f"Applied autoroles to {done} member(s)."))
+
+    @app_commands.command(name="prune", description="Mass-kick members matching a role criteria.")
+    @app_commands.describe(
+        mode="default = only-default-role members, specific = has this role, exclude = lacks this role",
+        role="Required for 'specific' and 'exclude'",
+    )
+    @app_commands.choices(mode=PRUNE_MODE_CHOICES)
+    @app_commands.checks.has_permissions(kick_members=True)
+    @app_commands.checks.bot_has_permissions(kick_members=True)
+    @app_commands.guild_only()
+    async def prune(self, interaction: discord.Interaction, mode: app_commands.Choice[str], role: discord.Role | None = None) -> None:
+        mode_value = mode.value
+        if mode_value in ("specific", "exclude") and role is None:
+            await self.bot.embeds.error_interaction(interaction, "Missing Role", "That mode requires a role.", ephemeral=True)
+            return
+
+        non_bot_members = [m for m in interaction.guild.members if not m.bot]
+
+        if mode_value == "default":
+            settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+            default_role_ids = set(settings.get("autoroles", []) or [])
+            kick_list = [m for m in non_bot_members if all(r.is_default() or r.id in default_role_ids for r in m.roles)]
+            reason_label = "having only default roles"
+        elif mode_value == "specific":
+            kick_list = [m for m in non_bot_members if role in m.roles]
+            reason_label = f"having the role {role.name}"
+        else:
+            kick_list = [m for m in non_bot_members if role not in m.roles]
+            reason_label = f"not having the role {role.name}"
+
+        if not kick_list:
+            await self.bot.embeds.info_interaction(interaction, "Nothing To Do", "No members matched that criteria.", ephemeral=True)
+            return
+
+        capped = kick_list[:MAX_MASS_ACTION_TARGETS]
+        view = ConfirmView(author_id=interaction.user.id)
+        await interaction.response.send_message(
+            embed=self.bot.embeds.warning_embed(
+                "Confirm Prune",
+                f"About to kick **{len(capped)}** member(s) for {reason_label}"
+                + (f" (of {len(kick_list)} matched, capped at {MAX_MASS_ACTION_TARGETS})" if len(kick_list) > MAX_MASS_ACTION_TARGETS else "")
+                + ".\n\nThis cannot be undone.",
+            ),
+            view=view,
+        )
+        view.message = await interaction.original_response()
+        await view.wait()
+
+        if not view.value:
+            await interaction.edit_original_response(embed=self.bot.embeds.info_embed("Cancelled", "No members were kicked."), view=None)
+            return
+
+        reason = f"Prune ({reason_label}) by {interaction.user}"
+        done = await self._mass_apply(interaction, capped, lambda m: m.kick(reason=reason), verb="Pruning")
+        await interaction.edit_original_response(embed=self.bot.embeds.success_embed("Prune Complete", f"Kicked {done} member(s) for {reason_label}."), view=None)
+
+    # ---------- listeners ----------
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        if member.bot:
+            return
+
+        settings = get_guild_settings(self.bot.storage_path, member.guild.id)
+        roles_to_add: list[discord.Role] = []
+
+        if settings.get("sticky_roles", False):
+            stored_role_ids = pop_sticky_roles(self.bot.storage_path, member.guild.id, member.id)
+            for role_id in stored_role_ids:
+                role = member.guild.get_role(role_id)
+                if role is not None and role < member.guild.me.top_role and role not in roles_to_add:
+                    roles_to_add.append(role)
+
+        for role_id in settings.get("autoroles", []) or []:
+            role = member.guild.get_role(role_id)
+            if role is not None and role < member.guild.me.top_role and role not in roles_to_add:
+                roles_to_add.append(role)
+
+        if not roles_to_add:
+            return
+
+        try:
+            await member.add_roles(*roles_to_add, reason="Autorole / sticky roles on join")
+        except discord.HTTPException:
+            pass
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        if member.bot:
+            return
+
+        settings = get_guild_settings(self.bot.storage_path, member.guild.id)
+        if not settings.get("sticky_roles", False):
+            return
+
+        role_ids = [r.id for r in member.roles if not r.is_default() and not r.managed]
+        if role_ids:
+            save_sticky_roles(self.bot.storage_path, member.guild.id, member.id, role_ids)
 
 
 async def setup(bot: commands.Bot) -> None:

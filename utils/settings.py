@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from utils.db import connect as _db_connect
+
 DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "prefix": "!",
-    "suggestion_channel_ids": [],
     "bot_channels": [],
     "blocked_commands": [],
     "listen_to_bots": False,
@@ -25,7 +25,15 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "music_dj_enabled": False,
     "music_dj_role_name": "dj",
     "music_default_volume": 50,
+    "mod_log_enabled": False,
+    "mod_log_channel_id": "",
+    "warn_threshold": 0,
+    "warn_action": "none",
+    "warn_mute_duration": "1h",
+    "sticky_roles": False,
 }
+
+WARN_ACTION_CHOICES = ("none", "mute", "kick", "ban")
 
 ALLOWED_PREFIX_CHARS = "!$%&*.<>"
 
@@ -35,10 +43,6 @@ ALLOWED_PREFIX_CHARS = "!$%&*.<>"
 # ==============================
 def _default_settings_path(storage_path: Path) -> Path:
     return storage_path / "settings" / "default.yml"
-
-
-def _settings_db_path(storage_path: Path) -> Path:
-    return storage_path / "settings.db"
 
 
 # ==============================
@@ -110,12 +114,8 @@ def get_default_settings(storage_path: Path) -> dict[str, Any]:
 # ==============================
 # sqlite helpers
 # ==============================
-def _connect(storage_path: Path) -> sqlite3.Connection:
-    db_path = _settings_db_path(storage_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
-    return connection
+def _connect(storage_path: Path):
+    return _db_connect(storage_path)
 
 
 CREATE_GUILD_SETTINGS_TABLE_SQL = """
@@ -269,3 +269,53 @@ def is_bot_channel(storage_path: Path, guild_id: int | str, channel_id: int) -> 
 
     normalized_bot_channels = {int(value) for value in bot_channels}
     return int(channel_id) in normalized_bot_channels
+
+
+# ==============================
+# activity logging helpers
+# ==============================
+def is_logging_enabled(storage_path: Path, guild_id: int | str) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    return bool(settings.get("logging_enabled", False)) and bool(settings.get("logging_channel_id"))
+
+
+def is_log_channel_ignored(storage_path: Path, guild_id: int | str, channel_id: int) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    ignored = settings.get("ignored_log_channels", []) or []
+    return int(channel_id) in {int(value) for value in ignored}
+
+
+def is_log_user_ignored(storage_path: Path, guild_id: int | str, user_id: int) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    ignored = settings.get("ignored_users", []) or []
+    return int(user_id) in {int(value) for value in ignored}
+
+
+def get_logging_channel_id(storage_path: Path, guild_id: int | str) -> int | None:
+    settings = get_guild_settings(storage_path, guild_id)
+    channel_id = settings.get("logging_channel_id")
+    if not channel_id:
+        return None
+    try:
+        return int(channel_id)
+    except (TypeError, ValueError):
+        return None
+
+
+# ==============================
+# moderation log helpers
+# ==============================
+def is_mod_log_enabled(storage_path: Path, guild_id: int | str) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    return bool(settings.get("mod_log_enabled", False)) and bool(settings.get("mod_log_channel_id"))
+
+
+def get_mod_log_channel_id(storage_path: Path, guild_id: int | str) -> int | None:
+    settings = get_guild_settings(storage_path, guild_id)
+    channel_id = settings.get("mod_log_channel_id")
+    if not channel_id:
+        return None
+    try:
+        return int(channel_id)
+    except (TypeError, ValueError):
+        return None

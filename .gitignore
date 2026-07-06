@@ -6,5 +6,8 @@ venv/
 .env
 storage/cache/
 storage/temp/
+storage/logs/
 storage/settings.db
+storage/settings/*.yml
+!storage/settings/default.yml
 

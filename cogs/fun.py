@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import random
-from dataclasses import dataclass
-from typing import Final
+import time
+from dataclasses import dataclass, field
+from typing import Any, Final
+from urllib.parse import quote
 
 import aiohttp
 import discord
@@ -82,6 +85,34 @@ MEME_SUBREDDITS: Final[list[str]] = [
 ]
 
 REDDIT_ICON_URL: Final[str] = "https://www.redditinc.com/assets/images/site/reddit-logo.png"
+
+WIKIPEDIA_SUMMARY_URL: Final[str] = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+WIKIPEDIA_SEARCH_URL: Final[str] = (
+    "https://en.wikipedia.org/w/api.php?action=opensearch&format=json&limit=5&search={query}"
+)
+WIKIPEDIA_ICON_URL: Final[str] = (
+    "https://upload.wikimedia.org/wikipedia/en/thumb/8/80/Wikipedia-logo-v2.svg/1200px-Wikipedia-logo-v2.svg.png"
+)
+
+OPENWEATHERMAP_URL: Final[str] = (
+    "https://api.openweathermap.org/data/2.5/weather?q={city}&units=metric&appid={key}"
+)
+OPENWEATHERMAP_ICON_URL: Final[str] = "https://openweathermap.org/img/wn/{icon}@2x.png"
+
+# Giphy's search API. Results are capped to a PG-13 rating regardless of channel as a
+# content-safety default - this is a general-purpose bot, not an NSFW-gated one.
+GIPHY_SEARCH_URL: Final[str] = (
+    "https://api.giphy.com/v1/gifs/search?api_key={key}&q={query}&limit=15&rating=pg-13&lang=en"
+)
+CUTE_GIF_QUERY: Final[str] = "cute animals"
+BEANS_GIF_QUERY: Final[str] = "beans"
+
+SNIPE_MAX_AGE_SECONDS: Final[int] = 5 * 60  # don't resurrect deleted messages after they go stale
+SNIPE_MAX_CONTENT_LENGTH: Final[int] = 1000
+
+HOLDING_TIMES: Final[list[int]] = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+HOTPOTATO_LOBBY_SECONDS: Final[int] = 30
+HOTPOTATO_MIN_PLAYERS: Final[int] = 2
 
 
 @dataclass(slots=True)
@@ -204,12 +235,277 @@ class TriviaButton(discord.ui.Button[TriviaView]):
         await self.view.finish(interaction, self.label)
 
 
+class TicTacToeBoardButton(discord.ui.Button["TicTacToeView"]):
+    def __init__(self, position: int) -> None:
+        super().__init__(style=discord.ButtonStyle.secondary, label="​", row=position // 3)
+        self.position = position
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.view.handle_move(interaction, self.position)
+
+
+class TicTacToeView(discord.ui.View):
+    """Single-player tic-tac-toe against a bot that just picks a random open square."""
+
+    PLAYER_EMOJI = "⭕"
+    BOT_EMOJI = "❌"
+    WIN_LINES = ((0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6))
+
+    def __init__(self, *, author_id: int, timeout: float = 60.0) -> None:
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.board: list[str | None] = [None] * 9
+        self.message: discord.Message | None = None
+        self.finished = False
+        for i in range(9):
+            self.add_item(TicTacToeBoardButton(i))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This isn't your game.", ephemeral=True)
+            return False
+        return True
+
+    def _button_for(self, position: int) -> TicTacToeBoardButton:
+        return self.children[position]  # type: ignore[return-value]
+
+    def _winner(self) -> str | None:
+        for a, b, c in self.WIN_LINES:
+            if self.board[a] is not None and self.board[a] == self.board[b] == self.board[c]:
+                return self.board[a]
+        return None
+
+    def _resolve(self) -> str | None:
+        winner = self._winner()
+        if winner == self.PLAYER_EMOJI:
+            return "player"
+        if winner == self.BOT_EMOJI:
+            return "bot"
+        if all(cell is not None for cell in self.board):
+            return "draw"
+        return None
+
+    @staticmethod
+    def _result_message(result: str) -> str:
+        return {
+            "player": "🎉 You win!",
+            "bot": "🤖 I win! Better luck next time.",
+            "draw": "It's a draw!",
+        }[result]
+
+    def _end(self) -> None:
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+
+    async def handle_move(self, interaction: discord.Interaction, position: int) -> None:
+        if self.finished or self.board[position] is not None:
+            await interaction.response.defer()
+            return
+
+        self.board[position] = self.PLAYER_EMOJI
+        button = self._button_for(position)
+        button.label = self.PLAYER_EMOJI
+        button.style = discord.ButtonStyle.success
+        button.disabled = True
+
+        result = self._resolve()
+        if result is not None:
+            self._end()
+            await interaction.response.edit_message(content=self._result_message(result), view=self)
+            return
+
+        await interaction.response.edit_message(view=self)
+        await asyncio.sleep(1)
+
+        bot_position = random.choice([i for i, cell in enumerate(self.board) if cell is None])
+        self.board[bot_position] = self.BOT_EMOJI
+        bot_button = self._button_for(bot_position)
+        bot_button.label = self.BOT_EMOJI
+        bot_button.style = discord.ButtonStyle.danger
+        bot_button.disabled = True
+
+        result = self._resolve()
+        content = self._result_message(result) if result is not None else None
+        if result is not None:
+            self._end()
+
+        if self.message is not None:
+            try:
+                await self.message.edit(content=content, view=self)
+            except discord.HTTPException:
+                pass
+
+    async def on_timeout(self) -> None:
+        if self.finished:
+            return
+        self._end()
+        if self.message is not None:
+            try:
+                await self.message.edit(content="Tic-tac-toe timed out.", view=self)
+            except discord.HTTPException:
+                pass
+
+
+class SimonView(discord.ui.View):
+    """Simon Says memory game. The command coroutine drives rounds via play_round()."""
+
+    COLORS: Final[list[str]] = ["🟥", "🟦", "🟨", "🟩"]
+    STYLES: Final[list[discord.ButtonStyle]] = [
+        discord.ButtonStyle.danger,
+        discord.ButtonStyle.primary,
+        discord.ButtonStyle.secondary,
+        discord.ButtonStyle.success,
+    ]
+    ROUND_TIMEOUT_SECONDS: Final[float] = 45.0
+
+    def __init__(self, *, author_id: int) -> None:
+        # timeout=None: the view itself never auto-expires. Inactivity is handled by
+        # play_round()'s own asyncio.wait_for, so there's only one timeout code path.
+        super().__init__(timeout=None)
+        self.author_id = author_id
+        self.message: discord.Message | None = None
+        self.pattern: list[int] = []
+        self.player_progress: list[int] = []
+        self.level = 0
+        self.finished = False
+        self._round_event = asyncio.Event()
+        self._round_result: str | None = None
+
+        for index, (emoji, style) in enumerate(zip(self.COLORS, self.STYLES)):
+            button: discord.ui.Button[SimonView] = discord.ui.Button(emoji=emoji, style=style, row=index // 2)
+            button.callback = self._make_callback(index)
+            self.add_item(button)
+
+        self.set_buttons_enabled(False)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This isn't your game.", ephemeral=True)
+            return False
+        return True
+
+    def set_buttons_enabled(self, enabled: bool) -> None:
+        for item in self.children:
+            item.disabled = not enabled
+
+    def _make_callback(self, index: int):
+        async def callback(interaction: discord.Interaction) -> None:
+            await interaction.response.defer()
+            if self.finished or self._round_event.is_set():
+                return
+
+            step = len(self.player_progress)
+            self.player_progress.append(index)
+
+            if index != self.pattern[step]:
+                self._round_result = "wrong"
+                self._round_event.set()
+                return
+
+            if len(self.player_progress) == len(self.pattern):
+                self._round_result = "correct"
+                self._round_event.set()
+
+        return callback
+
+    async def render(self, *, grid: list[str] | None = None, footer: str) -> None:
+        if self.message is None:
+            return
+        grid = grid or ["⬛"] * 4
+        description = f"{grid[0]} | {grid[1]}\n{grid[2]} | {grid[3]}"
+        embed = discord.Embed(
+            title=f"Simon Says - Level {self.level}",
+            description=description,
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text=footer)
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException:
+            pass
+
+    async def _flash(self, position: int) -> None:
+        grid = ["⬛"] * 4
+        grid[position] = self.COLORS[position]
+        await self.render(grid=grid, footer="Watch the pattern!")
+        await asyncio.sleep(0.6)
+        await self.render(grid=["⬛"] * 4, footer="Watch the pattern!")
+        await asyncio.sleep(0.2)
+
+    async def play_round(self) -> str:
+        """Show one longer pattern, then wait for input. Returns 'correct', 'wrong', or 'timeout'."""
+        self.level += 1
+        self.pattern.append(random.randint(0, 3))
+        self.player_progress = []
+        self._round_result = None
+        self._round_event.clear()
+
+        self.set_buttons_enabled(False)
+        await self.render(footer="Watch the pattern!")
+        for position in self.pattern:
+            await self._flash(position)
+
+        self.set_buttons_enabled(True)
+        await self.render(footer="Your turn! Repeat the pattern.")
+
+        try:
+            await asyncio.wait_for(self._round_event.wait(), timeout=self.ROUND_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            self.finished = True
+            return "timeout"
+
+        if self._round_result == "wrong":
+            self.finished = True
+        return self._round_result or "wrong"
+
+
+@dataclass(slots=True)
+class HotPotatoGame:
+    channel_id: int
+    participants: set[int] = field(default_factory=set)
+    holder_id: int | None = None
+    round_index: int = 0
+    started: bool = False
+    pass_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class HotPotatoJoinView(discord.ui.View):
+    def __init__(self, *, game: HotPotatoGame, timeout: float) -> None:
+        super().__init__(timeout=timeout)
+        self.game = game
+        self.message: discord.Message | None = None
+
+    @discord.ui.button(label="Join 🥔", style=discord.ButtonStyle.success)
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id in self.game.participants:
+            await interaction.response.send_message("You're already in!", ephemeral=True)
+            return
+        self.game.participants.add(interaction.user.id)
+        await interaction.response.send_message("You joined the hot potato game! 🥔", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class Fun(commands.Cog):
     """Slash-command based fun commands ported from the legacy bot."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._reddit: apraw.Reddit | None = None
+        self._snipes: dict[int, dict[str, Any]] = {}
+        self._hotpotato_games: dict[int, HotPotatoGame] = {}
+
+    async def cog_unload(self) -> None:
+        self._hotpotato_games.clear()
 
     async def _ensure_fun_command_allowed(
         self,
@@ -255,6 +551,21 @@ class Fun(commands.Cog):
                 if response.status != 200:
                     return None
                 return await response.json()
+
+    async def _fetch_json_with_status(self, url: str) -> tuple[int, dict | list | None]:
+        """Like _fetch_json, but also returns the HTTP status so callers can
+        distinguish e.g. "not found" from "service misconfigured"."""
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers={"User-Agent": "neo-gigabot/1.0"}) as response:
+                    try:
+                        payload = await response.json(content_type=None)
+                    except (aiohttp.ContentTypeError, ValueError):
+                        payload = None
+                    return response.status, payload
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return 0, None
 
     def _get_reddit_credentials(self) -> RedditCredentials:
         config = getattr(self.bot, "config", None)
@@ -800,6 +1111,364 @@ class Fun(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
         view.message = await interaction.original_response()
 
+    @app_commands.command(name="wiki", description="Get a Wikipedia summary for a topic.")
+    @app_commands.describe(query="What to look up")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def wiki(self, interaction: discord.Interaction, query: app_commands.Range[str, 1, 200]) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "wiki"):
+            return
+
+        await interaction.response.defer(thinking=True)
+        title = query.strip().replace(" ", "_")
+        data = await self._fetch_json(WIKIPEDIA_SUMMARY_URL.format(title=quote(title)))
+
+        if isinstance(data, dict) and data.get("type") not in {"disambiguation", None} and data.get("extract"):
+            extract = data["extract"]
+            if len(extract) > 800:
+                extract = extract[:797].rstrip() + "..."
+
+            page_url = data.get("content_urls", {}).get("desktop", {}).get("page")
+            embed = self.bot.embeds.create(
+                title=data.get("title", query),
+                description=extract,
+                color=discord.Color(0x1A75FF),
+                thumbnail_url=(data.get("thumbnail") or {}).get("source"),
+                footer="Wikipedia",
+            )
+            if page_url:
+                embed.url = page_url
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Exact title didn't resolve to a usable summary (missing, or a disambiguation
+        # page) - offer close matches instead of just failing.
+        search_results = await self._fetch_json(WIKIPEDIA_SEARCH_URL.format(query=quote(query)))
+        suggestions = search_results[1] if isinstance(search_results, list) and len(search_results) > 1 else []
+
+        if suggestions:
+            options = "\n".join(f"- {title}" for title in suggestions[:5])
+            await interaction.followup.send(
+                embed=self.bot.embeds.warning_embed(
+                    "Did You Mean?",
+                    f"I couldn't find an exact match for `{query}`. Close matches:\n{options}",
+                )
+            )
+        else:
+            await interaction.followup.send(
+                embed=self.bot.embeds.error_embed("Not Found", f"I couldn't find anything on Wikipedia for `{query}`.")
+            )
+
+    @app_commands.command(name="weather", description="Get the current weather for a city.")
+    @app_commands.describe(city="City name, optionally 'city,country-code'")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def weather(self, interaction: discord.Interaction, city: app_commands.Range[str, 1, 100]) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "weather"):
+            return
+
+        api_key = getattr(self.bot.config, "openweathermap_api_key", "")
+        if not api_key:
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "Weather Unavailable",
+                "Weather isn't configured yet. Add `OPENWEATHERMAP_API_KEY` to `.env` first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+        url = OPENWEATHERMAP_URL.format(city=quote(city), key=api_key)
+        status, data = await self._fetch_json_with_status(url)
+
+        if status == 404:
+            await interaction.followup.send(
+                embed=self.bot.embeds.error_embed("City Not Found", f"I couldn't find a city called `{city}`.")
+            )
+            return
+        if status == 401:
+            self.bot.logger.warning("OpenWeatherMap rejected the configured API key (401).")
+            await interaction.followup.send(
+                embed=self.bot.embeds.error_embed("Weather Unavailable", "The weather service is misconfigured. Ask the bot owner to check the API key.")
+            )
+            return
+        if status != 200 or not isinstance(data, dict):
+            await interaction.followup.send(
+                embed=self.bot.embeds.error_embed("Weather Failed", "I couldn't fetch the weather right now.")
+            )
+            return
+
+        weather_info = (data.get("weather") or [{}])[0]
+        main = data.get("main", {})
+        wind = data.get("wind", {})
+        celsius = main.get("temp")
+        fahrenheit = celsius * 9 / 5 + 32 if isinstance(celsius, (int, float)) else None
+        feels_like_c = main.get("feels_like")
+
+        resolved_name = data.get("name") or city
+        country = (data.get("sys") or {}).get("country")
+        location = f"{resolved_name}, {country}" if country else resolved_name
+
+        embed = self.bot.embeds.create(
+            title=f"Weather in {location}",
+            description=str(weather_info.get("description", "Unknown")).title(),
+            color=discord.Color(0x1E90FF),
+            thumbnail_url=OPENWEATHERMAP_ICON_URL.format(icon=weather_info["icon"]) if weather_info.get("icon") else None,
+            fields=[
+                self.bot.embeds.field(
+                    "Temperature",
+                    f"{celsius:.1f}°C / {fahrenheit:.1f}°F" if fahrenheit is not None else "Unknown",
+                    inline=True,
+                ),
+                self.bot.embeds.field(
+                    "Feels Like", f"{feels_like_c:.1f}°C" if isinstance(feels_like_c, (int, float)) else "Unknown", inline=True
+                ),
+                self.bot.embeds.field("Humidity", f"{main.get('humidity', '?')}%", inline=True),
+                self.bot.embeds.field("Wind Speed", f"{wind.get('speed', '?')} m/s", inline=True),
+            ],
+            footer="Weather data from OpenWeatherMap",
+        )
+        await interaction.followup.send(embed=embed)
+
+    async def _send_giphy_result(self, interaction: discord.Interaction, query: str, *, title: str) -> None:
+        api_key = getattr(self.bot.config, "giphy_api_key", "")
+        if not api_key:
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "GIFs Unavailable",
+                "GIF search isn't configured yet. Add `GIPHY_API_KEY` to `.env` first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+        url = GIPHY_SEARCH_URL.format(key=api_key, query=quote(query))
+        data = await self._fetch_json(url)
+        results = data.get("data") if isinstance(data, dict) else None
+
+        if not results:
+            await interaction.followup.send(
+                embed=self.bot.embeds.error_embed("No Results", f"I couldn't find a GIF for `{query}`.")
+            )
+            return
+
+        choice = random.choice(results)
+        image_url = (((choice.get("images") or {}).get("original") or {}).get("url"))
+        if not image_url:
+            await interaction.followup.send(embed=self.bot.embeds.error_embed("No Results", "That GIF couldn't be loaded."))
+            return
+
+        embed = self.bot.embeds.create(title=title, color=discord.Color(0x00FF99), image_url=image_url, footer="Powered by GIPHY")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="gif", description="Search for a GIF.")
+    @app_commands.describe(query="What kind of GIF to search for")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def gif(self, interaction: discord.Interaction, query: app_commands.Range[str, 1, 100]) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "gif"):
+            return
+        await self._send_giphy_result(interaction, query, title=f"GIF: {query}")
+
+    @app_commands.command(name="cute", description="Get a random cute animal GIF.")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def cute(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "cute"):
+            return
+        await self._send_giphy_result(interaction, CUTE_GIF_QUERY, title="Something Cute")
+
+    @app_commands.command(name="beans", description="Get a random beans GIF.")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def beans(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "beans"):
+            return
+        await self._send_giphy_result(interaction, BEANS_GIF_QUERY, title="Beans")
+
+    @app_commands.command(name="snipe", description="Show the most recently deleted message in this channel.")
+    @app_commands.checks.cooldown(1, 5.0)
+    @app_commands.guild_only()
+    async def snipe(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "snipe"):
+            return
+
+        snipe = self._snipes.get(interaction.channel_id)
+        if snipe is None or (time.time() - snipe["timestamp"]) > SNIPE_MAX_AGE_SECONDS:
+            await self.bot.embeds.info_interaction(interaction, "Nothing To Snipe", "No recently deleted message found in this channel.")
+            return
+
+        content = snipe["content"] or "*(no text content - the message may have only had an attachment)*"
+        embed = self.bot.embeds.create(
+            description=content,
+            color=discord.Color(0xFF5733),
+            author_name=snipe["author_name"],
+            author_icon_url=snipe["author_avatar_url"],
+            footer=f"Sniped by {interaction.user}",
+            timestamp=False,
+        )
+        if snipe["attachment_count"]:
+            embed.add_field(name="Attachments", value=str(snipe["attachment_count"]), inline=True)
+        await interaction.response.send_message(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None:
+            return
+
+        content = (message.content or "")[:SNIPE_MAX_CONTENT_LENGTH]
+        self._snipes[message.channel.id] = {
+            "content": content,
+            "author_name": str(message.author),
+            "author_avatar_url": message.author.display_avatar.url,
+            "attachment_count": len(message.attachments),
+            "timestamp": time.time(),
+        }
+
+    @app_commands.command(name="tictactoe", description="Play tic-tac-toe against the bot.")
+    @app_commands.checks.cooldown(1, 10.0)
+    async def tictactoe(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "tictactoe"):
+            return
+
+        view = TicTacToeView(author_id=interaction.user.id)
+        embed = discord.Embed(title="Tic-Tac-Toe", description="Your move! You're ⭕, I'm ❌.", color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
+
+    @app_commands.command(name="simon", description="Play a Simon Says memory game.")
+    @app_commands.checks.cooldown(1, 10.0)
+    async def simon(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "simon"):
+            return
+
+        view = SimonView(author_id=interaction.user.id)
+        embed = discord.Embed(
+            title="Simon Says - Get Ready",
+            description="⬛ | ⬛\n⬛ | ⬛",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Watch closely...")
+        await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
+        await asyncio.sleep(1.5)
+
+        result = "wrong"
+        while True:
+            result = await view.play_round()
+            if result != "correct":
+                break
+            await view.render(footer=f"✅ Correct! Moving to level {view.level + 1}...")
+            await asyncio.sleep(1.5)
+
+        view.set_buttons_enabled(False)
+        view.stop()
+        if result == "timeout":
+            final = f"⏰ {interaction.user.mention}, you took too long! You reached level {view.level}."
+        else:
+            final = f"❌ Wrong pattern, {interaction.user.mention}! You reached level {view.level}."
+        if view.message is not None:
+            try:
+                await view.message.edit(content=final, view=view)
+            except discord.HTTPException:
+                pass
+
+    @app_commands.command(name="hotpotato", description="Start a hot potato game - pass it before time runs out!")
+    @app_commands.checks.cooldown(1, 10.0)
+    @app_commands.guild_only()
+    async def hotpotato(self, interaction: discord.Interaction) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "hotpotato"):
+            return
+
+        channel_id = interaction.channel_id
+        if channel_id in self._hotpotato_games:
+            await self.bot.embeds.warning_interaction(
+                interaction, "Game In Progress", "A hot potato game is already running in this channel.", ephemeral=True
+            )
+            return
+
+        game = HotPotatoGame(channel_id=channel_id)
+        self._hotpotato_games[channel_id] = game
+
+        try:
+            deadline = int(time.time()) + HOTPOTATO_LOBBY_SECONDS
+            view = HotPotatoJoinView(game=game, timeout=HOTPOTATO_LOBBY_SECONDS + 5)
+            embed = self.bot.embeds.info_embed(
+                "🥔 Hot Potato",
+                f"Click **Join** to play! Starting <t:{deadline}:R>. Need at least {HOTPOTATO_MIN_PLAYERS} players.",
+            )
+            await interaction.response.send_message(embed=embed, view=view)
+            view.message = await interaction.original_response()
+
+            await asyncio.sleep(HOTPOTATO_LOBBY_SECONDS)
+            view.stop()
+            for item in view.children:
+                item.disabled = True
+            try:
+                await view.message.edit(view=view)
+            except discord.HTTPException:
+                pass
+
+            channel = interaction.channel
+            if len(game.participants) < HOTPOTATO_MIN_PLAYERS:
+                await interaction.followup.send(
+                    embed=self.bot.embeds.warning_embed(
+                        "Not Enough Players", f"At least {HOTPOTATO_MIN_PLAYERS} players are needed. Maybe next time!"
+                    )
+                )
+                return
+
+            game.started = True
+            game.holder_id = random.choice(list(game.participants))
+            await channel.send(
+                embed=self.bot.embeds.info_embed(
+                    "🥔 The Game Begins!",
+                    f"<@{game.holder_id}> has the potato! Mention another player in this channel to pass it "
+                    f"before **{HOLDING_TIMES[0]}** seconds run out!",
+                )
+            )
+
+            while game.round_index < len(HOLDING_TIMES):
+                holding_time = HOLDING_TIMES[game.round_index]
+                game.pass_event.clear()
+                try:
+                    await asyncio.wait_for(game.pass_event.wait(), timeout=max(holding_time, 0.05))
+                except asyncio.TimeoutError:
+                    await channel.send(
+                        embed=self.bot.embeds.error_embed(
+                            "💥 Boom!", f"<@{game.holder_id}> was holding the potato too long and got burned!"
+                        )
+                    )
+                    return
+
+            await channel.send(
+                embed=self.bot.embeds.error_embed(
+                    "💥 Boom!",
+                    f"<@{game.holder_id}> made it through every round and still got caught holding the potato!",
+                )
+            )
+        finally:
+            self._hotpotato_games.pop(channel_id, None)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None:
+            return
+
+        game = self._hotpotato_games.get(message.channel.id)
+        if game is None or not game.started or message.author.id != game.holder_id or not message.mentions:
+            return
+
+        for mentioned in message.mentions:
+            if mentioned.bot or mentioned.id == game.holder_id or mentioned.id not in game.participants:
+                continue
+
+            game.holder_id = mentioned.id
+            game.round_index += 1
+            game.pass_event.set()
+
+            if game.round_index < len(HOLDING_TIMES):
+                remaining = HOLDING_TIMES[game.round_index]
+                await message.channel.send(
+                    f"🥔 {mentioned.mention}, you have the potato! You have **{remaining}** second(s) to pass it on!"
+                )
+            return
+
     @ping.error
     @coinflip.error
     @roll.error
@@ -817,6 +1486,15 @@ class Fun(commands.Cog):
     @kiss.error
     @kill.error
     @trivia.error
+    @wiki.error
+    @weather.error
+    @gif.error
+    @cute.error
+    @beans.error
+    @snipe.error
+    @tictactoe.error
+    @simon.error
+    @hotpotato.error
     async def on_app_command_error(
         self,
         interaction: discord.Interaction,
