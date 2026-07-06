@@ -18,6 +18,10 @@ class Config:
     reddit_user_agent: str = "neo-gigabot/1.0"
     reddit_username: str = ""
     reddit_password: str = ""
+    openweathermap_api_key: str = ""
+    giphy_api_key: str = ""
+    support_server_invite: str = ""
+    legacy_data_path: str = ""
 
     @property
     def reddit_enabled(self) -> bool:
@@ -30,6 +34,14 @@ class Config:
                 self.reddit_password.strip(),
             ]
         )
+
+    @property
+    def weather_enabled(self) -> bool:
+        return bool(self.openweathermap_api_key.strip())
+
+    @property
+    def giphy_enabled(self) -> bool:
+        return bool(self.giphy_api_key.strip())
 
 
 
@@ -45,7 +57,7 @@ def load_config() -> Config:
 
     if not token:
         raise RuntimeError(
-            "DISCORD_TOKEN is missing. Create gigabot/.env from gigabot/.env.example."
+            f"DISCORD_TOKEN is missing. Create {env_path} from {project_root / '.env.example'}."
         )
 
     return Config(
@@ -58,4 +70,8 @@ def load_config() -> Config:
         reddit_user_agent=os.getenv("REDDIT_USER_AGENT", "neo-gigabot/1.0"),
         reddit_username=os.getenv("REDDIT_USERNAME", ""),
         reddit_password=os.getenv("REDDIT_PASSWORD", ""),
+        openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
+        giphy_api_key=os.getenv("GIPHY_API_KEY", ""),
+        support_server_invite=os.getenv("SUPPORT_SERVER_INVITE", ""),
+        legacy_data_path=os.getenv("LEGACY_DATA_PATH", ""),
     )

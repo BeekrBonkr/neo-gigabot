@@ -1,0 +1,35 @@
+# systemd unit for neo-gigabot. This file is NOT installed/enabled automatically -
+# it's here as cutover prep. To use it:
+#
+#   1. Stop and disable the OLD gigabot.service first (two processes trying to
+#      register slash commands / log in with the same token at once is a bad time):
+#        sudo systemctl stop gigabot
+#        sudo systemctl disable gigabot
+#   2. Install this one:
+#        sudo cp neo-gigabot.service /etc/systemd/system/neo-gigabot.service
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now neo-gigabot
+#   3. Check it's actually up:
+#        sudo systemctl status neo-gigabot
+#        journalctl -u neo-gigabot -f
+
+[Unit]
+Description=neo-GigaBot Discord Bot
+After=network-online.target
+Wants=network-online.target
+# If it keeps crashing (bad token, code bug), give up after 5 restarts within
+# 5 minutes instead of restarting forever and hammering Discord's API.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/michael/neogigabot
+ExecStart=/home/michael/neogigabot/start.sh
+Restart=on-failure
+RestartSec=5
+User=michael
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
