@@ -6,6 +6,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.warnings import count_warnings
+
 SUPPORT_FALLBACK_MESSAGE = "No support server has been configured for this bot yet."
 
 
@@ -31,7 +33,6 @@ class Info(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._feedback_cooldowns: dict[int, float] = {}
 
     @app_commands.command(name="about", description="Show information about this bot.")
     async def about(self, interaction: discord.Interaction) -> None:
@@ -79,6 +80,54 @@ class Info(commands.Cog):
             description="Use `/help` for a categorized list of everything I can do.",
             color=discord.Color.blurple(),
             thumbnail_url=self.bot.user.display_avatar.url,
+            fields=fields,
+        )
+        await self.bot.embeds.respond(interaction, embed=embed)
+
+    @app_commands.command(name="userinfo", description="Show details about a member: account age, join date, roles, and more.")
+    @app_commands.describe(user="Member to look up (defaults to you)")
+    @app_commands.guild_only()
+    async def userinfo(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
+        member = user or interaction.user
+
+        role_mentions = [role.mention for role in reversed(member.roles) if not role.is_default()]
+        roles_value = " ".join(role_mentions[:20]) if role_mentions else "*(none)*"
+        if len(role_mentions) > 20:
+            roles_value += f" (+{len(role_mentions) - 20} more)"
+
+        fields = [
+            self.bot.embeds.field("User ID", str(member.id), True),
+            self.bot.embeds.field("Bot Account", "Yes" if member.bot else "No", True),
+            self.bot.embeds.field(
+                "Account Created",
+                f"{discord.utils.format_dt(member.created_at, 'D')}\n({discord.utils.format_dt(member.created_at, 'R')})",
+                True,
+            ),
+        ]
+        if member.joined_at is not None:
+            fields.append(
+                self.bot.embeds.field(
+                    "Joined Server",
+                    f"{discord.utils.format_dt(member.joined_at, 'D')}\n({discord.utils.format_dt(member.joined_at, 'R')})",
+                    True,
+                )
+            )
+        if member.timed_out_until is not None and member.timed_out_until > discord.utils.utcnow():
+            fields.append(self.bot.embeds.field("Muted Until", discord.utils.format_dt(member.timed_out_until, "R"), True))
+        fields.append(self.bot.embeds.field(f"Roles ({len(role_mentions)})", roles_value, False))
+
+        # Warning history is moderator business, not something anyone should be
+        # able to pull up on anyone else.
+        invoker = interaction.user
+        if isinstance(invoker, discord.Member) and invoker.guild_permissions.moderate_members:
+            warning_count = count_warnings(self.bot.storage_path, interaction.guild.id, member.id)
+            fields.append(self.bot.embeds.field("Warnings", str(warning_count), True))
+
+        embed = self.bot.embeds.create(
+            title=f"User Info - {member.display_name}",
+            description=f"{member.mention}",
+            color=member.color if member.color.value else discord.Color.blurple(),
+            thumbnail_url=member.display_avatar.url,
             fields=fields,
         )
         await self.bot.embeds.respond(interaction, embed=embed)

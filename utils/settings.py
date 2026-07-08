@@ -10,7 +10,6 @@ import yaml
 from utils.db import connect as _db_connect
 
 DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
-    "prefix": "!",
     "bot_channels": [],
     "blocked_commands": [],
     "listen_to_bots": False,
@@ -24,18 +23,54 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "autoroles": [],
     "music_dj_enabled": False,
     "music_dj_role_name": "dj",
+    "music_djadmin_role_id": "",
     "music_default_volume": 50,
     "mod_log_enabled": False,
     "mod_log_channel_id": "",
     "warn_threshold": 0,
     "warn_action": "none",
     "warn_mute_duration": "1h",
+    "warn_window_days": 0,
     "sticky_roles": False,
+    "dm_on_mod_action": True,
+    "mod_log_events": ["warn", "mute", "kick", "ban"],
+    "starboard_channel_id": "",
+    "starboard_threshold": 3,
+    "starboard_emoji": "⭐",
+    "starboard_allow_selfstar": True,
+    "starboard_ignore_nsfw": False,
+    "welcome_delete_after": 0,
+    "leave_channel_ids": [],
+    "embed_color": "",
+    "music_max_queue_length": 0,
+    "music_max_track_minutes": 0,
 }
 
 WARN_ACTION_CHOICES = ("none", "mute", "kick", "ban")
+MOD_LOG_EVENT_KINDS = ("warn", "mute", "kick", "ban")
 
-ALLOWED_PREFIX_CHARS = "!$%&*.<>"
+
+# ==============================
+# in-memory caches
+# ==============================
+# Guild settings are read on every gated command *and* on every logged event
+# (message edits/deletes, joins, voice updates, ...), so hitting SQLite and
+# re-parsing default.yml per read is the bot's hottest path by far. Both caches
+# are safe without locking because everything runs on one event loop and the
+# mutating helpers below keep them in sync with every write. Copies are handed
+# out (and stored) so callers that mutate the returned dict before saving can't
+# corrupt the cached version.
+#
+# Trade-off: hand-editing default.yml or the DB while the bot is running won't
+# be picked up until restart.
+_DEFAULTS_CACHE: dict[str, dict[str, Any]] = {}
+_GUILD_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
+
+
+def clear_settings_caches() -> None:
+    """Drop both caches. Used by tests and available for a manual reload."""
+    _DEFAULTS_CACHE.clear()
+    _GUILD_CACHE.clear()
 
 
 # ==============================
@@ -101,6 +136,11 @@ def ensure_default_settings_file(storage_path: Path) -> None:
 
 
 def get_default_settings(storage_path: Path) -> dict[str, Any]:
+    cache_key = str(storage_path)
+    cached = _DEFAULTS_CACHE.get(cache_key)
+    if cached is not None:
+        return deepcopy(cached)
+
     ensure_default_settings_file(storage_path)
     with _default_settings_path(storage_path).open("r", encoding="utf-8") as handle:
         loaded = yaml.safe_load(handle) or {}
@@ -108,7 +148,9 @@ def get_default_settings(storage_path: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         loaded = {}
 
-    return _merge_missing_defaults(loaded, DEFAULT_GUILD_SETTINGS)
+    merged = _merge_missing_defaults(loaded, DEFAULT_GUILD_SETTINGS)
+    _DEFAULTS_CACHE[cache_key] = deepcopy(merged)
+    return merged
 
 
 # ==============================
@@ -173,6 +215,7 @@ def _upsert_guild_settings(storage_path: Path, guild_id: int | str, data: dict[s
             (int(guild_id), payload),
         )
         connection.commit()
+    _GUILD_CACHE[(str(storage_path), int(guild_id))] = deepcopy(data)
 
 
 # ==============================
@@ -193,9 +236,14 @@ def delete_guild_settings(storage_path: Path, guild_id: int | str) -> None:
     with _connect(storage_path) as connection:
         connection.execute("DELETE FROM guild_settings WHERE guild_id = ?", (int(guild_id),))
         connection.commit()
+    _GUILD_CACHE.pop((str(storage_path), int(guild_id)), None)
 
 
 def get_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, Any]:
+    cached = _GUILD_CACHE.get((str(storage_path), int(guild_id)))
+    if cached is not None:
+        return deepcopy(cached)
+
     defaults = get_default_settings(storage_path)
     loaded = _fetch_raw_guild_settings(storage_path, guild_id)
 
@@ -206,6 +254,8 @@ def get_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, Any
     synced = sync_with_default(loaded, defaults)
     if synced != loaded:
         _upsert_guild_settings(storage_path, guild_id, synced)
+    else:
+        _GUILD_CACHE[(str(storage_path), int(guild_id))] = deepcopy(synced)
 
     return synced
 
@@ -246,14 +296,47 @@ def sync_all_guild_settings(storage_path: Path) -> int:
     return updated_count
 
 
+def migrate_blocked_command_names(storage_path: Path, leaf_to_qualified: dict[str, list[str]]) -> int:
+    """One-time upgrade of blocked_commands entries from leaf names to
+    qualified names ("add" -> "playlist add" / "reactionrole add" / ...).
+
+    Each stored leaf name expands to *every* qualified name sharing that leaf,
+    which preserves the old matching behavior exactly (leaf-name matching
+    blocked all of them); admins can then unblock the unintended ones
+    individually from the dashboard. Entries containing a space are already
+    qualified and pass through; unknown names are kept as-is. Returns the
+    number of guild rows rewritten."""
+    ensure_settings_database(storage_path)
+    with _connect(storage_path) as connection:
+        rows = connection.execute("SELECT guild_id, data FROM guild_settings").fetchall()
+
+    migrated = 0
+    for row in rows:
+        data = _deserialize(row["data"])
+        blocked = data.get("blocked_commands")
+        if not blocked:
+            continue
+
+        expanded: list[str] = []
+        for name in blocked:
+            name = str(name).lower()
+            if " " in name:
+                expanded.append(name)
+            else:
+                expanded.extend(leaf_to_qualified.get(name, [name]))
+
+        new_blocked = sorted(set(expanded))
+        if new_blocked != blocked:
+            data["blocked_commands"] = new_blocked
+            _upsert_guild_settings(storage_path, int(row["guild_id"]), data)
+            migrated += 1
+
+    return migrated
+
+
 # ==============================
 # convenience helpers used by other cogs
 # ==============================
-def get_guild_prefix(storage_path: Path, guild_id: int | str, fallback: str = "!") -> str:
-    settings = get_guild_settings(storage_path, guild_id)
-    return settings.get("prefix", fallback)
-
-
 def command_is_blocked(storage_path: Path, guild_id: int | str, command_name: str) -> bool:
     settings = get_guild_settings(storage_path, guild_id)
     blocked = settings.get("blocked_commands", []) or []
@@ -303,11 +386,132 @@ def get_logging_channel_id(storage_path: Path, guild_id: int | str) -> int | Non
 
 
 # ==============================
+# starboard helpers
+# ==============================
+def get_starboard_channel_id(storage_path: Path, guild_id: int | str) -> int | None:
+    settings = get_guild_settings(storage_path, guild_id)
+    channel_id = settings.get("starboard_channel_id")
+    if not channel_id:
+        return None
+    try:
+        return int(channel_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_starboard_threshold(storage_path: Path, guild_id: int | str) -> int:
+    settings = get_guild_settings(storage_path, guild_id)
+    try:
+        return max(1, int(settings.get("starboard_threshold", 3) or 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def get_starboard_emoji(storage_path: Path, guild_id: int | str) -> str:
+    settings = get_guild_settings(storage_path, guild_id)
+    emoji = str(settings.get("starboard_emoji") or "").strip()
+    return emoji or "⭐"
+
+
+def starboard_selfstar_allowed(storage_path: Path, guild_id: int | str) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    return bool(settings.get("starboard_allow_selfstar", True))
+
+
+def starboard_ignores_nsfw(storage_path: Path, guild_id: int | str) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    return bool(settings.get("starboard_ignore_nsfw", False))
+
+
+# ==============================
 # moderation log helpers
 # ==============================
 def is_mod_log_enabled(storage_path: Path, guild_id: int | str) -> bool:
     settings = get_guild_settings(storage_path, guild_id)
     return bool(settings.get("mod_log_enabled", False)) and bool(settings.get("mod_log_channel_id"))
+
+
+def is_mod_log_event_enabled(storage_path: Path, guild_id: int | str, kind: str) -> bool:
+    """Whether this kind of moderation action ("warn"/"mute"/"kick"/"ban")
+    should be posted to the mod log. Unknown kinds are always logged so a new
+    action type can't silently disappear because the filter predates it."""
+    if kind not in MOD_LOG_EVENT_KINDS:
+        return True
+    settings = get_guild_settings(storage_path, guild_id)
+    enabled = settings.get("mod_log_events")
+    if not isinstance(enabled, list):
+        return True
+    return kind in {str(value).lower() for value in enabled}
+
+
+def dm_on_mod_action_enabled(storage_path: Path, guild_id: int | str) -> bool:
+    settings = get_guild_settings(storage_path, guild_id)
+    return bool(settings.get("dm_on_mod_action", True))
+
+
+# ==============================
+# welcome helpers
+# ==============================
+def get_welcome_delete_after(storage_path: Path, guild_id: int | str) -> int:
+    settings = get_guild_settings(storage_path, guild_id)
+    try:
+        return max(0, int(settings.get("welcome_delete_after", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# ==============================
+# embed color helpers
+# ==============================
+def parse_hex_color(value: str | None) -> int | None:
+    """Parse "#RRGGBB" (or "RRGGBB") into an int; None for empty/invalid."""
+    text = str(value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
+def get_embed_color_value(storage_path: Path, guild_id: int | str) -> int | None:
+    settings = get_guild_settings(storage_path, guild_id)
+    return parse_hex_color(settings.get("embed_color"))
+
+
+# ==============================
+# music limit helpers
+# ==============================
+def get_music_max_queue_length(storage_path: Path, guild_id: int | str) -> int:
+    """Per-guild queue cap; 0 means "no guild-specific cap" (the music cog's
+    hard MAX_QUEUE_SIZE still applies)."""
+    settings = get_guild_settings(storage_path, guild_id)
+    try:
+        return max(0, int(settings.get("music_max_queue_length", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_music_max_track_seconds(storage_path: Path, guild_id: int | str) -> int:
+    """Per-guild track length cap in seconds; 0 means "no guild-specific cap"."""
+    settings = get_guild_settings(storage_path, guild_id)
+    try:
+        return max(0, int(settings.get("music_max_track_minutes", 0) or 0)) * 60
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_music_djadmin_role_id(storage_path: Path, guild_id: int | str) -> int | None:
+    """Role whose members may always control music playback, even with DJ
+    mode on. Empty/invalid means no such role is configured."""
+    settings = get_guild_settings(storage_path, guild_id)
+    role_id = settings.get("music_djadmin_role_id")
+    if not role_id:
+        return None
+    try:
+        return int(role_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def get_mod_log_channel_id(storage_path: Path, guild_id: int | str) -> int | None:

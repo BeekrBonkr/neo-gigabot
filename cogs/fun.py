@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -14,12 +15,7 @@ import pyfiglet
 from discord import app_commands
 from discord.ext import commands
 
-from utils.settings import command_is_blocked, get_guild_settings, is_bot_channel
-
-try:
-    import apraw  # type: ignore
-except Exception:  # pragma: no cover - handled gracefully at runtime
-    apraw = None
+LOGGER = logging.getLogger(__name__)
 
 EIGHT_BALL_RESPONSES: Final[list[str]] = [
     "It is certain.",
@@ -113,27 +109,6 @@ SNIPE_MAX_CONTENT_LENGTH: Final[int] = 1000
 HOLDING_TIMES: Final[list[int]] = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
 HOTPOTATO_LOBBY_SECONDS: Final[int] = 30
 HOTPOTATO_MIN_PLAYERS: Final[int] = 2
-
-
-@dataclass(slots=True)
-class RedditCredentials:
-    client_id: str = ""
-    client_secret: str = ""
-    user_agent: str = "neo-gigabot/1.0"
-    username: str = ""
-    password: str = ""
-
-    @property
-    def configured(self) -> bool:
-        return all(
-            [
-                self.client_id.strip(),
-                self.client_secret.strip(),
-                self.user_agent.strip(),
-                self.username.strip(),
-                self.password.strip(),
-            ]
-        )
 
 
 class TriviaView(discord.ui.View):
@@ -500,7 +475,6 @@ class Fun(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._reddit: apraw.Reddit | None = None
         self._snipes: dict[int, dict[str, Any]] = {}
         self._hotpotato_games: dict[int, HotPotatoGame] = {}
 
@@ -512,153 +486,96 @@ class Fun(commands.Cog):
         interaction: discord.Interaction,
         command_name: str,
     ) -> bool:
-        if interaction.guild is None or interaction.channel is None:
-            return True
-
-        if command_is_blocked(self.bot.storage_path, interaction.guild.id, command_name):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Command Blocked",
-                f"`/{command_name}` is blocked in this server.",
-                ephemeral=True,
-            )
-            return False
-
-        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
-        bot_channels = settings.get("bot_channels", []) or []
-        if bot_channels and not is_bot_channel(
-            self.bot.storage_path,
-            interaction.guild.id,
-            interaction.channel.id,
-        ):
-            await self.bot.embeds.warning_interaction(
-                interaction,
-                "Wrong Channel",
-                "This command can only be used in a configured bot channel.",
-                ephemeral=True,
-            )
-            return False
-
-        return True
+        return await self.bot.ensure_command_allowed(interaction, command_name)
 
     async def _fetch_json(self, url: str) -> dict | list | None:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                url,
-                headers={"User-Agent": "neo-gigabot/1.0"},
-            ) as response:
-                if response.status != 200:
-                    return None
-                return await response.json()
+        """None on any failure - non-200, bad payload, network error, timeout -
+        so every caller funnels into its own "couldn't fetch right now" message
+        instead of leaking an aiohttp traceback to the global handler."""
+        status, payload = await self._fetch_json_with_status(url)
+        return payload if status == 200 else None
 
     async def _fetch_json_with_status(self, url: str) -> tuple[int, dict | list | None]:
         """Like _fetch_json, but also returns the HTTP status so callers can
         distinguish e.g. "not found" from "service misconfigured"."""
-        timeout = aiohttp.ClientTimeout(total=10)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers={"User-Agent": "neo-gigabot/1.0"}) as response:
-                    try:
-                        payload = await response.json(content_type=None)
-                    except (aiohttp.ContentTypeError, ValueError):
-                        payload = None
-                    return response.status, payload
+            async with self.bot.http_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                try:
+                    payload = await response.json(content_type=None)
+                except (aiohttp.ContentTypeError, ValueError):
+                    payload = None
+                return response.status, payload
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return 0, None
 
-    def _get_reddit_credentials(self) -> RedditCredentials:
-        config = getattr(self.bot, "config", None)
-        return RedditCredentials(
-            client_id=getattr(config, "reddit_client_id", ""),
-            client_secret=getattr(config, "reddit_client_secret", ""),
-            user_agent=getattr(config, "reddit_user_agent", "neo-gigabot/1.0"),
-            username=getattr(config, "reddit_username", ""),
-            password=getattr(config, "reddit_password", ""),
-        )
+    async def _fetch_reddit_submission(self, subreddit_name: str) -> dict[str, Any] | None:
+        """Fetch a random non-stickied hot post via Reddit's public JSON endpoint.
 
-    def _get_reddit_client(self) -> apraw.Reddit | None:
-        if apraw is None:
-            return None
-
-        if self._reddit is not None:
-            return self._reddit
-
-        creds = self._get_reddit_credentials()
-        if not creds.configured:
-            return None
-
-        self._reddit = apraw.Reddit(
-            client_id=creds.client_id,
-            client_secret=creds.client_secret,
-            user_agent=creds.user_agent,
-            username=creds.username,
-            password=creds.password,
-        )
-        return self._reddit
-
-    async def _fetch_reddit_submission(self, subreddit_name: str):
-        reddit = self._get_reddit_client()
-        if reddit is None:
-            raise RuntimeError(
-                "Reddit is not configured. Check apraw installation and Reddit credentials in your .env/config."
-            )
-
+        No credentials or Reddit API client needed - /r/<sub>/hot.json is public
+        for read-only listing, which is all these commands do. Returns the post's
+        `data` dict, or None when the subreddit has no usable posts."""
+        url = f"https://www.reddit.com/r/{quote(subreddit_name)}/hot.json?limit=100&raw_json=1"
         try:
-            subreddit = await reddit.subreddit(subreddit_name)
-            submissions = []
-            async for post in subreddit.hot(limit=100):
-                if not getattr(post, "stickied", False):
-                    submissions.append(post)
-
-            if not submissions:
-                return None
-
-            return random.choice(submissions)
+            status, data = await self._fetch_json_with_status(url)
         except Exception as exc:
-            print(f"Reddit fetch failed for r/{subreddit_name}: {exc}")
+            LOGGER.warning("Reddit fetch failed for r/%s: %s", subreddit_name, exc)
             raise
+
+        if status in (403, 404):
+            raise RuntimeError("That subreddit doesn't exist or is private.")
+        if status != 200 or not isinstance(data, dict):
+            raise RuntimeError("Reddit didn't respond properly. Try again in a moment.")
+
+        children = ((data.get("data") or {}).get("children")) or []
+        posts = [
+            child.get("data")
+            for child in children
+            if isinstance(child, dict) and child.get("kind") == "t3" and isinstance(child.get("data"), dict)
+        ]
+        posts = [post for post in posts if not post.get("stickied")]
+        if not posts:
+            return None
+
+        return random.choice(posts)
 
     async def _send_reddit_submission(
         self,
         interaction: discord.Interaction,
         *,
         subreddit_name: str,
-        submission,
+        submission: dict[str, Any],
     ) -> None:
-        author_name = "[deleted]"
-        try:
-            author = await submission.author()
-            if author is not None:
-                author_name = str(author)
-        except Exception:
-            pass
+        author_name = submission.get("author") or "[deleted]"
+        is_self = bool(submission.get("is_self"))
+        post_url = str(submission.get("url") or "")
 
-        description = submission.selftext if getattr(submission, "is_self", False) else ""
+        description = str(submission.get("selftext") or "") if is_self else ""
+        if len(description) > 2000:
+            description = description[:1997].rstrip() + "..."
+
         embed = self.bot.embeds.create(
-            title=submission.title,
+            title=str(submission.get("title") or "Untitled")[:256],
             description=description or None,
             color=discord.Color(0xFF5700),
             author_name=f"/r/{subreddit_name} | u/{author_name}",
             author_icon_url=REDDIT_ICON_URL,
             timestamp=False,
         )
-        embed.url = f"https://www.reddit.com{submission.permalink}"
+        embed.url = f"https://www.reddit.com{submission.get('permalink', '')}"
 
-        if getattr(submission, "is_self", False):
+        media = submission.get("media") or {}
+        if is_self:
             pass
-        elif getattr(submission, "url", "").lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
-            embed.set_image(url=submission.url)
-        else:
-            media = getattr(submission, "media", None) or {}
-            if "reddit_video" in media:
-                embed.description = f"[Click here to watch the video]({media['reddit_video'].get('fallback_url', submission.url)})"
-            elif getattr(submission, "url", None):
-                embed.description = (embed.description + "\n\n" if embed.description else "") + f"[Open post content]({submission.url})"
+        elif post_url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+            embed.set_image(url=post_url)
+        elif "reddit_video" in media:
+            embed.description = f"[Click here to watch the video]({media['reddit_video'].get('fallback_url', post_url)})"
+        elif post_url:
+            embed.description = (embed.description + "\n\n" if embed.description else "") + f"[Open post content]({post_url})"
 
-        embed.add_field(name="Score", value=str(getattr(submission, "score", "?")))
-        embed.add_field(name="Comments", value=str(getattr(submission, "num_comments", "?")))
-        if getattr(submission, "over_18", False):
+        embed.add_field(name="Score", value=str(submission.get("score", "?")))
+        embed.add_field(name="Comments", value=str(submission.get("num_comments", "?")))
+        if submission.get("over_18"):
             embed.add_field(name="Rating", value="NSFW")
 
         await self.bot.embeds.respond(interaction, embed=embed)
@@ -898,39 +815,28 @@ class Fun(commands.Cog):
         )
         await self.bot.embeds.respond(interaction, embed=embed)
 
-    @app_commands.command(name="reddit", description="Get a random hot post from a subreddit.")
-    @app_commands.describe(subreddit="The subreddit name, with or without r/.")
-    @app_commands.checks.cooldown(1, 5.0)
-    async def reddit_command(
-        self,
-        interaction: discord.Interaction,
-        subreddit: app_commands.Range[str, 1, 100],
-    ) -> None:
-        if not await self._ensure_fun_command_allowed(interaction, "reddit"):
-            return
-
-        if self._get_reddit_client() is None:
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Reddit Unavailable",
-                "Reddit is not configured yet. Add the Reddit API credentials to your `.env` first.",
-                ephemeral=True,
-            )
-            return
-
-        subreddit_name = subreddit.strip().replace(" ", "_")
-        if subreddit_name.lower().startswith("r/"):
-            subreddit_name = subreddit_name[2:]
-
+    async def _reddit_flow(self, interaction: discord.Interaction, subreddit_name: str) -> None:
+        """Fetch a hot post and send it. Callers gate on their *own* command name
+        first - this deliberately does no blocked-command check itself, so
+        blocking `/reddit` doesn't also (confusingly) block `/meme` and `/cursed`."""
         await interaction.response.defer(thinking=True)
         try:
             submission = await self._fetch_reddit_submission(subreddit_name)
-        except Exception as exc:
+        except RuntimeError as exc:
+            # RuntimeErrors from _fetch_reddit_submission carry a user-facing
+            # message ("That subreddit doesn't exist or is private.", ...).
+            await self.bot.embeds.edit_interaction_response(
+                interaction,
+                embed=self.bot.embeds.error_embed("Reddit Failed", str(exc)),
+            )
+            return
+        except Exception:
+            LOGGER.exception("Unexpected error fetching r/%s", subreddit_name)
             await self.bot.embeds.edit_interaction_response(
                 interaction,
                 embed=self.bot.embeds.error_embed(
                     "Reddit Failed",
-                    f"I couldn't fetch posts from `r/{subreddit_name}`.\n```{exc}```",
+                    f"I couldn't fetch posts from `r/{subreddit_name}` right now.",
                 ),
             )
             return
@@ -946,7 +852,7 @@ class Fun(commands.Cog):
             return
 
         channel = interaction.channel
-        if getattr(submission, "over_18", False) and not getattr(channel, "is_nsfw", lambda: False)():
+        if submission.get("over_18") and not getattr(channel, "is_nsfw", lambda: False)():
             await self.bot.embeds.edit_interaction_response(
                 interaction,
                 embed=self.bot.embeds.warning_embed(
@@ -963,63 +869,36 @@ class Fun(commands.Cog):
             submission=submission,
         )
 
+    @app_commands.command(name="reddit", description="Get a random hot post from a subreddit.")
+    @app_commands.describe(subreddit="The subreddit name, with or without r/.")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def reddit_command(
+        self,
+        interaction: discord.Interaction,
+        subreddit: app_commands.Range[str, 1, 100],
+    ) -> None:
+        if not await self._ensure_fun_command_allowed(interaction, "reddit"):
+            return
+
+        subreddit_name = subreddit.strip().replace(" ", "_")
+        if subreddit_name.lower().startswith("r/"):
+            subreddit_name = subreddit_name[2:]
+
+        await self._reddit_flow(interaction, subreddit_name)
+
     @app_commands.command(name="meme", description="Get a meme from Reddit.")
     @app_commands.checks.cooldown(1, 5.0)
     async def meme(self, interaction: discord.Interaction) -> None:
         if not await self._ensure_fun_command_allowed(interaction, "meme"):
             return
-
-        subreddit_name = random.choice(MEME_SUBREDDITS)
-        await self.reddit_command.callback(self, interaction, subreddit_name)
+        await self._reddit_flow(interaction, random.choice(MEME_SUBREDDITS))
 
     @app_commands.command(name="cursed", description="Get a cursed image from Reddit.")
     @app_commands.checks.cooldown(1, 5.0)
     async def cursed(self, interaction: discord.Interaction) -> None:
         if not await self._ensure_fun_command_allowed(interaction, "cursed"):
             return
-
-        if self._get_reddit_client() is None:
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Reddit Unavailable",
-                "Reddit is not configured yet. Add the Reddit API credentials to your `.env` first.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(thinking=True)
-        try:
-            submission = await self._fetch_reddit_submission("cursedimages")
-        except Exception:
-            submission = None
-
-        if submission is None:
-            await self.bot.embeds.edit_interaction_response(
-                interaction,
-                embed=self.bot.embeds.error_embed(
-                    "Reddit Failed",
-                    "I couldn't fetch a cursed image right now.",
-                ),
-            )
-            return
-
-        channel = interaction.channel
-        if getattr(submission, "over_18", False) and not getattr(channel, "is_nsfw", lambda: False)():
-            await self.bot.embeds.edit_interaction_response(
-                interaction,
-                embed=self.bot.embeds.warning_embed(
-                    "NSFW Post Blocked",
-                    "The post I found is marked as NSFW, but this channel is not NSFW.",
-                ),
-            )
-            return
-
-        await interaction.delete_original_response()
-        await self._send_reddit_submission(
-            interaction,
-            subreddit_name="cursedimages",
-            submission=submission,
-        )
+        await self._reddit_flow(interaction, "cursedimages")
 
     @app_commands.command(name="insult", description="Lightly roast someone.")
     @app_commands.describe(user="The user to roast. Leave empty to roast yourself.")
@@ -1312,6 +1191,15 @@ class Fun(commands.Cog):
             return
 
         content = (message.content or "")[:SNIPE_MAX_CONTENT_LENGTH]
+        # One entry per channel that ever saw a deletion, and expired snipes are
+        # only replaced (never removed), so sweep stale ones as the dict grows.
+        if len(self._snipes) > 512:
+            now = time.time()
+            self._snipes = {
+                channel_id: entry
+                for channel_id, entry in self._snipes.items()
+                if now - entry["timestamp"] <= SNIPE_MAX_AGE_SECONDS
+            }
         self._snipes[message.channel.id] = {
             "content": content,
             "author_name": str(message.author),
@@ -1469,56 +1357,11 @@ class Fun(commands.Cog):
                 )
             return
 
-    @ping.error
-    @coinflip.error
-    @roll.error
-    @ascii_text.error
-    @eight_ball.error
-    @catfact.error
-    @fact.error
-    @joke.error
-    @server_info.error
-    @reddit_command.error
-    @meme.error
-    @cursed.error
-    @insult.error
-    @hug.error
-    @kiss.error
-    @kill.error
-    @trivia.error
-    @wiki.error
-    @weather.error
-    @gif.error
-    @cute.error
-    @beans.error
-    @snipe.error
-    @tictactoe.error
-    @simon.error
-    @hotpotato.error
-    async def on_app_command_error(
-        self,
-        interaction: discord.Interaction,
-        error: app_commands.AppCommandError,
-    ) -> None:
-        if isinstance(error, app_commands.CommandOnCooldown):
-            await self.bot.embeds.warning_interaction(
-                interaction,
-                "Slow Down",
-                f"Try again in `{error.retry_after:.1f}` seconds.",
-                ephemeral=True,
-            )
-            return
-
-        if isinstance(error, app_commands.TransformerError):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Invalid Value",
-                "One of the values you entered was invalid.",
-                ephemeral=True,
-            )
-            return
-
-        raise error
+    # No local error handler on purpose: a local handler that re-raises would
+    # prevent the global handler in main.py from running at all (see the note
+    # in cogs/info.py), losing both the user-facing error message and the
+    # command-log entry. The global handler covers cooldowns, permissions,
+    # transformer errors, and unexpected failures for every command here.
 
 
 async def setup(bot: commands.Bot) -> None:

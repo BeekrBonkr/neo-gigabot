@@ -335,8 +335,14 @@ def shuffle_playlist(storage_path: Path, owner_id: int, name: str) -> dict[str, 
         return updated
 
 
-def toggle_like(storage_path: Path, owner_id: int, name: str, liker_id: int) -> tuple[dict[str, Any], bool]:
-    """Toggle a like from liker_id on owner_id's playlist. Returns (updated playlist, now_liked)."""
+def toggle_like(
+    storage_path: Path, owner_id: int, name: str, liker_id: int, *, desired: bool | None = None
+) -> tuple[dict[str, Any], bool]:
+    """Toggle a like from liker_id on owner_id's playlist. Returns (updated playlist, now_liked).
+
+    `desired` pins the outcome instead of toggling: False always ends unliked
+    (so /playlist unlike on something never liked can't *add* a like), True
+    always ends liked. A no-op returns the playlist unchanged."""
     ensure_playlists_table(storage_path)
     key = normalize_name(name)
 
@@ -351,7 +357,10 @@ def toggle_like(storage_path: Path, owner_id: int, name: str, liker_id: int) -> 
 
         likes = playlist["likes"]
         liker_key = str(int(liker_id))
-        now_liked = liker_key not in likes
+        currently_liked = liker_key in likes
+        now_liked = (not currently_liked) if desired is None else desired
+        if now_liked == currently_liked:
+            return playlist, now_liked
         if now_liked:
             likes.append(liker_key)
         else:

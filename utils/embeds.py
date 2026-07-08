@@ -6,6 +6,8 @@ from typing import Any, Sequence
 import discord
 from discord.ext import commands
 
+from utils.settings import get_embed_color_value
+
 
 @dataclass(slots=True)
 class EmbedField:
@@ -152,6 +154,8 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
+        guild = getattr(target, "guild", None)
+        self._apply_guild_accent(final_embed, guild.id if guild is not None else None)
         return await target.send(content=content, embed=final_embed, **kwargs)
 
     async def respond(
@@ -188,6 +192,7 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
+        self._apply_guild_accent(final_embed, interaction.guild_id)
 
         if interaction.response.is_done():
             return await interaction.followup.send(
@@ -239,6 +244,7 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
+        self._apply_guild_accent(final_embed, message.guild.id if message.guild is not None else None)
         return await message.edit(content=content, embed=final_embed, **kwargs)
 
     async def edit_interaction_response(
@@ -274,6 +280,7 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
+        self._apply_guild_accent(final_embed, interaction.guild_id)
         return await interaction.edit_original_response(content=content, embed=final_embed, **kwargs)
 
     async def success(self, target: commands.Context | discord.abc.Messageable, title: str, description: str, **kwargs: Any) -> discord.Message:
@@ -352,3 +359,24 @@ class EmbedManager:
         if isinstance(color, discord.Color):
             return color
         return discord.Color(color)
+
+    def guild_color(self, guild_id: int | None) -> discord.Color | None:
+        """The guild's configured accent color, or None if unset/unavailable."""
+        if guild_id is None or self.bot is None:
+            return None
+        storage_path = getattr(self.bot, "storage_path", None)
+        if storage_path is None:
+            return None
+        value = get_embed_color_value(storage_path, guild_id)
+        return discord.Color(value) if value is not None else None
+
+    def _apply_guild_accent(self, embed: discord.Embed, guild_id: int | None) -> discord.Embed:
+        """Swap the stock accent color for the guild's configured one. Only
+        neutral (default/info) embeds are recolored - success/error/warning
+        keep their semantic colors."""
+        if embed.color is not None and embed.color != self.default_color:
+            return embed
+        custom = self.guild_color(guild_id)
+        if custom is not None:
+            embed.color = custom
+        return embed

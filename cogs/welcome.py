@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
-from utils.settings import get_guild_settings
+from utils.settings import get_guild_settings, get_welcome_delete_after
 
 
 def _substitute(template: str, member: discord.Member) -> str:
@@ -25,7 +25,15 @@ class Welcome(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+    # The greeting template is admin-provided text; only allow user pings so a
+    # template containing @everyone/@here or a role mention can't mass-ping on
+    # every single join/leave.
+    _ALLOWED_MENTIONS = discord.AllowedMentions(users=True, everyone=False, roles=False)
+
     async def _send_to_configured_channels(self, guild: discord.Guild, channel_ids: list, content: str) -> None:
+        # 0 means keep the greeting; anything else auto-deletes it after that
+        # many seconds so busy servers don't accumulate join/leave noise.
+        delete_after = get_welcome_delete_after(self.bot.storage_path, guild.id) or None
         for raw_id in channel_ids:
             try:
                 channel_id = int(raw_id)
@@ -34,7 +42,7 @@ class Welcome(commands.Cog):
             channel = guild.get_channel(channel_id)
             if isinstance(channel, discord.TextChannel):
                 try:
-                    await channel.send(content)
+                    await channel.send(content, allowed_mentions=self._ALLOWED_MENTIONS, delete_after=delete_after)
                 except (discord.Forbidden, discord.HTTPException):
                     pass
 
@@ -54,7 +62,9 @@ class Welcome(commands.Cog):
         if member.bot:
             return
         settings = get_guild_settings(self.bot.storage_path, member.guild.id)
-        channel_ids = settings.get("welcome_channel_ids", []) or []
+        # Leave messages go to their own channels when configured, otherwise
+        # they share the welcome channel(s) as before.
+        channel_ids = settings.get("leave_channel_ids") or settings.get("welcome_channel_ids") or []
         message = settings.get("leave_message") or ""
         if not channel_ids or not message:
             return

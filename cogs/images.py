@@ -5,6 +5,7 @@ import functools
 import io
 import math
 import random
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -107,6 +108,17 @@ QUOTE_MAX_INPUT_LENGTH = 400
 QUOTE_MAX_SHRINK_ATTEMPTS = 30
 
 
+class NotEnoughFacesError(Exception):
+    """Raised by Images._faces_work when fewer faces than a command needs were
+    detected on every frame. Carries the best per-frame count so callers can
+    distinguish 'no faces at all' from 'found one, needed two' (faceswap)."""
+
+    def __init__(self, found: int, needed: int) -> None:
+        super().__init__(f"Needed {needed} face(s), found {found}.")
+        self.found = found
+        self.needed = needed
+
+
 class Images(commands.GroupCog, group_name="image", group_description="Image manipulation, memes, and effects."):
     """Slash-command image manipulation and quote commands."""
 
@@ -124,6 +136,9 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         self.assets_dir = self.bot.project_root / "assets" / "images"
         self._cpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CPU_BOUND)
         self._face_net: cv2.dnn.Net | None = None
+        # cv2.dnn.Net is not thread-safe for concurrent inference, and
+        # MAX_CONCURRENT_CPU_BOUND executor threads can reach it at once.
+        self._face_net_lock = threading.Lock()
 
         self.set_image_source_menu = app_commands.ContextMenu(
             name="Set Image Source",
@@ -146,12 +161,29 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
     # ---------- executor helper (shared with the effects commands below) ----------
 
     async def _run_cpu_bound(self, func: Callable[[], object], *, timeout: float = CPU_BOUND_TIMEOUT_SECONDS) -> object:
+        # The semaphore is released when the worker thread actually finishes,
+        # not when we stop waiting: a timeout can only abandon the thread, and
+        # releasing early would let real concurrency exceed the cap under
+        # repeated timeouts. shield() keeps wait_for from cancelling the
+        # executor future so the done callback fires at true completion.
         loop = asyncio.get_running_loop()
-        async with self._cpu_semaphore:
-            try:
-                return await asyncio.wait_for(loop.run_in_executor(None, func), timeout=timeout)
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("That took too long to process. Try a smaller image or less aggressive settings.") from exc
+        await self._cpu_semaphore.acquire()
+        try:
+            future = loop.run_in_executor(None, func)
+        except BaseException:
+            self._cpu_semaphore.release()
+            raise
+
+        def _on_done(done_future: asyncio.Future) -> None:
+            self._cpu_semaphore.release()
+            if not done_future.cancelled():
+                done_future.exception()  # retrieve, so abandoned failures don't log "never retrieved"
+
+        future.add_done_callback(_on_done)
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("That took too long to process. Try a smaller image or less aggressive settings.") from exc
 
     # ---------- face detection helpers ----------
 
@@ -166,13 +198,16 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         return self._face_net
 
     def _detect_faces_in_frame(self, frame: Image.Image) -> list[tuple[int, int, int, int]]:
-        net = self._get_face_net()
         rgb = np.array(frame.convert("RGB"))
         bgr = rgb[:, :, ::-1]
         height, width = bgr.shape[:2]
         blob = cv2.dnn.blobFromImage(cv2.resize(bgr, FACE_BLOB_SIZE), 1.0, FACE_BLOB_SIZE, FACE_BLOB_MEAN)
-        net.setInput(blob)
-        detections = net.forward()
+        # Lock covers lazy creation and the setInput/forward pair; a forward
+        # pass is tens of milliseconds, so serializing it costs little.
+        with self._face_net_lock:
+            net = self._get_face_net()
+            net.setInput(blob)
+            detections = net.forward()
 
         boxes: list[tuple[int, int, int, int]] = []
         for i in range(detections.shape[2]):
@@ -187,22 +222,108 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 boxes.append((int(x1), int(y1), int(x2), int(y2)))
         return boxes
 
-    async def _detect_faces(self, image_bytes: bytes, filename: str) -> list[tuple[int, int, int, int]]:
-        # Faces are only detected once, on the first frame - re-running DNN
-        # inference per GIF frame would multiply the cost by the frame count
-        # and blow the timeout. Every frame of a short meme GIF is assumed to
-        # keep faces in roughly the same place, which holds well enough for
-        # /image effects blurfaces and /image effects facecrop's purposes.
-        def work() -> list[tuple[int, int, int, int]]:
-            with Image.open(io.BytesIO(image_bytes)) as image:
-                first_frame = (
-                    next(ImageSequence.Iterator(image)).convert("RGBA")
-                    if self.bot.image_tools.is_gif(image, filename)
-                    else image.convert("RGBA")
-                )
-                return self._detect_faces_in_frame(first_frame)
+    def _faces_work(
+        self,
+        image_bytes: bytes,
+        filename: str,
+        frame_processor: Callable[[Image.Image, list[tuple[int, int, int, int]]], Image.Image],
+        *,
+        min_faces: int = 1,
+        static_name: str,
+        gif_name: str,
+    ) -> tuple[bytes, str]:
+        """Run frame_processor(frame, boxes) over every frame, detecting faces
+        per frame so effects follow faces as they move through a GIF (instead of
+        the old first-frame-only detection). A single 300x300 SSD forward pass is
+        tens of milliseconds, so even a long meme GIF stays comfortably inside
+        CPU_BOUND_TIMEOUT_SECONDS; the timeout is the backstop for pathological
+        frame counts.
 
-        return await self._run_cpu_bound(work)
+        Frames where the detector momentarily drops below min_faces (a face
+        turning away for a frame or two) reuse the nearest earlier frame's boxes
+        rather than flickering the effect off. Raises NotEnoughFacesError if no
+        frame at all reaches min_faces. Must be called from an executor (via
+        _run_cpu_bound) - this does DNN inference and full-GIF re-encoding."""
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            is_gif = self.bot.image_tools.is_gif(image, filename)
+            frames = (
+                [frame.convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)]
+                if is_gif
+                else [image.convert("RGBA")]
+            )
+            per_frame_boxes = [self._detect_faces_in_frame(frame) for frame in frames]
+
+            best = max(len(boxes) for boxes in per_frame_boxes)
+            if best < min_faces:
+                raise NotEnoughFacesError(best, min_faces)
+
+            last_seen = next(boxes for boxes in per_frame_boxes if len(boxes) >= min_faces)
+            for index, boxes in enumerate(per_frame_boxes):
+                if len(boxes) >= min_faces:
+                    last_seen = boxes
+                else:
+                    per_frame_boxes[index] = last_seen
+
+            processed = [
+                frame_processor(frame, boxes).convert("RGBA")
+                for frame, boxes in zip(frames, per_frame_boxes)
+            ]
+
+            output = io.BytesIO()
+            if is_gif:
+                processed[0].save(
+                    output, format="GIF", append_images=processed[1:], **self.bot.image_tools.gif_save_kwargs(image)
+                )
+                return output.getvalue(), gif_name
+            processed[0].save(output, format="PNG")
+            return output.getvalue(), static_name
+
+    def _swap_faces_in_frame(self, frame: Image.Image, boxes: list[tuple[int, int, int, int]]) -> Image.Image:
+        if len(boxes) < 2:
+            return frame
+        # Left-to-right (then top-to-bottom) ordering keeps "who gets whose face"
+        # stable across GIF frames instead of following detection-confidence order.
+        ordered = sorted(boxes, key=lambda box: (box[0], box[1]))
+        faces = [frame.crop(box) for box in ordered]
+        result = frame.copy()
+        for index, (x1, y1, x2, y2) in enumerate(ordered):
+            source = faces[(index + 1) % len(ordered)]
+            width, height = x2 - x1, y2 - y1
+            resized = source.resize((width, height), Image.LANCZOS)
+            # Feathered ellipse mask so the transplanted face blends into the
+            # head instead of landing as a hard-edged rectangle.
+            mask = Image.new("L", (width, height), 0)
+            ImageDraw.Draw(mask).ellipse((width * 0.08, height * 0.08, width * 0.92, height * 0.92), fill=255)
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=max(2, min(width, height) // 16)))
+            result.paste(resized, (x1, y1), mask)
+        return result
+
+    def _googly_eyes_frame(self, frame: Image.Image, boxes: list[tuple[int, int, int, int]]) -> Image.Image:
+        # The SSD model only gives a face box, not landmarks, so eyes are placed
+        # at fixed ratios within the box - roughly where eyes sit on a forward-
+        # facing face. Pupil offsets are random per call, which makes the eyes
+        # jiggle frame-to-frame on GIFs for free.
+        result = frame.copy()
+        draw = ImageDraw.Draw(result)
+        for x1, y1, x2, y2 in boxes:
+            width, height = x2 - x1, y2 - y1
+            eye_radius = max(4, int(width * 0.16))
+            pupil_radius = max(2, eye_radius // 2)
+            for x_ratio in (0.32, 0.68):
+                cx = x1 + int(width * x_ratio)
+                cy = y1 + int(height * 0.40)
+                draw.ellipse(
+                    (cx - eye_radius, cy - eye_radius, cx + eye_radius, cy + eye_radius),
+                    fill=(255, 255, 255, 255),
+                    outline=(0, 0, 0, 255),
+                    width=max(1, eye_radius // 6),
+                )
+                angle = random.uniform(0.0, math.tau)
+                distance = random.uniform(0.0, float(eye_radius - pupil_radius))
+                px = cx + distance * math.cos(angle)
+                py = cy + distance * math.sin(angle)
+                draw.ellipse((px - pupil_radius, py - pupil_radius, px + pupil_radius, py + pupil_radius), fill=(0, 0, 0, 255))
+        return result
 
     # ---------- content-aware scale (seam carving) ----------
 
@@ -680,7 +801,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         with Image.open(io.BytesIO(image_bytes)) as image:
             output = io.BytesIO()
             if target_format == "gif":
-                frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(image)] if getattr(image, "is_animated", False) else [image.convert("RGBA")]
+                frames = [frame.convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)] if getattr(image, "is_animated", False) else [image.convert("RGBA")]
                 frames[0].save(
                     output,
                     format="GIF",
@@ -701,7 +822,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         with Image.open(io.BytesIO(image_bytes)) as image:
             output = io.BytesIO()
             if self.bot.image_tools.is_gif(image, filename):
-                frames = [frame.copy().convert("RGBA") for frame in ImageSequence.Iterator(image)]
+                frames = [frame.copy().convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)]
                 frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
                 return output.getvalue(), "extracted.gif"
 
@@ -820,7 +941,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             ),
             self.bot.embeds.field(
                 "Face & Compositing",
-                "`/image effects overlay/facebox/blurfaces/facecrop/contentaware`",
+                "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/contentaware`",
             ),
             self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
             self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
@@ -835,9 +956,9 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "quote"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             message = await self.bot.image_tools.fetch_message_from_link(interaction, message_link)
-            await self.bot.image_tools.defer(interaction)
             data, filename = await self._build_quote_image(message)
             await self.bot.image_tools.send_processed_file(
                 interaction,
@@ -847,7 +968,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 description=f"Quoted message from {message.author.mention}.",
             )
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Quote Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Quote Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="extract", description="Re-upload the selected image or GIF.")
     @app_commands.describe(
@@ -864,13 +985,13 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "extract"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self._extract_bytes(image_bytes, filename)
-            await self.bot.image_tools.defer(interaction)
+            output, out_name = await self._run_cpu_bound(lambda: self._extract_bytes(image_bytes, filename))
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Extracted Image")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Extract Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Extract Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="jpegify", description="Crush image quality into cursed JPEG mush.")
     @app_commands.describe(
@@ -889,20 +1010,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "jpegify"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: self._jpegify_frame(frame, quality),
-                static_format="PNG",
-                static_name="jpegified.png",
-                gif_name="jpegified.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    lambda frame: self._jpegify_frame(frame, quality),
+                    static_format="PNG",
+                    static_name="jpegified.png",
+                    gif_name="jpegified.gif",
+                )
             )
-            await self.bot.image_tools.defer(interaction)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="JPEGified")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "JPEGify Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "JPEGify Failed", self.bot.image_tools.user_error_message(exc))
 
     @transform.command(name="rotate", description="Rotate an image or GIF.")
     @app_commands.describe(
@@ -921,20 +1044,55 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "rotate"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: frame.rotate(angle, resample=Image.BICUBIC, expand=True),
-                static_format="PNG",
-                static_name="rotated.png",
-                gif_name="rotated.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    lambda frame: frame.rotate(angle, resample=Image.BICUBIC, expand=True),
+                    static_format="PNG",
+                    static_name="rotated.png",
+                    gif_name="rotated.gif",
+                )
             )
-            await self.bot.image_tools.defer(interaction)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Rotated")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Rotate Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Rotate Failed", self.bot.image_tools.user_error_message(exc))
+
+    async def _resize_command(
+        self,
+        interaction: discord.Interaction,
+        command_name: str,
+        attachment: discord.Attachment | None,
+        message_link: str | None,
+        *,
+        axis: str,
+        factor: float,
+        out_stem: str,
+        title: str,
+    ) -> None:
+        if not await self.bot.image_tools.ensure_command_allowed(interaction, command_name):
+            return
+
+        await self.bot.image_tools.defer(interaction)
+        try:
+            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+            resize = self._resize_x if axis == "x" else self._resize_y
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    lambda frame: resize(frame, factor),
+                    static_format="PNG",
+                    static_name=f"{out_stem}.png",
+                    gif_name=f"{out_stem}.gif",
+                )
+            )
+            await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title=title)
+        except Exception as exc:
+            await self.bot.image_tools.send_error(interaction, f"{title} Failed", self.bot.image_tools.user_error_message(exc))
 
     @transform.command(name="stretch", description="Double an image's width.")
     @app_commands.describe(
@@ -948,23 +1106,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
     ) -> None:
-        if not await self.bot.image_tools.ensure_command_allowed(interaction, "stretch"):
-            return
-
-        try:
-            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: self._resize_x(frame, 2.0),
-                static_format="PNG",
-                static_name="stretched.png",
-                gif_name="stretched.gif",
-            )
-            await self.bot.image_tools.defer(interaction)
-            await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Stretched")
-        except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Stretch Failed", str(exc))
+        await self._resize_command(interaction, "stretch", attachment, message_link, axis="x", factor=2.0, out_stem="stretched", title="Stretched")
 
     @transform.command(name="pull", description="Double an image's height.")
     @app_commands.describe(
@@ -978,23 +1120,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
     ) -> None:
-        if not await self.bot.image_tools.ensure_command_allowed(interaction, "pull"):
-            return
-
-        try:
-            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: self._resize_y(frame, 2.0),
-                static_format="PNG",
-                static_name="pulled.png",
-                gif_name="pulled.gif",
-            )
-            await self.bot.image_tools.defer(interaction)
-            await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Pulled")
-        except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Pull Failed", str(exc))
+        await self._resize_command(interaction, "pull", attachment, message_link, axis="y", factor=2.0, out_stem="pulled", title="Pulled")
 
     @transform.command(name="squeeze", description="Halve an image's width.")
     @app_commands.describe(
@@ -1008,23 +1134,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
     ) -> None:
-        if not await self.bot.image_tools.ensure_command_allowed(interaction, "squeeze"):
-            return
-
-        try:
-            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: self._resize_x(frame, 0.5),
-                static_format="PNG",
-                static_name="squeezed.png",
-                gif_name="squeezed.gif",
-            )
-            await self.bot.image_tools.defer(interaction)
-            await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Squeezed")
-        except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Squeeze Failed", str(exc))
+        await self._resize_command(interaction, "squeeze", attachment, message_link, axis="x", factor=0.5, out_stem="squeezed", title="Squeezed")
 
     @transform.command(name="squash", description="Halve an image's height.")
     @app_commands.describe(
@@ -1038,23 +1148,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
     ) -> None:
-        if not await self.bot.image_tools.ensure_command_allowed(interaction, "squash"):
-            return
-
-        try:
-            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: self._resize_y(frame, 0.5),
-                static_format="PNG",
-                static_name="squashed.png",
-                gif_name="squashed.gif",
-            )
-            await self.bot.image_tools.defer(interaction)
-            await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Squashed")
-        except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Squash Failed", str(exc))
+        await self._resize_command(interaction, "squash", attachment, message_link, axis="y", factor=0.5, out_stem="squashed", title="Squashed")
 
     @transform.command(name="swirl", description="Apply a swirl effect to an image or GIF.")
     @app_commands.describe(
@@ -1091,7 +1185,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             output, out_name = await self._run_cpu_bound(work)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Swirled")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Swirl Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Swirl Failed", self.bot.image_tools.user_error_message(exc))
 
     @transform.command(name="shake", description="Turn an image into a shaky GIF.")
     @app_commands.describe(
@@ -1117,7 +1211,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             output, out_name = await self._run_cpu_bound(lambda: self._shake_bytes(image_bytes, filename, speed))
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Shaken")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Shake Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Shake Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="convert", description="Convert an image into another format.")
     @app_commands.describe(
@@ -1136,10 +1230,10 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "convert"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, _ = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self._convert_bytes(image_bytes, format)
-            await self.bot.image_tools.defer(interaction)
+            output, out_name = await self._run_cpu_bound(lambda: self._convert_bytes(image_bytes, format))
             await self.bot.image_tools.send_processed_file(
                 interaction,
                 data=output,
@@ -1148,7 +1242,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 description=f"Converted to `{format.lower()}`.",
             )
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Convert Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Convert Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="deepfry", description="Deepfry an image or GIF.")
     @app_commands.describe(
@@ -1185,7 +1279,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             output, out_name = await self._run_cpu_bound(work)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Deepfried")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Deepfry Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Deepfry Failed", self.bot.image_tools.user_error_message(exc))
 
     @text.command(name="toptext", description="Add meme text to the top of an image or GIF.")
     @app_commands.describe(
@@ -1254,20 +1348,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, command_name):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: self._draw_meme_text(frame, text, position=position, max_size=max_size),
-                static_format="PNG",
-                static_name=f"{position}text.png",
-                gif_name=f"{position}text.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    lambda frame: self._draw_meme_text(frame, text, position=position, max_size=max_size),
+                    static_format="PNG",
+                    static_name=f"{position}text.png",
+                    gif_name=f"{position}text.gif",
+                )
             )
-            await self.bot.image_tools.defer(interaction)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title=f"{position.title()} Text Added")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Text Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Text Failed", self.bot.image_tools.user_error_message(exc))
 
     # ---------- white box caption ----------
 
@@ -1333,7 +1429,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             if is_gif:
                 frames = [
                     self._caption_frame(frame, font, wrapped, text_height, box_height, position=position)
-                    for frame in ImageSequence.Iterator(image)
+                    for frame in self.bot.image_tools.gif_frames(image)
                 ]
                 output = io.BytesIO()
                 frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
@@ -1373,13 +1469,15 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             return
 
         chosen_position = position.value if position else "top"
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self._caption_bytes(image_bytes, filename, text, position=chosen_position)
-            await self.bot.image_tools.defer(interaction)
+            output, out_name = await self._run_cpu_bound(
+                lambda: self._caption_bytes(image_bytes, filename, text, position=chosen_position)
+            )
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Captioned")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Caption Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Caption Failed", self.bot.image_tools.user_error_message(exc))
 
     # ---------- motivational poster ----------
 
@@ -1475,7 +1573,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 render(first_frame).convert("RGB").save(output, "PNG")
                 return output.getvalue(), "motivate.png"
 
-            frames = [render(frame) for frame in ImageSequence.Iterator(image)]
+            frames = [render(frame) for frame in self.bot.image_tools.gif_frames(image)]
             output = io.BytesIO()
             frames[0].save(
                 output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image)
@@ -1504,13 +1602,15 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "motivate"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self._build_motivate_image(image_bytes, filename, title, subtitle)
-            await self.bot.image_tools.defer(interaction)
+            output, out_name = await self._run_cpu_bound(
+                lambda: self._build_motivate_image(image_bytes, filename, title, subtitle)
+            )
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Motivate")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Motivate Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Motivate Failed", self.bot.image_tools.user_error_message(exc))
 
     @transform.command(name="flip", description="Flip an image vertically.")
     @app_commands.describe(
@@ -1527,20 +1627,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "flip"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: ImageOps.flip(frame),
-                static_format="JPEG",
-                static_name="flipped.jpg",
-                gif_name="flipped.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    lambda frame: ImageOps.flip(frame),
+                    static_format="JPEG",
+                    static_name="flipped.jpg",
+                    gif_name="flipped.gif",
+                )
             )
-            await self.bot.image_tools.defer(interaction)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Flipped")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Flip Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Flip Failed", self.bot.image_tools.user_error_message(exc))
 
     @transform.command(name="flop", description="Flip an image horizontally.")
     @app_commands.describe(
@@ -1557,20 +1659,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, "flop"):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                lambda frame: ImageOps.mirror(frame),
-                static_format="JPEG",
-                static_name="flopped.jpg",
-                gif_name="flopped.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    lambda frame: ImageOps.mirror(frame),
+                    static_format="JPEG",
+                    static_name="flopped.jpg",
+                    gif_name="flopped.gif",
+                )
             )
-            await self.bot.image_tools.defer(interaction)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Flopped")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Flop Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Flop Failed", self.bot.image_tools.user_error_message(exc))
 
     @misc.command(name="pfp", description="Show a user's profile picture as a file.")
     @app_commands.describe(user="The user whose avatar you want.")
@@ -1589,7 +1693,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             embed.set_image(url=f"attachment://{filename}")
             await interaction.followup.send(embed=embed, file=file)
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Avatar Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Avatar Failed", self.bot.image_tools.user_error_message(exc))
 
     @template.command(name="chimp", description="Append the chimp panel to the bottom of an image.")
     @app_commands.describe(
@@ -1630,17 +1734,21 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, command_name):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
             asset_path = self._asset_path(asset_name)
-            with Image.open(asset_path) as append_image:
-                output, out_name = self.bot.image_tools.append_image_to(
-                    image_bytes, filename, append_image, placement="bottom", out_stem=asset_path.stem
-                )
-            await self.bot.image_tools.defer(interaction)
+
+            def work() -> tuple[bytes, str]:
+                with Image.open(asset_path) as append_image:
+                    return self.bot.image_tools.append_image_to(
+                        image_bytes, filename, append_image, placement="bottom", out_stem=asset_path.stem
+                    )
+
+            output, out_name = await self._run_cpu_bound(work)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title=command_name.title())
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, f"{command_name.title()} Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, f"{command_name.title()} Failed", self.bot.image_tools.user_error_message(exc))
 
     @template.command(name="doom", description="Overlay the classic doom UI.")
     @app_commands.describe(
@@ -1740,30 +1848,29 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if not await self.bot.image_tools.ensure_command_allowed(interaction, command_name):
             return
 
+        await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
             asset_path = self._asset_path(asset_name)
-            with Image.open(asset_path) as overlay_image:
-                output, out_name = self.bot.image_tools.overlay_image_onto(
-                    image_bytes,
-                    filename,
-                    overlay_image,
-                    placement=placement,
-                    strategy=strategy,
-                    opacity=1.0,
-                    out_stem=asset_path.stem,
-                )
-            await self.bot.image_tools.defer(interaction)
+
+            def work() -> tuple[bytes, str]:
+                with Image.open(asset_path) as overlay_image:
+                    return self.bot.image_tools.overlay_image_onto(
+                        image_bytes,
+                        filename,
+                        overlay_image,
+                        placement=placement,
+                        strategy=strategy,
+                        opacity=1.0,
+                        out_stem=asset_path.stem,
+                    )
+
+            output, out_name = await self._run_cpu_bound(work)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title=command_name.title())
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, f"{command_name.title()} Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, f"{command_name.title()} Failed", self.bot.image_tools.user_error_message(exc))
 
     # ---------- second-image compositing, cropping, face detection, content-aware scale ----------
-    #
-    # No local error handler attached to these six (see the on_app_command_error
-    # docstring note below) - CommandOnCooldown/TransformerError already get
-    # identical messages from the global handler in main.py, so a local override
-    # here would be pure duplication.
 
     @effects.command(name="overlay", description="Composite a second image on top of your image or GIF.")
     @app_commands.describe(
@@ -1806,20 +1913,23 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 interaction, overlay_attachment, overlay_message_link
             )
 
-            with Image.open(io.BytesIO(overlay_bytes)) as overlay_image:
-                output, out_name = self.bot.image_tools.overlay_image_onto(
-                    base_bytes,
-                    base_filename,
-                    overlay_image,
-                    placement=placement.value if placement else "bottomright",
-                    strategy="scale",
-                    opacity=opacity / 100.0,
-                    scale_percent=float(scale_percent),
-                    out_stem="overlay",
-                )
+            def work() -> tuple[bytes, str]:
+                with Image.open(io.BytesIO(overlay_bytes)) as overlay_image:
+                    return self.bot.image_tools.overlay_image_onto(
+                        base_bytes,
+                        base_filename,
+                        overlay_image,
+                        placement=placement.value if placement else "bottomright",
+                        strategy="scale",
+                        opacity=opacity / 100.0,
+                        scale_percent=float(scale_percent),
+                        out_stem="overlay",
+                    )
+
+            output, out_name = await self._run_cpu_bound(work)
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Overlaid")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Overlay Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Overlay Failed", self.bot.image_tools.user_error_message(exc))
 
     @transform.command(name="crop", description="Crop an image or GIF by trimming a percent from each side.")
     @app_commands.describe(
@@ -1872,17 +1982,19 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 y1 = max(y0 + 1, height - int(height * bottom / 100))
                 return frame.crop((x0, y0, x1, y1))
 
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                crop_frame,
-                static_format="PNG",
-                static_name="cropped.png",
-                gif_name="cropped.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self.bot.image_tools.process_image_bytes(
+                    image_bytes,
+                    filename,
+                    crop_frame,
+                    static_format="PNG",
+                    static_name="cropped.png",
+                    gif_name="cropped.gif",
+                )
             )
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Cropped")
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Crop Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Crop Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="facebox", description="Draw a box around each detected face.")
     @app_commands.describe(
@@ -1905,7 +2017,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
 
             def draw_boxes(frame: Image.Image, boxes: list[tuple[int, int, int, int]]) -> Image.Image:
-                frame = frame.convert("RGBA")
+                frame = frame.copy()
                 draw = ImageDraw.Draw(frame)
                 for index, (x1, y1, x2, y2) in enumerate(boxes, start=1):
                     line_width = max(2, int((x2 - x1) * 0.02))
@@ -1913,43 +2025,28 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                     draw.text((x1 + 4, max(0, y1 - 18)), f"Face {index}", fill=(255, 32, 32, 255))
                 return frame
 
-            def work() -> tuple[bytes, str] | None:
-                with Image.open(io.BytesIO(image_bytes)) as image:
-                    is_gif = self.bot.image_tools.is_gif(image, filename)
-                    first_frame = (
-                        next(ImageSequence.Iterator(image)).convert("RGBA") if is_gif else image.convert("RGBA")
-                    )
-                    boxes = self._detect_faces_in_frame(first_frame)
-                    if not boxes:
-                        return None
-
-                    if not is_gif:
-                        output = io.BytesIO()
-                        draw_boxes(first_frame, boxes).convert("RGB").save(output, format="PNG")
-                        return output.getvalue(), "facebox.png"
-
-                    frames = [draw_boxes(frame, boxes) for frame in ImageSequence.Iterator(image)]
-                    output = io.BytesIO()
-                    frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                    return output.getvalue(), "facebox.gif"
-
-            result = await self._run_cpu_bound(work)
-            if result is None:
-                await self.bot.image_tools.send_error(
-                    interaction, "No Faces Found", "I could not detect any faces in that image."
+            data, out_name = await self._run_cpu_bound(
+                lambda: self._faces_work(
+                    image_bytes,
+                    filename,
+                    draw_boxes,
+                    static_name="facebox.png",
+                    gif_name="facebox.gif",
                 )
-                return
-
-            data, out_name = result
+            )
             await self.bot.image_tools.send_processed_file(
                 interaction,
                 data=data,
                 filename=out_name,
                 title="Face Detection",
-                description="Faces are detected once on the first frame; GIF frames reuse those box positions.",
+                description="Faces are re-detected on every frame, so boxes follow them through GIFs.",
+            )
+        except NotEnoughFacesError:
+            await self.bot.image_tools.send_error(
+                interaction, "No Faces Found", "I could not detect any faces in that image."
             )
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Face Detection Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Face Detection Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="blurfaces", description="Blur or pixelate every detected face.")
     @app_commands.describe(
@@ -1982,15 +2079,8 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
 
-            boxes = await self._detect_faces(image_bytes, filename)
-            if not boxes:
-                await self.bot.image_tools.send_error(
-                    interaction, "No Faces Found", "I could not detect any faces in that image."
-                )
-                return
-
-            def censor_frame(frame: Image.Image) -> Image.Image:
-                frame = frame.convert("RGBA")
+            def censor_frame(frame: Image.Image, boxes: list[tuple[int, int, int, int]]) -> Image.Image:
+                frame = frame.copy()
                 for x1, y1, x2, y2 in boxes:
                     x2, y2 = min(x2, frame.width), min(y2, frame.height)
                     if x2 <= x1 or y2 <= y1:
@@ -2007,22 +2097,24 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                     frame.paste(region, (x1, y1))
                 return frame
 
-            def work() -> tuple[bytes, str]:
-                return self.bot.image_tools.process_image_bytes(
+            output, out_name = await self._run_cpu_bound(
+                lambda: self._faces_work(
                     image_bytes,
                     filename,
                     censor_frame,
-                    static_format="PNG",
                     static_name="blurfaces.png",
                     gif_name="blurfaces.gif",
                 )
-
-            output, out_name = await self._run_cpu_bound(work)
+            )
             await self.bot.image_tools.send_processed_file(
                 interaction, data=output, filename=out_name, title="Faces Censored"
             )
+        except NotEnoughFacesError:
+            await self.bot.image_tools.send_error(
+                interaction, "No Faces Found", "I could not detect any faces in that image."
+            )
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Blur Faces Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Blur Faces Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(name="facecrop", description="Crop tightly to the largest detected face.")
     @app_commands.describe(
@@ -2046,35 +2138,137 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
 
-            boxes = await self._detect_faces(image_bytes, filename)
-            if not boxes:
-                await self.bot.image_tools.send_error(
-                    interaction, "No Faces Found", "I could not detect any faces in that image."
-                )
-                return
+            # Every frame of a GIF must share one size, but the tracked face's
+            # padded box drifts and resizes frame to frame - so each frame's crop
+            # is resized to the first frame's crop dimensions, giving a "camera
+            # follows the face" effect.
+            output_size: list[tuple[int, int]] = []
 
-            x1, y1, x2, y2 = max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
-            pad_x = int((x2 - x1) * padding_percent / 100)
-            pad_y = int((y2 - y1) * padding_percent / 100)
-
-            def crop_frame(frame: Image.Image) -> Image.Image:
+            def crop_frame(frame: Image.Image, boxes: list[tuple[int, int, int, int]]) -> Image.Image:
+                x1, y1, x2, y2 = max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
+                pad_x = int((x2 - x1) * padding_percent / 100)
+                pad_y = int((y2 - y1) * padding_percent / 100)
                 fx1 = max(0, x1 - pad_x)
                 fy1 = max(0, y1 - pad_y)
                 fx2 = min(frame.width, x2 + pad_x)
                 fy2 = min(frame.height, y2 + pad_y)
-                return frame.crop((fx1, fy1, fx2, fy2))
+                cropped = frame.crop((fx1, fy1, fx2, fy2))
+                if not output_size:
+                    output_size.append(cropped.size)
+                if cropped.size != output_size[0]:
+                    cropped = cropped.resize(output_size[0], Image.LANCZOS)
+                return cropped
 
-            output, out_name = self.bot.image_tools.process_image_bytes(
-                image_bytes,
-                filename,
-                crop_frame,
-                static_format="PNG",
-                static_name="facecrop.png",
-                gif_name="facecrop.gif",
+            output, out_name = await self._run_cpu_bound(
+                lambda: self._faces_work(
+                    image_bytes,
+                    filename,
+                    crop_frame,
+                    static_name="facecrop.png",
+                    gif_name="facecrop.gif",
+                )
             )
             await self.bot.image_tools.send_processed_file(interaction, data=output, filename=out_name, title="Face Crop")
+        except NotEnoughFacesError:
+            await self.bot.image_tools.send_error(
+                interaction, "No Faces Found", "I could not detect any faces in that image."
+            )
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Face Crop Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Face Crop Failed", self.bot.image_tools.user_error_message(exc))
+
+    @effects.command(name="faceswap", description="Swap every detected face with another face in the image.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
+    @app_commands.checks.cooldown(1, 10.0)
+    async def faceswap(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        if not await self.bot.image_tools.ensure_command_allowed(interaction, "faceswap"):
+            return
+        await self.bot.image_tools.note_heavy_command(interaction, "faceswap")
+
+        await self.bot.image_tools.defer(interaction)
+        try:
+            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+
+            data, out_name = await self._run_cpu_bound(
+                lambda: self._faces_work(
+                    image_bytes,
+                    filename,
+                    self._swap_faces_in_frame,
+                    min_faces=2,
+                    static_name="faceswap.png",
+                    gif_name="faceswap.gif",
+                )
+            )
+            await self.bot.image_tools.send_processed_file(
+                interaction,
+                data=data,
+                filename=out_name,
+                title="Faces Swapped",
+                description="Each face was replaced with the next face over, left to right.",
+            )
+        except NotEnoughFacesError as exc:
+            if exc.found == 0:
+                await self.bot.image_tools.send_error(
+                    interaction, "No Faces Found", "I could not detect any faces in that image."
+                )
+            else:
+                await self.bot.image_tools.send_error(
+                    interaction,
+                    "Not Enough Faces",
+                    "I only found one face - face swap needs at least two faces in the image.",
+                )
+        except Exception as exc:
+            await self.bot.image_tools.send_error(interaction, "Face Swap Failed", self.bot.image_tools.user_error_message(exc))
+
+    @effects.command(name="googlyeyes", description="Slap googly eyes on every detected face.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
+    @app_commands.checks.cooldown(1, 10.0)
+    async def googlyeyes(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        if not await self.bot.image_tools.ensure_command_allowed(interaction, "googlyeyes"):
+            return
+        await self.bot.image_tools.note_heavy_command(interaction, "googlyeyes")
+
+        await self.bot.image_tools.defer(interaction)
+        try:
+            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+
+            data, out_name = await self._run_cpu_bound(
+                lambda: self._faces_work(
+                    image_bytes,
+                    filename,
+                    self._googly_eyes_frame,
+                    static_name="googlyeyes.png",
+                    gif_name="googlyeyes.gif",
+                )
+            )
+            await self.bot.image_tools.send_processed_file(
+                interaction,
+                data=data,
+                filename=out_name,
+                title="Googly Eyes",
+                description="On GIFs the pupils re-roll every frame, so the eyes jiggle.",
+            )
+        except NotEnoughFacesError:
+            await self.bot.image_tools.send_error(
+                interaction, "No Faces Found", "I could not detect any faces in that image."
+            )
+        except Exception as exc:
+            await self.bot.image_tools.send_error(interaction, "Googly Eyes Failed", self.bot.image_tools.user_error_message(exc))
 
     @effects.command(
         name="contentaware",
@@ -2135,7 +2329,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                         return output.getvalue(), "contentaware.png"
 
                     frames = [carved.convert("RGBA")]
-                    for frame in list(ImageSequence.Iterator(image))[1:]:
+                    for frame in list(self.bot.image_tools.gif_frames(image))[1:]:
                         carved_frame = self._apply_seams_both_axes(frame, working_size, width_seams, height_seams)
                         frames.append(carved_frame.convert("RGBA"))
 
@@ -2152,60 +2346,13 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 description=f"Input capped to {CONTENTAWARE_MAX_DIMENSION}px on the long edge for speed.",
             )
         except Exception as exc:
-            await self.bot.image_tools.send_error(interaction, "Content-Aware Scale Failed", str(exc))
+            await self.bot.image_tools.send_error(interaction, "Content-Aware Scale Failed", self.bot.image_tools.user_error_message(exc))
 
-    @imageinfo.error
-    @quote.error
-    @clear_image_source.error
-    @extract.error
-    @jpegify.error
-    @rotate.error
-    @stretch.error
-    @pull.error
-    @squeeze.error
-    @squash.error
-    @swirl.error
-    @shake.error
-    @convert.error
-    @deepfry.error
-    @toptext.error
-    @middletext.error
-    @bottomtext.error
-    @caption.error
-    @motivate.error
-    @flip.error
-    @flop.error
-    @pfp.error
-    @chimp.error
-    @cooked.error
-    @doom.error
-    @craftify.error
-    @halflife.error
-    @murica.error
-    @point.error
-    @northkorea.error
-    async def on_app_command_error(
-        self,
-        interaction: discord.Interaction,
-        error: app_commands.AppCommandError,
-    ) -> None:
-        if isinstance(error, app_commands.CommandOnCooldown):
-            await self.bot.image_tools.send_error(
-                interaction,
-                "Slow Down",
-                f"Try again in `{error.retry_after:.1f}` seconds.",
-            )
-            return
-
-        if isinstance(error, app_commands.TransformerError):
-            await self.bot.image_tools.send_error(
-                interaction,
-                "Invalid Value",
-                "One of the command options you entered was invalid.",
-            )
-            return
-
-        raise error
+    # No local error handler on purpose: a local handler that re-raises would
+    # prevent the global handler in main.py from running at all (see the note
+    # in cogs/info.py), losing both the user-facing error message and the
+    # command-log entry. The global handler covers cooldowns, permissions,
+    # transformer errors, and unexpected failures for every command here.
 
 
 async def setup(bot: commands.Bot) -> None:
