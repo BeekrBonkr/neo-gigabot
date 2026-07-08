@@ -8,14 +8,17 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.discord_links import fetch_message_from_link
+from utils.settings import parse_hex_color
 from utils.reactionroles import (
     ReactionRoleError,
     add_mapping,
     clear_message,
     get_role_for_reaction,
+    has_mappings,
     list_for_guild,
     list_for_message,
     remove_mapping,
+    remove_role_mappings,
 )
 
 MAX_BATCH_PAIRS = 10
@@ -116,7 +119,7 @@ class ReactionRoleBuilderView(discord.ui.View):
 
         async def _on_role(role_interaction: discord.Interaction) -> None:
             role = role_select.values[0]
-            result = await self.cog._add_one(self.target_message, self.guild, str(emoji), role)
+            result = await self.cog._add_one(self.target_message, self.guild, str(emoji), role, role_interaction.user)
             if result.startswith("✅"):
                 self.mappings_added += 1
             self._build_idle_items()
@@ -181,10 +184,23 @@ class ReactionRoles(
     def _role_usable(self, guild: discord.Guild, role: discord.Role) -> bool:
         return not role.is_default() and role < guild.me.top_role
 
-    async def _add_one(self, message: discord.Message, guild: discord.Guild, emoji_text: str, role: discord.Role) -> str:
+    async def _add_one(
+        self,
+        message: discord.Message,
+        guild: discord.Guild,
+        emoji_text: str,
+        role: discord.Role,
+        invoker: discord.Member,
+    ) -> str:
         """Add a single mapping to `message`. Returns a one-line result summary."""
         if not self._role_usable(guild, role):
             return f"❌ `{emoji_text}` → {role.mention}: role is @everyone or above my highest role."
+
+        # Mirror Discord's own rule: you can't hand out roles at or above your
+        # rank. Without this, anyone with Manage Roles could map an admin role
+        # to an emoji and grant it to themselves with a reaction.
+        if invoker.id != guild.owner_id and role >= invoker.top_role:
+            return f"❌ `{emoji_text}` → {role.mention}: that role is above (or equal to) your highest role."
 
         parsed_emoji = _parse_emoji(emoji_text)
         try:
@@ -221,11 +237,13 @@ class ReactionRoles(
     ) -> None:
         parsed_color: discord.Color | None = None
         if color:
-            try:
-                parsed_color = discord.Color(int(color.lstrip("#"), 16))
-            except ValueError:
+            # parse_hex_color requires exactly RRGGBB, so 8-digit values that
+            # would fail later with an opaque HTTP 400 get rejected here.
+            color_value = parse_hex_color(color)
+            if color_value is None:
                 await self.bot.embeds.error_interaction(interaction, "Invalid Color", "Use a hex color like `#5865F2`.", ephemeral=True)
                 return
+            parsed_color = discord.Color(color_value)
 
         embed = self.bot.embeds.create(title=title, description=description, color=parsed_color)
         try:
@@ -252,12 +270,12 @@ class ReactionRoles(
     @app_commands.checks.bot_has_permissions(manage_roles=True, add_reactions=True)
     @app_commands.guild_only()
     async def add(self, interaction: discord.Interaction, message_link: str, emoji: str, role: discord.Role) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
         message = await self._resolve_target_message(interaction, message_link)
         if message is None:
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        result = await self._add_one(message, interaction.guild, emoji, role)
+        result = await self._add_one(message, interaction.guild, emoji, role, interaction.user)
         await interaction.followup.send(embed=self.bot.embeds.info_embed("Reaction Role", result))
 
     @app_commands.command(name="batch", description="Add multiple emoji->role mappings to one message at once.")
@@ -278,11 +296,10 @@ class ReactionRoles(
             )
             return
 
+        await interaction.response.defer(thinking=True, ephemeral=True)
         message = await self._resolve_target_message(interaction, message_link)
         if message is None:
             return
-
-        await interaction.response.defer(thinking=True, ephemeral=True)
 
         results = []
         for emoji_text, role_id_text in parsed_pairs:
@@ -290,7 +307,7 @@ class ReactionRoles(
             if role is None:
                 results.append(f"❌ `{emoji_text.strip()}`: role not found.")
                 continue
-            results.append(await self._add_one(message, interaction.guild, emoji_text.strip(), role))
+            results.append(await self._add_one(message, interaction.guild, emoji_text.strip(), role, interaction.user))
 
         await interaction.followup.send(embed=self.bot.embeds.info_embed("Reaction Roles (Batch)", "\n".join(results)))
 
@@ -300,6 +317,7 @@ class ReactionRoles(
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def remove(self, interaction: discord.Interaction, message_link: str, emoji: str) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
         message = await self._resolve_target_message(interaction, message_link)
         if message is None:
             return
@@ -323,6 +341,7 @@ class ReactionRoles(
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def clear(self, interaction: discord.Interaction, message_link: str) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
         message = await self._resolve_target_message(interaction, message_link)
         if message is None:
             return
@@ -345,6 +364,7 @@ class ReactionRoles(
     @app_commands.checks.has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def list_mappings(self, interaction: discord.Interaction, message_link: str | None = None) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
         if message_link:
             message = await self._resolve_target_message(interaction, message_link)
             if message is None:
@@ -410,6 +430,26 @@ class ReactionRoles(
             await member.remove_roles(role, reason="Reaction role removed")
         except discord.HTTPException:
             pass
+
+    # ---------- self-healing ----------
+    # Mappings whose message or role no longer exists are dead weight: they
+    # count against the per-guild cap and clutter /reactionrole list, so purge
+    # them as soon as Discord tells us the underlying thing is gone.
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        if has_mappings(self.bot.storage_path, payload.message_id):
+            clear_message(self.bot.storage_path, payload.message_id)
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        for message_id in payload.message_ids:
+            if has_mappings(self.bot.storage_path, message_id):
+                clear_message(self.bot.storage_path, message_id)
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        remove_role_mappings(self.bot.storage_path, role.guild.id, role.id)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import io
+import json
+import logging
+import os
 import platform
 import time
 from datetime import timedelta
@@ -9,8 +14,16 @@ import psutil
 from discord import app_commands
 from discord.ext import commands
 
-from utils.command_log import log_path_for_date, parse_day
+from utils.command_log import log_path_for_date, parse_day, parse_entry, summarize_log
+from utils.db import backup_database
 from utils.migration import default_legacy_path, migrate_all
+from utils.settings import get_guild_settings, guild_settings_exists
+
+LOG_LEVEL_CHOICES = [
+    app_commands.Choice(name=name, value=name)
+    for name in ("DEBUG", "INFO", "WARNING", "ERROR")
+]
+MAX_ERROR_LINES_SHOWN = 15
 
 ACTIVITY_TYPE_CHOICES = [
     app_commands.Choice(name="playing", value="playing"),
@@ -135,11 +148,10 @@ class Owner(commands.GroupCog, group_name="owner", group_description="Owner-only
                 import aiohttp
 
                 timeout = aiohttp.ClientTimeout(total=15)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(image_url, headers={"User-Agent": "neo-gigabot/1.0"}) as response:
-                        if response.status != 200:
-                            raise RuntimeError(f"Could not download that image (HTTP {response.status}).")
-                        image_bytes = await response.read()
+                async with self.bot.http_session.get(image_url, timeout=timeout) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"Could not download that image (HTTP {response.status}).")
+                    image_bytes = await response.read()
 
             await self.bot.user.edit(avatar=image_bytes)
         except discord.HTTPException as exc:
@@ -269,6 +281,198 @@ class Owner(commands.GroupCog, group_name="owner", group_description="Owner-only
             await interaction.followup.send(
                 embed=self.bot.embeds.error_embed("Upload Failed", f"Could not upload that day's log: {exc}")
             )
+
+    @app_commands.command(name="commandstats", description="Summarize command usage for a specific day.")
+    @app_commands.describe(day="A date like 2026-07-05, or 'today' / 'yesterday'")
+    async def commandstats(self, interaction: discord.Interaction, day: str = "today") -> None:
+        parsed = parse_day(day)
+        if parsed is None:
+            await self.bot.embeds.error_interaction(
+                interaction,
+                "Invalid Date",
+                "Use `YYYY-MM-DD`, `today`, or `yesterday`.",
+                ephemeral=True,
+            )
+            return
+
+        path = log_path_for_date(self.bot.storage_path, parsed)
+        if not path.is_file() or path.stat().st_size == 0:
+            await self.bot.embeds.info_interaction(
+                interaction,
+                "Nothing Logged",
+                f"No commands were logged on `{parsed.isoformat()}`.",
+                ephemeral=True,
+            )
+            return
+
+        stats = summarize_log(path)
+
+        def top_lines(counter, limit: int) -> str:
+            lines = [f"`{name}` × {count}" for name, count in counter.most_common(limit)]
+            if len(counter) > limit:
+                lines.append(f"... and {len(counter) - limit} more")
+            return "\n".join(lines)[:1024] or "None"
+
+        statuses = ", ".join(f"{status}: {count}" for status, count in stats.by_status.most_common())
+        description = f"**{stats.total}** command(s) across **{len(stats.by_user)}** user(s) in **{len(stats.by_guild)}** server(s)/DMs."
+        if stats.unparsed:
+            description += f"\n({stats.unparsed} unparsable line(s) skipped.)"
+
+        embed = self.bot.embeds.create(
+            title=f"📊 Command Usage - {parsed.isoformat()}",
+            description=description,
+            color=discord.Color.blurple(),
+            fields=[
+                self.bot.embeds.field("Statuses", statuses[:1024] or "None", False),
+                self.bot.embeds.field("Top Commands", top_lines(stats.by_command, 10), False),
+                self.bot.embeds.field("Top Users", top_lines(stats.by_user, 5), True),
+                self.bot.embeds.field("Top Servers", top_lines(stats.by_guild, 5), True),
+            ],
+        )
+        await self.bot.embeds.respond(interaction, embed=embed, ephemeral=True)
+
+    @app_commands.command(name="errors", description="Show the failed commands from a specific day's log.")
+    @app_commands.describe(day="A date like 2026-07-05, or 'today' / 'yesterday'")
+    async def errors(self, interaction: discord.Interaction, day: str = "today") -> None:
+        parsed = parse_day(day)
+        if parsed is None:
+            await self.bot.embeds.error_interaction(
+                interaction, "Invalid Date", "Use `YYYY-MM-DD`, `today`, or `yesterday`.", ephemeral=True
+            )
+            return
+
+        path = log_path_for_date(self.bot.storage_path, parsed)
+        if not path.is_file() or path.stat().st_size == 0:
+            await self.bot.embeds.info_interaction(
+                interaction, "Nothing Logged", f"No commands were logged on `{parsed.isoformat()}`.", ephemeral=True
+            )
+            return
+
+        failures = []
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                entry = parse_entry(line)
+                if entry is not None and entry.get("status") == "ERROR":
+                    failures.append(entry)
+
+        if not failures:
+            await self.bot.embeds.success_interaction(
+                interaction, "No Errors", f"No command errors on `{parsed.isoformat()}`. 🎉", ephemeral=True
+            )
+            return
+
+        lines = []
+        for entry in failures[-MAX_ERROR_LINES_SHOWN:]:
+            clock = entry["timestamp"][11:16]  # "YYYY-MM-DD HH:MM:SS UTC" -> HH:MM
+            where = entry.get("guild", "?")
+            lines.append(
+                f"`{clock}` `{entry['command']}` - **{entry.get('error', 'unknown')}** ({entry.get('user', '?')} in {where})"
+            )
+        shown = len(failures[-MAX_ERROR_LINES_SHOWN:])
+        header = f"**{len(failures)}** error(s) on `{parsed.isoformat()}`"
+        if len(failures) > shown:
+            header += f" (last {shown} shown - `/owner commandlog` for the full file)"
+
+        embed = self.bot.embeds.error_embed("Command Errors", header + "\n\n" + "\n".join(lines))
+        await self.bot.embeds.respond(interaction, embed=embed, ephemeral=True)
+
+    @app_commands.command(name="backup", description="Snapshot the settings database and send it here.")
+    async def backup(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            snapshot = await asyncio.to_thread(backup_database, self.bot.storage_path)
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(embed=self.bot.embeds.error_embed("Backup Failed", str(exc)))
+            return
+
+        size_kb = snapshot.stat().st_size / 1024
+        try:
+            await interaction.followup.send(
+                content=f"Snapshot `{snapshot.name}` ({size_kb:.0f} KB). Rotated copies live in `storage/backups/`.",
+                file=discord.File(snapshot, filename=snapshot.name),
+            )
+        except discord.HTTPException as exc:
+            await interaction.followup.send(
+                embed=self.bot.embeds.warning_embed(
+                    "Backup Saved, Upload Failed",
+                    f"Snapshot written to `{snapshot}` but it couldn't be uploaded: {exc}",
+                )
+            )
+
+    @app_commands.command(name="settings", description="Dump a server's stored settings as JSON.")
+    @app_commands.describe(server_id="The server's ID")
+    async def settings_dump(self, interaction: discord.Interaction, server_id: str) -> None:
+        try:
+            guild_id = int(server_id)
+        except ValueError:
+            await self.bot.embeds.error_interaction(interaction, "Invalid ID", "Server IDs are numbers.", ephemeral=True)
+            return
+
+        if not guild_settings_exists(self.bot.storage_path, guild_id):
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Found", "No settings stored for that server ID.", ephemeral=True
+            )
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        label = f"{guild.name} (`{guild_id}`)" if guild else f"`{guild_id}` (bot not in this server)"
+        dumped = json.dumps(get_guild_settings(self.bot.storage_path, guild_id), indent=2, sort_keys=True)
+
+        if len(dumped) <= 3900:
+            embed = self.bot.embeds.info_embed(f"Settings for {label}", f"```json\n{dumped}\n```")
+            await self.bot.embeds.respond(interaction, embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                content=f"Settings for {label}:",
+                file=discord.File(io.BytesIO(dumped.encode("utf-8")), filename=f"settings-{guild_id}.json"),
+                ephemeral=True,
+            )
+
+    @app_commands.command(name="sync", description="Force-sync the slash-command tree with Discord.")
+    async def sync(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            count = await self.bot.sync_commands_if_changed(force=True)
+        except discord.HTTPException as exc:
+            await interaction.followup.send(
+                embed=self.bot.embeds.error_embed("Sync Failed", f"Discord rejected the sync: {exc}")
+            )
+            return
+        await interaction.followup.send(
+            embed=self.bot.embeds.success_embed("Commands Synced", f"Registered {count} application command(s).")
+        )
+
+    @app_commands.command(name="loglevel", description="Change the log level at runtime (resets to .env level on restart).")
+    @app_commands.describe(level="New level for the root logger")
+    @app_commands.choices(level=LOG_LEVEL_CHOICES)
+    async def loglevel(self, interaction: discord.Interaction, level: app_commands.Choice[str]) -> None:
+        root = logging.getLogger()
+        previous = logging.getLevelName(root.getEffectiveLevel())
+        root.setLevel(level.value)
+        await self.bot.embeds.success_interaction(
+            interaction,
+            "Log Level Changed",
+            f"`{previous}` → `{level.value}`. This resets to the `.env` LOG_LEVEL on restart.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="restart", description="Cleanly shut down so systemd restarts the bot.")
+    async def restart(self, interaction: discord.Interaction) -> None:
+        await self.bot.embeds.success_interaction(
+            interaction, "Restarting", "Shutting down now - back in a few seconds.", ephemeral=True
+        )
+        self.bot.logger.info("Restart requested by owner via /owner restart")
+
+        async def _shutdown() -> None:
+            await asyncio.sleep(0.5)  # let the confirmation reach Discord first
+            try:
+                await self.bot.close()  # graceful: voice disconnects, session close
+            finally:
+                # The unit uses Restart=on-failure, so a clean exit(0) would
+                # stay down; exit non-zero to make systemd bring us back.
+                os._exit(1)
+
+        asyncio.create_task(_shutdown())
 
     servers = app_commands.Group(name="servers", description="Inspect or leave servers this bot is in.")
 

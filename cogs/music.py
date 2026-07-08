@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,7 +16,14 @@ from discord.ext import commands
 
 from utils import playlists as playlist_store
 from utils.playlists import PlaylistError
-from utils.settings import get_guild_settings, is_bot_channel, update_guild_settings
+from utils.settings import (
+    get_guild_settings,
+    get_music_djadmin_role_id,
+    get_music_max_queue_length,
+    get_music_max_track_seconds,
+    is_bot_channel,
+    update_guild_settings,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +48,12 @@ VOICE_CONNECT_TIMEOUT_SECONDS = 15
 MAX_CONCURRENT_EXTRACTIONS = 4
 SEARCH_RESULT_COUNT = 5
 MAX_QUERY_LENGTH = 300
+
+# YouTube (and similar) stream URLs are signed and expire after a few hours. A
+# track that has sat deep in a long queue can outlive its URL, so any cached
+# stream URL older than this is re-extracted before playback instead of being
+# handed to FFmpeg to fail on.
+STREAM_URL_TTL_SECONDS = 30 * 60
 
 # Direct-URL playback is restricted to these hosts (and their subdomains). Anything
 # else typed as an absolute URL is rejected outright rather than silently falling
@@ -97,6 +111,7 @@ class Track:
     duration: int | None = None
     thumbnail: str | None = None
     stream_url: str | None = None
+    stream_url_fetched_at: float | None = None
     requested_by_id: int | None = None
     requested_by_name: str | None = None
 
@@ -118,6 +133,7 @@ class Track:
             duration=info.get("duration"),
             thumbnail=info.get("thumbnail"),
             stream_url=info.get("url"),
+            stream_url_fetched_at=time.monotonic() if info.get("url") else None,
             requested_by_id=requester.id if requester else None,
             requested_by_name=str(requester) if requester else None,
         )
@@ -158,10 +174,18 @@ class GuildMusicState:
     text_channel_id: int | None = None
     playback_task: asyncio.Task[None] | None = None
     idle_disconnect_task: asyncio.Task[None] | None = None
+    # "off", "track" (replay the current track), or "queue" (recycle finished
+    # tracks to the back of the queue).
+    loop_mode: str = "off"
+    # Set by /skip so track-loop mode advances past a skipped track instead of
+    # replaying it forever.
+    skip_requested: bool = False
 
     def clear_queue(self) -> None:
         self.queue.clear()
         self.current = None
+        self.loop_mode = "off"
+        self.skip_requested = False
 
 
 class SearchResultsView(discord.ui.View):
@@ -264,6 +288,164 @@ class QueueView(discord.ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class MusicRemoteView(discord.ui.View):
+    """Playback remote opened by /music remote and /music nowplaying.
+
+    Every press is re-gated by Music.check_remote_access: the presser must be
+    sitting in the bot's current voice channel, and DJ mode (including the
+    djadmin override) still applies. The embed is rebuilt after each action so
+    the message doubles as a live now-playing display."""
+
+    VOLUME_STEP = 10
+
+    def __init__(self, *, cog: "Music", guild_id: int, timeout: float = 300.0) -> None:
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.message: discord.Message | None = None
+        self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        allowed, reason = self.cog.check_remote_access(interaction)
+        if not allowed:
+            await interaction.response.send_message(reason or "Not allowed.", ephemeral=True)
+        return allowed
+
+    # ---------- helpers ----------
+
+    def _voice_client(self) -> discord.VoiceProtocol | None:
+        guild = self.cog.bot.get_guild(self.guild_id)
+        return guild.voice_client if guild else None
+
+    def _sync_buttons(self) -> None:
+        voice_client = self._voice_client()
+        paused = bool(voice_client and voice_client.is_paused())
+        self.pause_resume.label = "Resume" if paused else "Pause"
+        self.pause_resume.emoji = "▶️" if paused else "⏸️"
+
+        state = self.cog.get_state(self.guild_id)
+        self.loop_toggle.label = f"Loop: {state.loop_mode}"
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        self._sync_buttons()
+        embed = self.cog.build_remote_embed(self.guild_id)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    def _disable_all(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+    def _set_volume(self, delta_percent: int) -> int:
+        state = self.cog.get_state(self.guild_id)
+        percent = max(0, min(100, round(state.volume * 100) + delta_percent))
+        state.volume = percent / 100
+        voice_client = self._voice_client()
+        source = getattr(voice_client, "source", None)
+        if isinstance(source, discord.PCMVolumeTransformer):
+            source.volume = state.volume
+        return percent
+
+    # ---------- row 0: playback ----------
+
+    @discord.ui.button(label="Pause", emoji="⏸️", style=discord.ButtonStyle.primary, row=0)
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        voice_client = self._voice_client()
+        if voice_client is not None:
+            if voice_client.is_paused():
+                voice_client.resume()
+            elif voice_client.is_playing():
+                voice_client.pause()
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Skip", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        voice_client = self._voice_client()
+        if voice_client is not None and (voice_client.is_playing() or voice_client.is_paused()):
+            state = self.cog.get_state(self.guild_id)
+            state.skip_requested = True
+            voice_client.stop()
+            # Give the player loop a moment to advance so the refreshed embed
+            # shows the next track instead of the one just skipped.
+            await interaction.response.defer()
+            await asyncio.sleep(0.8)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    async def stop_playback(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        state = self.cog.get_state(self.guild_id)
+        state.clear_queue()
+        self.cog.stop_playback_task(self.guild_id)
+        voice_client = self._voice_client()
+        if voice_client is not None:
+            voice_client.stop()
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Shuffle", emoji="🔀", style=discord.ButtonStyle.secondary, row=0)
+    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        state = self.cog.get_state(self.guild_id)
+        if state.queue:
+            items = list(state.queue)
+            random.shuffle(items)
+            state.queue = deque(items)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Loop: off", emoji="🔁", style=discord.ButtonStyle.secondary, row=0)
+    async def loop_toggle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        state = self.cog.get_state(self.guild_id)
+        cycle = {"off": "track", "track": "queue", "queue": "off"}
+        state.loop_mode = cycle.get(state.loop_mode, "off")
+        await self._refresh(interaction)
+
+    # ---------- row 1: volume / queue / leave ----------
+
+    @discord.ui.button(label="Vol -", emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_down(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self._set_volume(-self.VOLUME_STEP)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Vol +", emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_up(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self._set_volume(self.VOLUME_STEP)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Queue", emoji="📃", style=discord.ButtonStyle.secondary, row=1)
+    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        embed = self.cog.build_queue_embed(self.guild_id)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Leave", emoji="👋", style=discord.ButtonStyle.danger, row=1)
+    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        state = self.cog.get_state(self.guild_id)
+        state.clear_queue()
+        self.cog.stop_playback_task(self.guild_id)
+        self.cog.reset_session_volume(self.guild_id)
+
+        voice_client = self._voice_client()
+        if voice_client is not None:
+            try:
+                await voice_client.disconnect(force=False)
+            except Exception:
+                LOGGER.exception("Failed to disconnect via the music remote in guild %s", self.guild_id)
+
+        self._disable_all()
+        await interaction.response.edit_message(
+            embed=self.cog.bot.embeds.info_embed("Disconnected", "Left the voice channel and cleared the queue."),
+            view=self,
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        self._disable_all()
         if self.message is not None:
             try:
                 await self.message.edit(view=self)
@@ -456,6 +638,14 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
     # ---------- access checks ----------
 
+    def member_is_djadmin(self, member: discord.Member) -> bool:
+        """Members of the configured djadmin role may always control music
+        playback, regardless of DJ mode."""
+        role_id = get_music_djadmin_role_id(self.bot.storage_path, member.guild.id)
+        if role_id is None:
+            return False
+        return any(role.id == role_id for role in member.roles)
+
     async def ensure_bot_channel_allowed(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
         """Lighter check for commands that don't touch live playback (playlists, savenow)."""
         if interaction.guild is None or interaction.channel is None:
@@ -471,24 +661,68 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         return True, None
 
-    async def ensure_music_allowed(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
-        """Full check for commands that control or add to the live queue: bot-channel + DJ mode."""
+    async def ensure_music_allowed(
+        self, interaction: discord.Interaction, *, require_voice: bool = False
+    ) -> tuple[bool, str | None]:
+        """Full check for commands that control or add to the live queue: bot-channel + DJ mode.
+
+        `require_voice` is for commands that alter live playback (skip, stop,
+        volume, ...): while the bot is connected, the invoker must be sitting in
+        its voice channel - the same rule the remote enforces - so someone
+        outside voice can't kill everyone else's music. When the bot isn't
+        connected there's no live playback to protect and each command's own
+        "nothing playing" path answers."""
         allowed, reason = await self.ensure_bot_channel_allowed(interaction)
         if not allowed:
             return allowed, reason
+
+        member = interaction.user
+        if require_voice and isinstance(member, discord.Member):
+            voice_client = interaction.guild.voice_client
+            if voice_client is not None and voice_client.is_connected() and voice_client.channel is not None:
+                if member.voice is None or member.voice.channel != voice_client.channel:
+                    return False, f"You need to be in {voice_client.channel.mention} to control playback."
 
         config = self.get_music_settings(interaction.guild.id)
         if not config["dj_enabled"]:
             return True, None
 
-        member = interaction.user
         if not isinstance(member, discord.Member):
             return False, "Unable to validate your roles."
+
+        if self.member_is_djadmin(member):
+            return True, None
 
         if discord.utils.get(member.roles, name=config["dj_role_name"]):
             return True, None
 
         return False, f"DJ mode is enabled. You need the `{config['dj_role_name']}` role."
+
+    def check_remote_access(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
+        """Gate for the music remote: the bot must be in voice, the user must be
+        sitting in that same channel, and DJ mode (djadmin override included)
+        still applies. Re-checked on every button press, not just on open."""
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            return False, "The music remote can only be used in a server."
+
+        voice_client = guild.voice_client
+        if voice_client is None or not voice_client.is_connected() or voice_client.channel is None:
+            return False, "I'm not connected to a voice channel right now."
+
+        if member.voice is None or member.voice.channel != voice_client.channel:
+            return False, f"You need to be in {voice_client.channel.mention} to use the music remote."
+
+        config = self.get_music_settings(guild.id)
+        if (
+            config["dj_enabled"]
+            and not self.member_is_djadmin(member)
+            and not discord.utils.get(member.roles, name=config["dj_role_name"])
+        ):
+            return False, f"DJ mode is enabled. You need the `{config['dj_role_name']}` role."
+
+        return True, None
 
     async def ensure_user_voice_channel(
         self,
@@ -551,11 +785,34 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
     # ---------- extraction ----------
 
+    def effective_queue_limit(self, guild_id: int) -> int:
+        """The guild's configured queue cap, bounded by the global hard cap."""
+        guild_cap = get_music_max_queue_length(self.bot.storage_path, guild_id)
+        return min(MAX_QUEUE_SIZE, guild_cap) if guild_cap else MAX_QUEUE_SIZE
+
+    def effective_max_track_seconds(self, guild_id: int | None) -> int:
+        """The guild's configured track length cap, bounded by the global 3h cap.
+        No guild context (personal playlist edits) means the global cap only."""
+        if guild_id is None:
+            return MAX_TRACK_LENGTH_SECONDS
+        guild_cap = get_music_max_track_seconds(self.bot.storage_path, guild_id)
+        return min(MAX_TRACK_LENGTH_SECONDS, guild_cap) if guild_cap else MAX_TRACK_LENGTH_SECONDS
+
+    def _check_track_length(self, track: Track, guild_id: int | None) -> None:
+        max_seconds = self.effective_max_track_seconds(guild_id)
+        if track.duration and track.duration > max_seconds:
+            if max_seconds == MAX_TRACK_LENGTH_SECONDS:
+                raise RuntimeError("That track is longer than 3 hours.")
+            raise RuntimeError(
+                f"That track is longer than this server's limit of {max_seconds // 60} minute(s)."
+            )
+
     async def extract_track(
         self,
         query: str,
         *,
         requester: discord.abc.User | discord.Member,
+        guild_id: int | None = None,
     ) -> Track:
         query = (query or "").strip()
         if not query:
@@ -590,8 +847,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         info = await self._run_extraction(loop, _extract)
         track = Track.from_extracted_info(info, requester=requester)
 
-        if track.duration and track.duration > MAX_TRACK_LENGTH_SECONDS:
-            raise RuntimeError("That track is longer than 3 hours.")
+        self._check_track_length(track, guild_id)
 
         if not track.webpage_url:
             raise RuntimeError("I could not resolve a playable track.")
@@ -644,21 +900,42 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         stream_url = await self._run_extraction(loop, _refresh)
         track.stream_url = stream_url
+        track.stream_url_fetched_at = time.monotonic()
         return stream_url
 
     async def _run_extraction(self, loop: asyncio.AbstractEventLoop, func) -> Any:
-        async with self._extraction_semaphore:
-            try:
-                return await asyncio.wait_for(
-                    loop.run_in_executor(None, func), timeout=EXTRACTION_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("That took too long to look up. Try again in a moment.") from exc
-            except yt_dlp.utils.DownloadError as exc:
-                raise RuntimeError("I couldn't fetch that. Double check the link or try a different search.") from exc
+        # The semaphore is released when the worker thread actually finishes,
+        # not when we stop waiting: a timeout can only abandon the thread, and
+        # releasing early would let real concurrency exceed the cap under
+        # repeated timeouts. shield() keeps wait_for from cancelling the
+        # executor future so the done callback fires at true completion.
+        await self._extraction_semaphore.acquire()
+        try:
+            future = loop.run_in_executor(None, func)
+        except BaseException:
+            self._extraction_semaphore.release()
+            raise
+
+        def _on_done(done_future: asyncio.Future) -> None:
+            self._extraction_semaphore.release()
+            if not done_future.cancelled():
+                done_future.exception()  # retrieve, so abandoned failures don't log "never retrieved"
+
+        future.add_done_callback(_on_done)
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=EXTRACTION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("That took too long to look up. Try again in a moment.") from exc
+        except yt_dlp.utils.DownloadError as exc:
+            raise RuntimeError("I couldn't fetch that. Double check the link or try a different search.") from exc
 
     async def create_source(self, track: Track, volume: float) -> discord.PCMVolumeTransformer:
-        stream_url = track.stream_url or await self.refresh_stream_url(track)
+        stream_url_is_fresh = (
+            track.stream_url is not None
+            and track.stream_url_fetched_at is not None
+            and (time.monotonic() - track.stream_url_fetched_at) < STREAM_URL_TTL_SECONDS
+        )
+        stream_url = track.stream_url if stream_url_is_fresh else await self.refresh_stream_url(track)
         audio = discord.FFmpegPCMAudio(
             stream_url,
             before_options=FFMPEG_BEFORE_OPTIONS,
@@ -670,9 +947,10 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
     async def enqueue_tracks(self, guild_id: int, tracks: list[Track]) -> tuple[GuildMusicState, int]:
         state = self.get_state(guild_id)
+        limit = self.effective_queue_limit(guild_id)
         added = 0
         for track in tracks:
-            if len(state.queue) >= MAX_QUEUE_SIZE:
+            if len(state.queue) >= limit:
                 break
             state.queue.append(track)
             added += 1
@@ -719,11 +997,11 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             raise RuntimeError("You need to join a voice channel first.")
 
         await self.ensure_voice_client(interaction, channel)
-        track = await self.extract_track(query, requester=requester)
+        track = await self.extract_track(query, requester=requester, guild_id=interaction.guild_id)
 
         state, added = await self.enqueue_tracks(interaction.guild_id, [track])
         if added == 0:
-            raise RuntimeError(f"The queue is full. Maximum size is {MAX_QUEUE_SIZE}.")
+            raise RuntimeError(f"The queue is full. Maximum size is {self.effective_queue_limit(interaction.guild_id)}.")
         state.text_channel_id = interaction.channel_id
 
         started_now = state.current is None and len(state.queue) == 1
@@ -752,11 +1030,12 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                 raise RuntimeError("You need to join a voice channel first.")
 
             await self.ensure_voice_client(interaction, channel)
+            self._check_track_length(track, interaction.guild_id)
             track.requested_by_id = interaction.user.id
             track.requested_by_name = str(interaction.user)
             state, added = await self.enqueue_tracks(interaction.guild_id, [track])
             if added == 0:
-                raise RuntimeError(f"The queue is full. Maximum size is {MAX_QUEUE_SIZE}.")
+                raise RuntimeError(f"The queue is full. Maximum size is {self.effective_queue_limit(interaction.guild_id)}.")
             state.text_channel_id = interaction.channel_id
 
             started_now = state.current is None and len(state.queue) == 1
@@ -883,7 +1162,15 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                     )
 
                 await finished.wait()
+
+                finished_track = state.current
                 state.current = None
+                if finished_track is not None:
+                    if state.loop_mode == "track" and not state.skip_requested:
+                        state.queue.appendleft(finished_track)
+                    elif state.loop_mode == "queue":
+                        state.queue.append(finished_track)
+                state.skip_requested = False
 
                 # If the voice client vanished (kicked/disconnected) while a track was
                 # playing, stop the loop instead of looping forever trying to play more.
@@ -916,11 +1203,50 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             upcoming = "The queue is empty."
 
         max_page = max(0, (len(queue_list) - 1) // per_page)
+        loop_label = f" • Loop: {state.loop_mode}" if state.loop_mode != "off" else ""
         return self.bot.embeds.info_embed(
             "Music Queue",
             description,
             fields=[self.bot.embeds.field(f"Up Next ({len(queue_list)} total)", upcoming)],
-            footer=f"Page {page + 1}/{max_page + 1} • Volume: {round(state.volume * 100)}%",
+            footer=f"Page {page + 1}/{max_page + 1} • Volume: {round(state.volume * 100)}%{loop_label}",
+        )
+
+    def build_remote_embed(self, guild_id: int) -> discord.Embed:
+        state = self.get_state(guild_id)
+        guild = self.bot.get_guild(guild_id)
+        voice_client = guild.voice_client if guild else None
+
+        fields = []
+        thumbnail_url = None
+        if state.current is not None:
+            paused = bool(voice_client and voice_client.is_paused())
+            description = f"{'⏸️ Paused' if paused else '▶️ Playing'}: [{state.current.title}]({state.current.webpage_url})"
+            thumbnail_url = state.current.thumbnail
+            fields.append(self.bot.embeds.field("Duration", state.current.duration_label, True))
+            fields.append(self.bot.embeds.field("Requested By", state.current.requested_by_name or "Unknown", True))
+        else:
+            description = "Nothing is currently playing."
+
+        fields.append(self.bot.embeds.field("Volume", f"{round(state.volume * 100)}%", True))
+
+        if state.queue:
+            preview = list(state.queue)[:3]
+            upcoming = "\n".join(
+                f"{index}. [{track.title}]({track.webpage_url}) • `{track.duration_label}`"
+                for index, track in enumerate(preview, start=1)
+            )
+            if len(state.queue) > len(preview):
+                upcoming += f"\n... and {len(state.queue) - len(preview)} more"
+            fields.append(self.bot.embeds.field(f"Up Next ({len(state.queue)})", upcoming, False))
+
+        loop_label = f" • Loop: {state.loop_mode}" if state.loop_mode != "off" else ""
+        channel_name = voice_client.channel.name if voice_client and voice_client.channel else "voice"
+        return self.bot.embeds.info_embed(
+            "🎛️ Music Remote",
+            description,
+            fields=fields,
+            footer=f"Only listeners in #{channel_name} can use this remote{loop_label}",
+            thumbnail_url=thumbnail_url,
         )
 
     def build_playlist_embed(self, playlist: dict[str, Any], *, page: int = 0, per_page: int = 10) -> discord.Embed:
@@ -1109,13 +1435,104 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         await self.bot.embeds.success_interaction(interaction, "Removed", f"Removed `{removed.title}` from the queue.")
 
-    @app_commands.command(name="nowplaying", description="Show the current track.")
+    @app_commands.command(name="move", description="Move a queued track to a different position.")
+    @app_commands.describe(from_position="The track's current position (shown in /queue)", to_position="Where it should go")
+    @app_commands.checks.cooldown(1, 5.0)
+    @app_commands.guild_only()
+    async def move(
+        self,
+        interaction: discord.Interaction,
+        from_position: app_commands.Range[int, 1, MAX_QUEUE_SIZE],
+        to_position: app_commands.Range[int, 1, MAX_QUEUE_SIZE],
+    ) -> None:
+        allowed, reason = await self.ensure_music_allowed(interaction)
+        if not allowed:
+            await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        state = self.get_state(interaction.guild_id)
+        queue_length = len(state.queue)
+        if from_position > queue_length or to_position > queue_length:
+            await self.bot.embeds.error_interaction(
+                interaction, "Invalid Position", f"The queue only has {queue_length} track(s).", ephemeral=True
+            )
+            return
+        if from_position == to_position:
+            await self.bot.embeds.info_interaction(interaction, "Nothing To Do", "That track is already at that position.")
+            return
+
+        queue_list = list(state.queue)
+        track = queue_list.pop(from_position - 1)
+        queue_list.insert(to_position - 1, track)
+        state.queue = deque(queue_list)
+
+        await self.bot.embeds.success_interaction(
+            interaction, "Moved", f"Moved `{track.title}` from position {from_position} to {to_position}."
+        )
+
+    @app_commands.command(name="loop", description="Loop the current track, the whole queue, or turn looping off.")
+    @app_commands.describe(mode="What to loop")
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="off", value="off"),
+            app_commands.Choice(name="track", value="track"),
+            app_commands.Choice(name="queue", value="queue"),
+        ]
+    )
+    @app_commands.checks.cooldown(1, 5.0)
+    @app_commands.guild_only()
+    async def loop(self, interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+        allowed, reason = await self.ensure_music_allowed(interaction)
+        if not allowed:
+            await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        state = self.get_state(interaction.guild_id)
+        state.loop_mode = mode.value
+
+        messages = {
+            "off": "Looping is now off.",
+            "track": "Now looping the current track. `/skip` still moves to the next one.",
+            "queue": "Now looping the queue - finished tracks go to the back of the line.",
+        }
+        await self.bot.embeds.success_interaction(interaction, "Loop Mode", messages[mode.value])
+
+    async def _send_remote(self, interaction: discord.Interaction) -> None:
+        view = MusicRemoteView(cog=self, guild_id=interaction.guild_id)
+        embed = self.build_remote_embed(interaction.guild_id)
+        await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
+
+    @app_commands.command(name="remote", description="Open an interactive remote to control the current music session.")
+    @app_commands.checks.cooldown(1, 10.0)
+    @app_commands.guild_only()
+    async def remote(self, interaction: discord.Interaction) -> None:
+        allowed, reason = await self.ensure_bot_channel_allowed(interaction)
+        if not allowed:
+            await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        allowed, reason = self.check_remote_access(interaction)
+        if not allowed:
+            await self.bot.embeds.error_interaction(interaction, "Remote Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        await self._send_remote(interaction)
+
+    @app_commands.command(name="nowplaying", description="Show the current track and open the playback remote.")
     @app_commands.checks.cooldown(1, 10.0)
     @app_commands.guild_only()
     async def nowplaying(self, interaction: discord.Interaction) -> None:
         allowed, reason = await self.ensure_music_allowed(interaction)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        # Listeners in the bot's voice channel get the interactive remote;
+        # everyone else gets the read-only now-playing embed.
+        remote_ok, _ = self.check_remote_access(interaction)
+        if remote_ok:
+            await self._send_remote(interaction)
             return
 
         state = self.get_state(interaction.guild_id)
@@ -1140,7 +1557,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
     async def skip(self, interaction: discord.Interaction) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1150,6 +1567,8 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             await self.bot.embeds.info_interaction(interaction, "Skip", "Nothing is currently playing.")
             return
 
+        state = self.get_state(interaction.guild_id)
+        state.skip_requested = True
         guild.voice_client.stop()
         await self.bot.embeds.success_interaction(interaction, "Skipped", "Skipped the current track.")
 
@@ -1157,7 +1576,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
     async def pause(self, interaction: discord.Interaction) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1174,7 +1593,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
     async def resume(self, interaction: discord.Interaction) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1191,7 +1610,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
     async def stop(self, interaction: discord.Interaction) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1237,7 +1656,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
     async def leave(self, interaction: discord.Interaction) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1259,7 +1678,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 10.0)
     @app_commands.guild_only()
     async def shuffle(self, interaction: discord.Interaction) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1280,7 +1699,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
     @app_commands.checks.cooldown(1, 10.0)
     @app_commands.guild_only()
     async def volume(self, interaction: discord.Interaction, percent: app_commands.Range[int, 0, 100]) -> None:
-        allowed, reason = await self.ensure_music_allowed(interaction)
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
         if not allowed:
             await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
             return
@@ -1403,52 +1822,11 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             ephemeral=True,
         )
 
-    @join.error
-    @play.error
-    @search.error
-    @queue.error
-    @remove.error
-    @nowplaying.error
-    @skip.error
-    @pause.error
-    @resume.error
-    @stop.error
-    @resetq.error
-    @leave.error
-    @shuffle.error
-    @volume.error
-    @savenow.error
-    @musicdj.error
-    @musicdjrole.error
-    @musicdefaultvolume.error
-    async def on_app_command_error(
-        self,
-        interaction: discord.Interaction,
-        error: app_commands.AppCommandError,
-    ) -> None:
-        if isinstance(error, app_commands.CommandOnCooldown):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Slow Down",
-                f"Try again in `{error.retry_after:.1f}` seconds.",
-                ephemeral=True,
-            )
-            return
-
-        if isinstance(error, app_commands.MissingPermissions):
-            missing = ", ".join(error.missing_permissions)
-            await self.bot.embeds.error_interaction(
-                interaction, "Missing Permissions", f"You are missing: `{missing}`.", ephemeral=True
-            )
-            return
-
-        if isinstance(error, app_commands.TransformerError):
-            await self.bot.embeds.error_interaction(
-                interaction, "Invalid Value", "One of the values you entered was invalid.", ephemeral=True
-            )
-            return
-
-        raise error
+    # No local error handler on purpose: a local handler that re-raises would
+    # prevent the global handler in main.py from running at all (see the note
+    # in cogs/info.py), losing both the user-facing error message and the
+    # command-log entry. The global handler covers cooldowns, permissions,
+    # transformer errors, and unexpected failures for every command here.
 
 
 class PlaylistPickerView(discord.ui.View):
@@ -1832,8 +2210,21 @@ class PlaylistGroup(app_commands.Group):
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
     async def unlike(self, interaction: discord.Interaction, user: discord.User, name: str) -> None:
-        # `like` already toggles; keep a dedicated `unlike` for discoverability/parity with the old bot.
-        await self.like.callback(self, interaction, user, name)
+        if not await self._ensure_allowed(interaction):
+            return
+        try:
+            # desired=False so unliking something you never liked is a no-op
+            # rather than a toggle that *adds* a like.
+            updated, _ = playlist_store.toggle_like(
+                self.cog.bot.storage_path, user.id, name, interaction.user.id, desired=False
+            )
+        except PlaylistError as exc:
+            await self.cog.bot.embeds.error_interaction(interaction, "Could Not Unlike Playlist", str(exc), ephemeral=True)
+            return
+
+        await self.cog.bot.embeds.success_interaction(
+            interaction, "Unliked", f"You no longer like {user.mention}'s playlist `{updated['display_name']}`.", ephemeral=True
+        )
 
     @app_commands.command(name="liked", description="List playlists you've liked.")
     @app_commands.checks.cooldown(1, 10.0)
@@ -1854,23 +2245,12 @@ class PlaylistGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed, view=view)
         view.message = await interaction.original_response()
 
-    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        if isinstance(error, app_commands.CommandOnCooldown):
-            await self.cog.bot.embeds.error_interaction(
-                interaction, "Slow Down", f"Try again in `{error.retry_after:.1f}` seconds.", ephemeral=True
-            )
-            return
-
-        if isinstance(error, app_commands.TransformerError):
-            await self.cog.bot.embeds.error_interaction(
-                interaction, "Invalid Value", "One of the values you entered was invalid.", ephemeral=True
-            )
-            return
-
-        LOGGER.exception("Unhandled /playlist error", exc_info=error)
-        await self.cog.bot.embeds.error_interaction(
-            interaction, "Command Failed", "Something went wrong while running that command.", ephemeral=True
-        )
+    # No on_error override here on purpose: discord.py runs the tree-level
+    # handler *in addition to* a non-raising local one (verified against
+    # CommandTree._call), so a local handler that sends its own message would
+    # double-respond on every error. The global handler in main.py covers
+    # cooldowns, transformer errors, and unexpected failures, and records the
+    # command log entry.
 
 
 async def setup(bot: commands.Bot) -> None:

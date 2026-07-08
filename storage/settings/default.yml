@@ -1,4 +1,3 @@
-prefix: '!'
 bot_channels: []
 blocked_commands: []
 listen_to_bots: false
@@ -12,6 +11,7 @@ welcome_channel_ids: []
 autoroles: []
 music_dj_enabled: false
 music_dj_role_name: dj
+music_djadmin_role_id: ''
 music_default_volume: 50
 mod_log_enabled: false
 mod_log_channel_id: ''
@@ -19,3 +19,17 @@ warn_threshold: 0
 warn_action: none
 warn_mute_duration: 1h
 sticky_roles: false
+dm_on_mod_action: true
+mod_log_events:
+- warn
+- mute
+- kick
+- ban
+starboard_emoji: '⭐'
+starboard_allow_selfstar: true
+starboard_ignore_nsfw: false
+welcome_delete_after: 0
+leave_channel_ids: []
+embed_color: ''
+music_max_queue_length: 0
+music_max_track_minutes: 0

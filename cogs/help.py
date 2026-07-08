@@ -36,14 +36,14 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
         "🛡️",
         "Moderation",
         [
-            "kick", "ban", "unban", "mute", "unmute", "warn", "warnings",
+            "kick", "ban", "tempban", "unban", "mute", "unmute", "warn", "warnings",
             "purge", "clean", "lock", "unlock", "prune", "role", "autorole",
             "nick", "poll", "say",
         ],
     ),
     ("reactionroles", "🎭", "Reaction Roles", ["reactionrole"]),
     ("settings", "⚙️", "Server Settings", ["settings"]),
-    ("info", "ℹ️", "Info & Support", ["about", "feedback"]),
+    ("info", "ℹ️", "Info & Support", ["about", "userinfo", "feedback"]),
 ]
 
 
@@ -177,6 +177,12 @@ class Help(commands.Cog):
         last = self._mention_cooldowns.get(user_id, 0.0)
         if now - last < MENTION_HELP_COOLDOWN_SECONDS:
             return True
+        # Expired entries are otherwise never removed, so sweep them once the
+        # dict has accumulated enough users to matter.
+        if len(self._mention_cooldowns) > 512:
+            self._mention_cooldowns = {
+                uid: ts for uid, ts in self._mention_cooldowns.items() if now - ts < MENTION_HELP_COOLDOWN_SECONDS
+            }
         self._mention_cooldowns[user_id] = now
         return False
 

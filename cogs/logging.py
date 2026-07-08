@@ -70,8 +70,8 @@ class Logging(commands.Cog):
     """Server activity/audit logging.
 
     Sends message, member, role, channel, and other server-event activity to a
-    per-guild log channel (see /settings log, /settings logchannel, and
-    /settings userlog). Deliberately skips a few known-noisy non-events (embed-only
+    per-guild log channel, configured from the /settings dashboard (Activity
+    Log category). Deliberately skips a few known-noisy non-events (embed-only
     "edits" from link unfurls, position-only role/channel reorders, bot voice
     states) so the log stays signal, not noise.
     """
@@ -87,6 +87,7 @@ class Logging(commands.Cog):
         embed: discord.Embed,
         *,
         channel_id: int | None = None,
+        parent_channel_id: int | None = None,
         user_id: int | None = None,
     ) -> None:
         if guild is None:
@@ -96,10 +97,13 @@ class Logging(commands.Cog):
         if not settings.get("logging_enabled", False):
             return
 
-        if channel_id is not None:
+        if channel_id is not None or parent_channel_id is not None:
             ignored_channels = {int(c) for c in (settings.get("ignored_log_channels") or [])}
-            if int(channel_id) in ignored_channels:
-                return
+            # For events inside a thread, honor an ignore on either the thread
+            # itself or its parent channel.
+            for candidate in (channel_id, parent_channel_id):
+                if candidate is not None and int(candidate) in ignored_channels:
+                    return
 
         if user_id is not None:
             ignored_users = {int(u) for u in (settings.get("ignored_users") or [])}
@@ -199,7 +203,13 @@ class Logging(commands.Cog):
             thumbnail_url=after.author.display_avatar.url,
             footer=f"User ID: {after.author.id} • Message ID: {after.id}",
         )
-        await self._log(after.guild, embed, channel_id=after.channel.id, user_id=after.author.id)
+        await self._log(
+            after.guild,
+            embed,
+            channel_id=after.channel.id,
+            parent_channel_id=getattr(after.channel, "parent_id", None),
+            user_id=after.author.id,
+        )
 
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message) -> None:
@@ -221,7 +231,13 @@ class Logging(commands.Cog):
             thumbnail_url=message.author.display_avatar.url,
             footer=f"User ID: {message.author.id} • Message ID: {message.id}",
         )
-        await self._log(message.guild, embed, channel_id=message.channel.id, user_id=message.author.id)
+        await self._log(
+            message.guild,
+            embed,
+            channel_id=message.channel.id,
+            parent_channel_id=getattr(message.channel, "parent_id", None),
+            user_id=message.author.id,
+        )
 
     @commands.Cog.listener()
     async def on_bulk_message_delete(self, messages: list[discord.Message]) -> None:
@@ -239,7 +255,12 @@ class Logging(commands.Cog):
             description=f"**Channel:** {first.channel.mention}\n**Count:** {len(messages)}",
             fields=fields,
         )
-        await self._log(first.guild, embed, channel_id=first.channel.id)
+        await self._log(
+            first.guild,
+            embed,
+            channel_id=first.channel.id,
+            parent_channel_id=getattr(first.channel, "parent_id", None),
+        )
 
     # ---------- members ----------
 
@@ -605,7 +626,12 @@ class Logging(commands.Cog):
             ),
         ]
         embed = self._embed(title="🔗 Invite Created", color=COLOR_INVITE_CREATE, description=f"`{invite.code}`", fields=fields)
-        await self._log(invite.guild, embed, channel_id=invite.channel.id if invite.channel else None)
+        await self._log(
+            invite.guild,
+            embed,
+            channel_id=invite.channel.id if invite.channel else None,
+            user_id=invite.inviter.id if invite.inviter else None,
+        )
 
     @commands.Cog.listener()
     async def on_invite_delete(self, invite: discord.Invite) -> None:
@@ -627,7 +653,7 @@ class Logging(commands.Cog):
             description=f"{thread.mention} in {parent}",
             footer=f"Thread ID: {thread.id}",
         )
-        await self._log(thread.guild, embed, channel_id=thread.parent_id)
+        await self._log(thread.guild, embed, channel_id=thread.parent_id, user_id=thread.owner_id)
 
     @commands.Cog.listener()
     async def on_thread_delete(self, thread: discord.Thread) -> None:

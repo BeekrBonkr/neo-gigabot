@@ -7,7 +7,11 @@ venv/
 storage/cache/
 storage/temp/
 storage/logs/
+storage/backups/
 storage/settings.db
+storage/settings.db-wal
+storage/settings.db-shm
+storage/command_tree_fingerprint.txt
 storage/settings/*.yml
 !storage/settings/default.yml
 

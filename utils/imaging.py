@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
+import itertools
+import logging
 import random
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 import aiohttp
 import discord
@@ -13,16 +16,31 @@ from discord.ext import commands
 from PIL import Image, ImageEnhance, ImageSequence
 
 from utils.discord_links import fetch_message_from_link
-from utils.settings import command_is_blocked, is_bot_channel
 
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 SOURCE_TTL_SECONDS = 60 * 15
+
+# Embed-image URLs are attacker-controlled (any user can post a link that
+# unfurls to an arbitrary URL), so fetches are restricted to Discord's own CDN
+# - same reasoning as the music cog's ALLOWED_URL_HOSTS. Attachments already
+# live on these hosts, so nothing legitimate is lost.
+ALLOWED_IMAGE_HOSTS: tuple[str, ...] = (
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+)
+# Cap what we'll buffer into RAM, whether from a URL or an oversized attachment.
+MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
+# Every GIF frame is expanded to RGBA in memory during processing; anything past
+# this many frames is dropped rather than letting one upload eat gigabytes.
+MAX_GIF_FRAMES = 120
 
 # The commands slow/heavy enough (DNN face detection, seam-carving DP, per-pixel
 # swirl warping, ...) that someone firing off a bunch back-to-back is actually
 # piling up real work, not just spamming a cheap resize. Tracked per (user,
 # channel) so the snark below is aimed at whoever's actually causing the pile-up.
-HEAVY_COMMANDS = frozenset({"contentaware", "facebox", "blurfaces", "facecrop", "deepfry", "swirl", "shake"})
+HEAVY_COMMANDS = frozenset(
+    {"contentaware", "facebox", "blurfaces", "facecrop", "faceswap", "googlyeyes", "deepfry", "swirl", "shake"}
+)
 HEAVY_COMMAND_WINDOW_SECONDS = 30.0
 HEAVY_COMMAND_SNARK_THRESHOLD = 3
 
@@ -65,9 +83,6 @@ class ImageSourceStore:
         self._prune()
         return self._sources.get(user_id)
 
-    def forget(self, user_id: int) -> None:
-        self._sources.pop(user_id, None)
-
 
 class ImageToolkit:
     """Shared image-command plumbing: access checks, source resolution (attachment
@@ -92,6 +107,15 @@ class ImageToolkit:
 
         key = (interaction.user.id, interaction.channel.id)
         now = time.time()
+        # Entries go stale after HEAVY_COMMAND_WINDOW_SECONDS but only the
+        # touched key gets rewritten below, so sweep the whole dict once it
+        # accumulates enough dead (user, channel) keys to matter.
+        if len(self._heavy_command_uses) > 256:
+            self._heavy_command_uses = {
+                k: times
+                for k, times in self._heavy_command_uses.items()
+                if any(now - t < HEAVY_COMMAND_WINDOW_SECONDS for t in times)
+            }
         recent = [t for t in self._heavy_command_uses.get(key, []) if now - t < HEAVY_COMMAND_WINDOW_SECONDS]
         recent.append(now)
         self._heavy_command_uses[key] = recent
@@ -103,28 +127,7 @@ class ImageToolkit:
                 pass
 
     async def ensure_command_allowed(self, interaction: discord.Interaction, command_name: str) -> bool:
-        if interaction.guild is None or interaction.channel is None:
-            return True
-
-        if command_is_blocked(self.bot.storage_path, interaction.guild.id, command_name):
-            await self.bot.embeds.error_interaction(
-                interaction,
-                "Command Blocked",
-                f"`/{command_name}` is blocked in this server.",
-                ephemeral=True,
-            )
-            return False
-
-        if not is_bot_channel(self.bot.storage_path, interaction.guild.id, interaction.channel.id):
-            await self.bot.embeds.warning_interaction(
-                interaction,
-                "Wrong Channel",
-                "This command can only be used in a configured bot channel.",
-                ephemeral=True,
-            )
-            return False
-
-        return True
+        return await self.bot.ensure_command_allowed(interaction, command_name)
 
     async def defer(self, interaction: discord.Interaction) -> None:
         if not interaction.response.is_done():
@@ -143,6 +146,16 @@ class ImageToolkit:
         embed = self.bot.embeds.info_embed(title, description or f"Generated `{filename}`.")
         embed.set_image(url=f"attachment://{filename}")
         await interaction.followup.send(embed=embed, file=file)
+
+    def user_error_message(self, exc: Exception) -> str:
+        """ValueError/RuntimeError raised inside the image pipeline carry
+        deliberately user-facing text ("No recent image was found...", "That
+        took too long..."). Anything else is a bug - log it and keep
+        PIL/aiohttp internals out of the embed."""
+        if isinstance(exc, (ValueError, RuntimeError)):
+            return str(exc)
+        logging.getLogger(__name__).exception("Unexpected image-command error", exc_info=exc)
+        return "Something went wrong while processing that image."
 
     async def send_error(self, interaction: discord.Interaction, title: str, description: str) -> None:
         if interaction.response.is_done():
@@ -174,11 +187,25 @@ class ImageToolkit:
         return False
 
     async def fetch_bytes_from_url(self, url: str) -> bytes:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers={"User-Agent": "neo-gigabot/1.0"}) as response:
-                response.raise_for_status()
-                return await response.read()
+        host = (urlparse(url).hostname or "").lower()
+        if host not in ALLOWED_IMAGE_HOSTS:
+            raise ValueError("I only fetch embedded images hosted on Discord's CDN - upload the image or attach it directly.")
+
+        max_bytes = MAX_IMAGE_DOWNLOAD_BYTES
+        async with self.bot.http_session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as response:
+            response.raise_for_status()
+            if response.content_length is not None and response.content_length > max_bytes:
+                raise ValueError(f"That image is too large (max {max_bytes // (1024 * 1024)} MB).")
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise ValueError(f"That image is too large (max {max_bytes // (1024 * 1024)} MB).")
+            return bytes(data)
+
+    def _checked_attachment_size(self, attachment: discord.Attachment) -> None:
+        if attachment.size > MAX_IMAGE_DOWNLOAD_BYTES:
+            raise ValueError(f"That image is too large (max {MAX_IMAGE_DOWNLOAD_BYTES // (1024 * 1024)} MB).")
 
     async def fetch_message_from_link(self, interaction: discord.Interaction, message_link: str) -> discord.Message:
         return await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild)
@@ -186,6 +213,7 @@ class ImageToolkit:
     async def extract_image_from_message(self, message: discord.Message) -> tuple[bytes, str]:
         for attachment in message.attachments:
             if self.supported_attachment(attachment):
+                self._checked_attachment_size(attachment)
                 return await attachment.read(), attachment.filename
 
         for embed in message.embeds:
@@ -210,13 +238,13 @@ class ImageToolkit:
             channel = self.bot.get_channel(channel_id)
 
         if channel is None or not hasattr(channel, "fetch_message"):
-            self.sources.forget(interaction.user.id)
+            self.sources.clear(interaction.user.id)
             return None
 
         try:
             message = await channel.fetch_message(message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            self.sources.forget(interaction.user.id)
+            self.sources.clear(interaction.user.id)
             return None
 
         return await self.extract_image_from_message(message)
@@ -242,6 +270,7 @@ class ImageToolkit:
         if attachment is not None:
             if not self.supported_attachment(attachment):
                 raise ValueError("That attachment is not a supported image.")
+            self._checked_attachment_size(attachment)
             return await attachment.read(), attachment.filename
 
         if message_link:
@@ -264,6 +293,13 @@ class ImageToolkit:
             return True
         return bool(getattr(image, "is_animated", False))
 
+    def gif_frames(self, image: Image.Image):
+        """Iterate a GIF's frames, capped at MAX_GIF_FRAMES. Every frame gets
+        expanded to full RGBA in memory during processing, so all GIF loops in
+        the image pipeline go through this cap - one upload must not be able to
+        expand into gigabytes."""
+        return itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES)
+
     def gif_save_kwargs(self, image: Image.Image) -> dict:
         return {
             "save_all": True,
@@ -285,7 +321,7 @@ class ImageToolkit:
         with Image.open(io.BytesIO(image_bytes)) as image:
             if self.is_gif(image, filename):
                 frames: list[Image.Image] = []
-                for frame in ImageSequence.Iterator(image):
+                for frame in self.gif_frames(image):
                     processed = processor(frame.convert("RGBA"))
                     frames.append(processed.convert("RGBA"))
                 output = io.BytesIO()
