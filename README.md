@@ -1,5 +1,11 @@
 # neo-gigabot
 
+<div align="center">
+
+<a href="https://ko-fi.com/bkrbnkr"><img alt="Support me on Ko-fi" src="https://img.shields.io/badge/Ko--fi-buy_me_a_coffee-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white"></a>
+
+</div>
+
 A general-purpose Discord bot: music with shareable playlists, image manipulation and memes,
 moderation with escalating warnings, reaction roles, a starboard, per-server activity/mod
 logging, and a pile of fun commands — all slash commands, configured through a single
@@ -200,3 +206,20 @@ durations, link parsing, command-log parsing, migration mapping) are pure functi
 
 Repo docs: `PORTING_CHECKLIST.md` (parity tracking), `CODE_SWEEP.md` and `CODE_AUDIT.md`
 (past reviews and their resolutions), `ACTION_ITEMS.md`.
+
+---
+
+## Support
+
+<div align="center">
+
+This bot is free and open source, and I work on it in my spare time.<br>
+If it saved you some time, you can buy me a coffee. No pressure - the code stays free either way.
+
+<a href="https://ko-fi.com/bkrbnkr"><img alt="Support me on Ko-fi" src="https://img.shields.io/badge/Ko--fi-bkrbnkr-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white"></a>
+
+</div>
+
+## License
+
+GPL-3.0, see [LICENSE](LICENSE).
