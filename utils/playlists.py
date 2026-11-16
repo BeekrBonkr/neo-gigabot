@@ -313,6 +313,29 @@ def remove_song(storage_path: Path, owner_id: int, name: str, position: int) -> 
         return updated, removed
 
 
+def move_song(storage_path: Path, owner_id: int, name: str, position: int, to_position: int) -> dict[str, Any]:
+    """Move a 1-indexed song to another 1-indexed position. Returns the updated playlist."""
+    ensure_playlists_table(storage_path)
+    key = normalize_name(name)
+
+    with write_transaction(storage_path) as connection:
+        row = _fetch_row(connection, owner_id, key)
+        if row is None:
+            raise PlaylistError(f"You don't have a playlist named `{name}`.")
+
+        songs = json.loads(row["songs"])
+        if not (1 <= position <= len(songs) and 1 <= to_position <= len(songs)):
+            raise PlaylistError(f"Invalid position. That playlist has {len(songs)} song(s).")
+        songs.insert(to_position - 1, songs.pop(position - 1))
+        connection.execute(
+            "UPDATE playlists SET songs = ?, updated_at = CURRENT_TIMESTAMP WHERE owner_id = ? AND name = ?",
+            (json.dumps(songs), int(owner_id), key),
+        )
+        updated = dict(_row_to_playlist(row))
+        updated["songs"] = songs
+        return updated
+
+
 def shuffle_playlist(storage_path: Path, owner_id: int, name: str) -> dict[str, Any]:
     import random
 

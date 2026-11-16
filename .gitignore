@@ -15,3 +15,7 @@ storage/command_tree_fingerprint.txt
 storage/settings/*.yml
 !storage/settings/default.yml
 
+
+# Written by the web panel when it edits .env (contain secrets)
+.env.panel-backup
+.env.panel-tmp
