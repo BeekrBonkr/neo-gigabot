@@ -205,18 +205,31 @@ class Help(commands.Cog):
             dm_channel = await message.author.create_dm()
             sent = await dm_channel.send(embed=embed, view=view)
             view.message = sent
+        except discord.HTTPException:
+            # DMs closed (Forbidden) or some other delivery failure: fall back to
+            # the channel. The channel itself may also be unwritable (the bot was
+            # mentioned somewhere it lacks Send Messages), which is nothing to
+            # trace - there's simply nowhere left to answer.
+            try:
+                sent = await message.channel.send(
+                    "*(Your DMs look closed, so here's the help menu - it'll clean itself up shortly.)*",
+                    embed=embed,
+                    view=view,
+                    delete_after=HELP_VIEW_TIMEOUT_SECONDS,
+                )
+            except discord.HTTPException:
+                return
+            view.message = sent
+            return
+
+        try:
             await message.channel.send(
                 f"📬 {message.author.mention} I sent you the help menu in your DMs!",
                 delete_after=8,
             )
-        except discord.Forbidden:
-            sent = await message.channel.send(
-                "*(Your DMs look closed, so here's the help menu - it'll clean itself up shortly.)*",
-                embed=embed,
-                view=view,
-                delete_after=HELP_VIEW_TIMEOUT_SECONDS,
-            )
-            view.message = sent
+        except discord.HTTPException:
+            # The DM went through; a missing confirmation notice is harmless.
+            pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
