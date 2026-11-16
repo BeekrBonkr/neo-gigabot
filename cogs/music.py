@@ -55,6 +55,14 @@ MAX_QUERY_LENGTH = 300
 # handed to FFmpeg to fail on.
 STREAM_URL_TTL_SECONDS = 30 * 60
 
+# A track whose ffmpeg process dies this quickly never really played: the usual
+# cause is a signed stream URL that went 403 between extraction and playback
+# (ffmpeg exits with code 8, discord.py's after-callback fires with no error,
+# and the user hears silence). Such a track gets one retry with a freshly
+# extracted URL before it's reported as failed.
+PLAYBACK_FAST_FAIL_SECONDS = 2.0
+MAX_PLAYBACK_ATTEMPTS = 2
+
 # Direct-URL playback is restricted to these hosts (and their subdomains). Anything
 # else typed as an absolute URL is rejected outright rather than silently falling
 # back to a search - yt-dlp's generic extractor will happily fetch *any* URL handed
@@ -114,6 +122,9 @@ class Track:
     stream_url_fetched_at: float | None = None
     requested_by_id: int | None = None
     requested_by_name: str | None = None
+    # How many times the player loop has handed this track to ffmpeg. Bounds the
+    # fast-fail retry so a dead stream can't be retried forever.
+    playback_attempts: int = 0
 
     @property
     def duration_label(self) -> str:
@@ -1093,6 +1104,52 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         state.idle_disconnect_task = asyncio.create_task(_idle_disconnect(), name=f"idle-disconnect-{guild_id}")
 
+    @staticmethod
+    def _start_playing(voice_client: discord.VoiceProtocol, source: discord.AudioSource, after) -> None:
+        """voice_client.play(), recovering from an orphaned player.
+
+        If a previous player loop died (e.g. an exception after play() had
+        already started ffmpeg), the voice client is still "playing" with
+        nobody tracking it. play() then raises "Already playing audio" for
+        every track. Stop the orphan and try once more instead of dropping
+        the whole queue one track at a time.
+        """
+        try:
+            voice_client.play(source, after=after)
+        except discord.ClientException as exc:
+            if "already playing" not in str(exc).lower():
+                raise
+            LOGGER.warning("Voice client had an orphaned player; stopping it and retrying")
+            voice_client.stop()
+            voice_client.play(source, after=after)
+
+    @staticmethod
+    def _ffmpeg_returncode(source: discord.AudioSource) -> int | None:
+        """Exit code of the ffmpeg process behind ``source``, or None if unknown."""
+        inner = getattr(source, "original", source)
+        process = getattr(inner, "_process", None)
+        poll = getattr(process, "poll", None)
+        if poll is None:
+            return None
+        try:
+            code = poll()
+        except Exception:  # pragma: no cover - defensive; Popen.poll shouldn't raise
+            return None
+        return code if isinstance(code, int) else None
+
+    @classmethod
+    def _playback_failed(cls, source: discord.AudioSource, started_at: float, after_error: list[Exception]) -> bool:
+        """Decide whether a track that just "finished" actually failed to stream."""
+        if after_error:
+            return True
+        returncode = cls._ffmpeg_returncode(source)
+        if returncode is not None and returncode > 0:
+            return True
+        if returncode == 0:
+            # ffmpeg ran to completion: a genuinely short clip, not a failure.
+            return False
+        return (time.monotonic() - started_at) < PLAYBACK_FAST_FAIL_SECONDS
+
     async def player_loop(self, guild_id: int) -> None:
         state = self.get_state(guild_id)
 
@@ -1135,36 +1192,86 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                     continue
 
                 finished = asyncio.Event()
+                after_error: list[Exception] = []
 
                 def _after(error: Exception | None, _finished: asyncio.Event = finished) -> None:
                     if error:
                         LOGGER.error("Voice playback after-callback error: %s", error)
+                        after_error.append(error)
                     self.bot.loop.call_soon_threadsafe(_finished.set)
 
                 try:
-                    voice_client.play(source, after=_after)
+                    self._start_playing(voice_client, source, _after)
                 except discord.ClientException as exc:
                     LOGGER.warning("Could not start playback for %s: %s", track.webpage_url, exc)
+                    source.cleanup()
                     state.current = None
                     continue
 
+                track.playback_attempts += 1
+                started_at = time.monotonic()
+
+                # Announcing the track is best-effort. If the bot lost send access
+                # to the text channel mid-session, audio must keep going: letting
+                # this raise would kill the loop while ffmpeg keeps playing, and
+                # the next /play would then fail every track with "Already
+                # playing audio".
                 if isinstance(text_channel, discord.abc.Messageable):
-                    await self.bot.embeds.send(
-                        text_channel,
-                        title="Now Playing",
-                        description=f"[{track.title}]({track.webpage_url})",
-                        fields=[
-                            self.bot.embeds.field("Duration", track.duration_label, True),
-                            self.bot.embeds.field("Uploader", track.uploader or "Unknown", True),
-                            self.bot.embeds.field("Requested By", track.requested_by_name or "Unknown", False),
-                        ],
-                        thumbnail_url=track.thumbnail,
-                    )
+                    try:
+                        await self.bot.embeds.send(
+                            text_channel,
+                            title="Now Playing",
+                            description=f"[{track.title}]({track.webpage_url})",
+                            fields=[
+                                self.bot.embeds.field("Duration", track.duration_label, True),
+                                self.bot.embeds.field("Uploader", track.uploader or "Unknown", True),
+                                self.bot.embeds.field("Requested By", track.requested_by_name or "Unknown", False),
+                            ],
+                            thumbnail_url=track.thumbnail,
+                        )
+                    except discord.HTTPException as exc:
+                        LOGGER.warning(
+                            "Could not announce track in channel %s (guild %s): %s",
+                            state.text_channel_id,
+                            guild_id,
+                            exc,
+                        )
 
                 await finished.wait()
 
                 finished_track = state.current
                 state.current = None
+
+                if (
+                    finished_track is not None
+                    and not state.skip_requested
+                    and self._playback_failed(source, started_at, after_error)
+                ):
+                    if finished_track.playback_attempts < MAX_PLAYBACK_ATTEMPTS:
+                        LOGGER.warning(
+                            "Playback of %s ended immediately; retrying with a fresh stream URL",
+                            finished_track.webpage_url,
+                        )
+                        finished_track.stream_url = None
+                        finished_track.stream_url_fetched_at = None
+                        state.queue.appendleft(finished_track)
+                    else:
+                        LOGGER.warning("Playback of %s failed after %d attempts; skipping", finished_track.webpage_url, finished_track.playback_attempts)
+                        if isinstance(text_channel, discord.abc.Messageable):
+                            try:
+                                await self.bot.embeds.error(
+                                    text_channel,
+                                    "Playback Error",
+                                    f"The stream for `{finished_track.title}` kept failing. Skipping it.",
+                                )
+                            except discord.HTTPException:
+                                pass
+                    state.skip_requested = False
+                    if guild.voice_client is None or not guild.voice_client.is_connected():
+                        state.clear_queue()
+                        return
+                    continue
+
                 if finished_track is not None:
                     if state.loop_mode == "track" and not state.skip_requested:
                         state.queue.appendleft(finished_track)
@@ -1408,7 +1515,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         embed = self.build_queue_embed(interaction.guild_id)
         if view.max_page() == 0:
             view.clear_items()
-        await interaction.response.send_message(embed=embed, view=view if view.children else None)
+        # discord.py treats view=None as "a view" and calls .is_finished() on it;
+        # MISSING is the only way to say "no view" explicitly.
+        await interaction.response.send_message(embed=embed, view=view if view.children else discord.utils.MISSING)
         if view.children:
             view.message = await interaction.original_response()
 
