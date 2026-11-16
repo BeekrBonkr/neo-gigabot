@@ -147,6 +147,19 @@ The unit uses `Restart=on-failure` with a crash-loop limit; `/owner restart` exi
 on purpose so systemd restarts it. **Deploys are just `git pull` + restart** (the service
 runs from the working tree).
 
+**Keep yt-dlp fresh.** YouTube breaks stale yt-dlp releases every few weeks; the symptom
+is ffmpeg logging `HTTP error 403 Forbidden` on every track. A weekly timer upgrades it
+and restarts the bot only when the version changed:
+
+```bash
+sudo cp neo-gigabot-ytdlp-update.service neo-gigabot-ytdlp-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now neo-gigabot-ytdlp-update.timer
+sudo systemctl start neo-gigabot-ytdlp-update.service   # run once now
+```
+
+The same script works by hand: `scripts/update_ytdlp.sh`.
+
 ---
 
 ## Storage layout

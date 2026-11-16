@@ -1,0 +1,22 @@
+# Oneshot unit driven by neo-gigabot-ytdlp-update.timer. Upgrades yt-dlp in the
+# bot's venv and restarts neo-gigabot only when the version changed.
+#
+# Install (alongside neo-gigabot.service):
+#   sudo cp neo-gigabot-ytdlp-update.service neo-gigabot-ytdlp-update.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now neo-gigabot-ytdlp-update.timer
+#   systemctl list-timers neo-gigabot-ytdlp-update.timer   # confirm next run
+#   sudo systemctl start neo-gigabot-ytdlp-update.service  # dry run now
+#
+# Runs as root so it can restart the service; the script drops to the repo
+# owner (via runuser) for the pip upgrade so the venv stays owned by that user.
+
+[Unit]
+Description=Upgrade yt-dlp for neo-GigaBot and restart if changed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/michael/neogigabot
+ExecStart=/home/michael/neogigabot/scripts/update_ytdlp.sh

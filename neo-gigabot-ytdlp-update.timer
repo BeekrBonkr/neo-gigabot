@@ -1,0 +1,14 @@
+# Weekly yt-dlp upgrade for neo-GigaBot. Pairs with neo-gigabot-ytdlp-update.service;
+# see that file for install steps. Early Monday morning (local time) keeps the
+# restart away from evening peak usage.
+
+[Unit]
+Description=Weekly yt-dlp upgrade for neo-GigaBot
+
+[Timer]
+OnCalendar=Mon *-*-* 05:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
