@@ -42,6 +42,7 @@ from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
 from utils import schedules as schedule_store
 from utils import starboard as starboard_store
+from utils import stickies as sticky_store
 from utils import sticky_roles as sticky_role_store
 from utils import tags as tag_store
 from utils import tempbans as tempban_store
@@ -324,6 +325,7 @@ class PanelBridge(commands.Cog):
         r.add_get("/v1/guilds/{guild_id}/membersearch", self.h_member_search)
         r.add_post("/v1/guilds/{guild_id}/tags", self.h_tags_action)
         r.add_post("/v1/guilds/{guild_id}/schedules", self.h_schedules_action)
+        r.add_post("/v1/guilds/{guild_id}/stickies", self.h_stickies_action)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -1644,6 +1646,58 @@ class PanelBridge(commands.Cog):
             if removed is None:
                 raise BridgeError(404, "That scheduled message no longer exists.")
             return web.json_response({"ok": True, "detail": "Cancelled the scheduled message", "before": removed})
+        raise BridgeError(400, "Unknown action.")
+
+    def _postable_channel(self, guild: discord.Guild, raw: str) -> Any:
+        """A channel of this server the bot can post in, or a BridgeError saying why not."""
+        channel = guild.get_channel(int(raw)) if str(raw).isdigit() else None
+        if channel is None or not hasattr(channel, "send"):
+            raise BridgeError(400, "Choose a channel.")
+        permissions = channel.permissions_for(guild.me) if guild.me else None
+        if permissions is None or not (permissions.view_channel and permissions.send_messages):
+            raise BridgeError(409, f"The bot can't send messages in #{channel.name}.")
+        return channel
+
+    async def h_stickies_action(self, request: web.Request) -> web.Response:
+        """Set, stop, start or remove a channel's sticky message, as a server
+        admin. The same steps as the /stick commands, including posting it."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action = str(body.get("action", ""))
+        cog = self.bot.get_cog("Stickies")
+        if cog is None:
+            raise BridgeError(503, "Sticky messages are not available right now.")
+        channel_raw = str(body.get("channel_id", ""))
+        if action == "set":
+            channel = self._postable_channel(guild, channel_raw)
+            try:
+                sticky = sticky_store.set_sticky(self.storage, guild.id, channel.id, str(body.get("content", "")), admin.id,
+                                                 embed=bool(body.get("embed")), slow=bool(body.get("slow")))
+            except sticky_store.StickyError as exc:
+                raise BridgeError(400, str(exc)) from exc
+            await cog.post(channel, sticky)
+            return web.json_response({"ok": True, "detail": f"Stuck the message in #{channel.name}"})
+        # The rest act on an existing sticky, which must belong to this server.
+        existing = sticky_store.get(self.storage, int(channel_raw)) if channel_raw.isdigit() else None
+        if existing is None or existing["guild_id"] != guild.id:
+            raise BridgeError(404, "That sticky no longer exists.")
+        channel = guild.get_channel(existing["channel_id"])
+        name = f"#{channel.name}" if channel is not None else "a deleted channel"
+        if action in ("stop", "start"):
+            sticky = sticky_store.set_active(self.storage, existing["channel_id"], action == "start")
+            if action == "start" and channel is not None:
+                await cog.post(channel, sticky)
+            return web.json_response({"ok": True, "detail": f"{'Restarted' if action == 'start' else 'Stopped'} the sticky in {name}"})
+        if action == "remove":
+            sticky_store.remove(self.storage, existing["channel_id"])
+            cog.pacer.forget(existing["channel_id"])
+            if channel is not None and existing.get("last_message_id"):
+                try:
+                    await channel.get_partial_message(existing["last_message_id"]).delete()
+                except discord.HTTPException:
+                    pass
+            return web.json_response({"ok": True, "detail": f"Removed the sticky in {name}", "before": existing})
         raise BridgeError(400, "Unknown action.")
 
     MEMBER_SEARCH_RESULTS = 25

@@ -72,3 +72,62 @@ def test_reposting_deletes_the_old_copy_and_ignores_the_bots_own_messages(storag
     for _ in range(10):
         asyncio.run(cog.on_message(message(5)))
     assert len(sent) == 2
+
+
+def test_the_website_can_manage_stickies_only_in_its_own_server(storage):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from cogs.panel_bridge import PanelBridge
+
+    posted, deleted = [], []
+
+    class Channel:
+        def __init__(self, cid, can_send=True):
+            self.id, self.name, self.can_send = cid, f"chan{cid}", can_send
+
+        def permissions_for(self, me):
+            return SimpleNamespace(view_channel=True, send_messages=self.can_send)
+
+        async def send(self, *a, **k):
+            return SimpleNamespace(id=1)
+
+        def get_partial_message(self, message_id):
+            async def delete():
+                deleted.append(message_id)
+            return SimpleNamespace(delete=delete)
+
+    async def post(channel, sticky):
+        posted.append((channel.id, sticky["content"], sticky["active"]))
+
+    channels = {7: Channel(7), 8: Channel(8, can_send=False)}
+    admin = SimpleNamespace(id=4, guild_permissions=SimpleNamespace(administrator=True))
+    member = SimpleNamespace(id=5, guild_permissions=SimpleNamespace(administrator=False))
+    guild = SimpleNamespace(id=1, owner_id=99, me=object(), get_channel=channels.get, get_member={4: admin, 5: member}.get)
+    cog = SimpleNamespace(post=post, pacer=store.Pacer())
+    bot = SimpleNamespace(storage_path=storage, guilds=[guild], voice_clients=[], get_guild=lambda gid: guild if gid == 1 else None,
+                          get_cog=lambda name: cog if name == "Stickies" else None)
+    bridge = PanelBridge(bot)
+    bridge._token = "t" * 40
+    store.set_sticky(storage, 2, 70, "another server's sticky", 9)
+
+    async def run():
+        async with TestClient(TestServer(bridge.build_app())) as client:
+            async def act(actor, **body):
+                response = await client.post("/v1/guilds/1/stickies", headers={"Authorization": "Bearer " + "t" * 40}, json={"user_id": str(actor), **body})
+                return response.status, await response.json()
+
+            assert (await act(5, action="set", channel_id="7", content="hi"))[0] == 403
+            assert (await act(4, action="set", channel_id="8", content="hi"))[0] == 409      # the bot can't post there
+            assert (await act(4, action="set", channel_id="7", content=""))[0] == 400
+            status, done = await act(4, action="set", channel_id="7", content="read the rules", slow=True)
+            assert status == 200 and done["detail"] == "Stuck the message in #chan7" and posted == [(7, "read the rules", 1)]
+            assert store.get(storage, 7)["slow"] == 1
+            assert (await act(4, action="stop", channel_id="7"))[1]["detail"] == "Stopped the sticky in #chan7" and store.get(storage, 7)["active"] == 0
+            assert (await act(4, action="start", channel_id="7"))[0] == 200 and len(posted) == 2
+            assert (await act(4, action="remove", channel_id="70"))[0] == 404                 # belongs to another server
+            store.set_last_message(storage, 7, 555)
+            assert (await act(4, action="remove", channel_id="7"))[0] == 200 and deleted == [555] and store.get(storage, 7) is None
+            assert (await act(4, action="explode", channel_id="7"))[0] == 404
+
+    asyncio.run(run())
+    assert store.get(storage, 70) is not None
