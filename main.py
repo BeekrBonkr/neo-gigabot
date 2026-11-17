@@ -34,6 +34,7 @@ COGS = [
     "cogs.tags",
     "cogs.tempvoice",
     "cogs.schedules",
+    "cogs.stickies",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",

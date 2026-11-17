@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.reactionroles import clear_reaction_role_cache
 from utils.settings import clear_settings_caches
+from utils.stickies import clear_cache as clear_sticky_cache
 
 
 @pytest.fixture()
@@ -17,6 +18,7 @@ def storage(tmp_path: Path) -> Path:
     so state can't leak between tests that happen to reuse a tmp path string."""
     clear_settings_caches()
     clear_reaction_role_cache()
+    clear_sticky_cache()
     storage_path = tmp_path / "storage"
     storage_path.mkdir()
     yield storage_path
