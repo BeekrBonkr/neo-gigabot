@@ -77,6 +77,8 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "appeals_questions": "",
     # How long the website's searchable copy of the activity log is kept. 0 keeps no copy.
     "logging_keep_days": 30,
+    # Where /suggest posts. Empty turns suggestions off.
+    "suggestions_channel_id": "",
 }
 
 # How the newer settings are validated when they arrive from the web panel
@@ -92,7 +94,7 @@ SETTING_CHOICES: dict[str, tuple[str, ...]] = {
 }
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
 SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
-SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id"}
+SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),
     "automod_spam_limit": (3, 30),

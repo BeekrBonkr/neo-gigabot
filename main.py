@@ -30,6 +30,7 @@ COGS = [
     "cogs.antiraid",
     "cogs.verification",
     "cogs.honeypot",
+    "cogs.suggestions",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",
