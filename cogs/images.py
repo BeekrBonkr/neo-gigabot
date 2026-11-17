@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import functools
 import io
 import math
@@ -15,6 +14,8 @@ import numpy as np
 from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageSequence
+
+from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS
 
 LINE_SPACING = 6
 
@@ -37,12 +38,8 @@ FACE_BLOB_MEAN = (104.0, 177.0, 123.0)
 # Face detection, content-aware scale, swirl, shake, and deepfry are all
 # meaningfully heavier than the rest of this cog's transforms (model inference,
 # a seam-carving DP loop, or a per-pixel/per-frame Python loop), so they're run
-# through an executor with a timeout and a bot-wide concurrency cap, mirroring
-# cogs/music.py's _run_extraction helper for yt-dlp. GIFs multiply the cost of
-# these by frame count, so the timeout has headroom well past what a single
-# frame needs.
-MAX_CONCURRENT_CPU_BOUND = 2
-CPU_BOUND_TIMEOUT_SECONDS = 60.0
+# through an executor with a timeout and a bot-wide concurrency cap (see
+# ImageToolkit.run_cpu_bound in utils/imaging.py).
 
 # /contentaware: seam carving is O(seams_removed x width x height) even with a
 # vectorized per-row DP loop, and this command now carves both axes (width, then
@@ -134,10 +131,9 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.assets_dir = self.bot.project_root / "assets" / "images"
-        self._cpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CPU_BOUND)
         self._face_net: cv2.dnn.Net | None = None
         # cv2.dnn.Net is not thread-safe for concurrent inference, and
-        # MAX_CONCURRENT_CPU_BOUND executor threads can reach it at once.
+        # several executor threads can reach it at once.
         self._face_net_lock = threading.Lock()
 
         self.set_image_source_menu = app_commands.ContextMenu(
@@ -161,29 +157,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
     # ---------- executor helper (shared with the effects commands below) ----------
 
     async def _run_cpu_bound(self, func: Callable[[], object], *, timeout: float = CPU_BOUND_TIMEOUT_SECONDS) -> object:
-        # The semaphore is released when the worker thread actually finishes,
-        # not when we stop waiting: a timeout can only abandon the thread, and
-        # releasing early would let real concurrency exceed the cap under
-        # repeated timeouts. shield() keeps wait_for from cancelling the
-        # executor future so the done callback fires at true completion.
-        loop = asyncio.get_running_loop()
-        await self._cpu_semaphore.acquire()
-        try:
-            future = loop.run_in_executor(None, func)
-        except BaseException:
-            self._cpu_semaphore.release()
-            raise
-
-        def _on_done(done_future: asyncio.Future) -> None:
-            self._cpu_semaphore.release()
-            if not done_future.cancelled():
-                done_future.exception()  # retrieve, so abandoned failures don't log "never retrieved"
-
-        future.add_done_callback(_on_done)
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("That took too long to process. Try a smaller image or less aggressive settings.") from exc
+        return await self.bot.image_tools.run_cpu_bound(func, timeout=timeout)
 
     # ---------- face detection helpers ----------
 

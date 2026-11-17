@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import itertools
 import logging
 import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -33,13 +35,23 @@ MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 # Every GIF frame is expanded to RGBA in memory during processing; anything past
 # this many frames is dropped rather than letting one upload eat gigabytes.
 MAX_GIF_FRAMES = 120
+# Image work runs in executor threads; this many at once, bot-wide, each with
+# this long to finish. GIFs multiply the cost by their frame count, so the
+# timeout has headroom well past what a single frame needs.
+MAX_CONCURRENT_CPU_BOUND = 2
+CPU_BOUND_TIMEOUT_SECONDS = 60.0
+# What a bot can upload where the server has no boosts (and in DMs).
+DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024
+# GIFs do not go faster than this in most viewers; shorter frames get slowed down instead.
+MIN_GIF_FRAME_MS = 20
 
 # The commands slow/heavy enough (DNN face detection, seam-carving DP, per-pixel
 # swirl warping, ...) that someone firing off a bunch back-to-back is actually
 # piling up real work, not just spamming a cheap resize. Tracked per (user,
 # channel) so the snark below is aimed at whoever's actually causing the pile-up.
 HEAVY_COMMANDS = frozenset(
-    {"contentaware", "facebox", "blurfaces", "facecrop", "faceswap", "googlyeyes", "deepfry", "swirl", "shake"}
+    {"contentaware", "facebox", "blurfaces", "facecrop", "faceswap", "googlyeyes", "deepfry", "swirl", "shake",
+     "removebg", "wave", "rainbow", "spin", "pet", "bonk"}
 )
 HEAVY_COMMAND_WINDOW_SECONDS = 30.0
 HEAVY_COMMAND_SNARK_THRESHOLD = 3
@@ -52,6 +64,67 @@ SNARK_LINES = (
     "I see we're doing a lot of this today. Cool, cool, cool, no rush on my end at all.",
     "Another one already? I'm flattered, but also tired.",
 )
+
+
+@dataclass(slots=True)
+class Frames:
+    """A decoded image: one RGBA frame for a still, several for a GIF, each
+    with how long it shows (milliseconds)."""
+
+    frames: list[Image.Image]
+    durations: list[int]
+    loop: int = 0
+    animated: bool = False
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return self.frames[0].size
+
+
+def fit_within(image: Image.Image, max_edge: int) -> Image.Image:
+    """The image shrunk so its longer edge is at most max_edge (never enlarged)."""
+    longest = max(image.size)
+    if longest <= max_edge:
+        return image
+    scale = max_edge / longest
+    return image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), Image.LANCZOS)
+
+
+def load_frames(image_bytes: bytes, filename: str | None = None, *, max_edge: int | None = None, first_only: bool = False) -> Frames:
+    """Decode an upload into RGBA frames, capped at MAX_GIF_FRAMES. `max_edge`
+    shrinks big inputs; `first_only` takes a GIF's first frame as a still."""
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        animated = bool(getattr(image, "is_animated", False)) and not first_only
+        loop = int(image.info.get("loop", 0) or 0)
+        frames: list[Image.Image] = []
+        durations: list[int] = []
+        source = itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES) if animated else [image]
+        for frame in source:
+            durations.append(int(frame.info.get("duration", 100) or 100))
+            converted = frame.convert("RGBA")
+            frames.append(fit_within(converted, max_edge) if max_edge else converted)
+    return Frames(frames, durations, loop, animated and len(frames) > 1)
+
+
+def encode_frames(frames: list[Image.Image], durations: list[int] | int, stem: str, *, loop: int = 0) -> tuple[bytes, str]:
+    """PNG for one frame, GIF for several. Returns (data, filename)."""
+    output = io.BytesIO()
+    if len(frames) == 1:
+        frames[0].save(output, format="PNG")
+        return output.getvalue(), f"{stem}.png"
+    if isinstance(durations, int):
+        durations = [durations] * len(frames)
+    frames = [frame.convert("RGBA") for frame in frames]
+    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loop,
+                   duration=[max(MIN_GIF_FRAME_MS, int(d)) for d in durations], disposal=2)
+    return output.getvalue(), f"{stem}.gif"
+
+
+def apply_to_frames(image_bytes: bytes, filename: str | None, processor: Callable[[Image.Image], Image.Image], stem: str,
+                    *, max_edge: int | None = None) -> tuple[bytes, str]:
+    """Run processor over every frame of a still or GIF and encode the result."""
+    loaded = load_frames(image_bytes, filename, max_edge=max_edge)
+    return encode_frames([processor(frame) for frame in loaded.frames], loaded.durations, stem, loop=loaded.loop)
 
 
 class ImageSourceStore:
@@ -95,6 +168,75 @@ class ImageToolkit:
         self.bot = bot
         self.sources = ImageSourceStore()
         self._heavy_command_uses: dict[tuple[int, int], list[float]] = {}
+        self._cpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CPU_BOUND)
+
+    # ---------- running image work ----------
+
+    async def run_cpu_bound(self, func: Callable[[], object], *, timeout: float = CPU_BOUND_TIMEOUT_SECONDS) -> object:
+        """Run blocking image work in an executor thread, under the bot-wide
+        concurrency cap, giving up after `timeout`."""
+        # The semaphore is released when the worker thread actually finishes,
+        # not when we stop waiting: a timeout can only abandon the thread, and
+        # releasing early would let real concurrency exceed the cap under
+        # repeated timeouts. shield() keeps wait_for from cancelling the
+        # executor future so the done callback fires at true completion.
+        loop = asyncio.get_running_loop()
+        await self._cpu_semaphore.acquire()
+        try:
+            future = loop.run_in_executor(None, func)
+        except BaseException:
+            self._cpu_semaphore.release()
+            raise
+
+        def _on_done(done_future: asyncio.Future) -> None:
+            self._cpu_semaphore.release()
+            if not done_future.cancelled():
+                done_future.exception()  # retrieve, so abandoned failures don't log "never retrieved"
+
+        future.add_done_callback(_on_done)
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("That took too long to process. Try a smaller image or less aggressive settings.") from exc
+
+    def check_upload_size(self, interaction: discord.Interaction, data: bytes) -> None:
+        limit = interaction.guild.filesize_limit if interaction.guild is not None else DEFAULT_UPLOAD_LIMIT_BYTES
+        if len(data) > limit:
+            raise ValueError(
+                f"The result is {len(data) / 1048576:.1f} MB, more than the {limit // 1048576} MB I can upload here. Try a smaller image or a shorter GIF."
+            )
+
+    async def run_image_command(
+        self,
+        interaction: discord.Interaction,
+        command_name: str,
+        title: str,
+        work: Callable[..., tuple],
+        *,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+        extra_sources: list[tuple[discord.Attachment | None, str | None]] | None = None,
+    ) -> None:
+        """The whole life of a simple image command: the blocked-command check,
+        finding the source image, running `work(image_bytes, filename, *extras)`
+        off the event loop, and sending the file or a readable error. `work`
+        returns (data, filename) or (data, filename, description). Each entry of
+        `extra_sources` is another image to fetch and pass along as bytes."""
+        if not await self.ensure_command_allowed(interaction, command_name):
+            return
+        await self.note_heavy_command(interaction, command_name)
+        await self.defer(interaction)
+        try:
+            image_bytes, filename = await self.get_source_image(interaction, attachment, message_link)
+            extras = [(await self.get_source_image(interaction, extra, link))[0] for extra, link in extra_sources or []]
+            result = await self.run_cpu_bound(lambda: work(image_bytes, filename, *extras))
+            data, out_name = result[0], result[1]
+            self.check_upload_size(interaction, data)
+            await self.send_processed_file(
+                interaction, data=data, filename=out_name, title=title, description=result[2] if len(result) > 2 else None
+            )
+        except Exception as exc:
+            await self.send_error(interaction, f"{title} Failed", self.user_error_message(exc))
 
     # ---------- access / response helpers ----------
 
