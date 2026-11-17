@@ -32,6 +32,7 @@ COGS = [
     "cogs.honeypot",
     "cogs.suggestions",
     "cogs.tags",
+    "cogs.tempvoice",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",

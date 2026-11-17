@@ -86,6 +86,10 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "welcome_embed_image_url": "",
     "welcome_embed_footer": "",
     "welcome_dm_message": "",
+    # Temporary voice channels: joining the hub channel creates one.
+    "tempvoice_hub_channel_id": "",
+    "tempvoice_name": "{name}'s channel",
+    "tempvoice_user_limit": 0,
 }
 
 # How the newer settings are validated when they arrive from the web panel
@@ -105,7 +109,7 @@ SETTING_COLORS: set[str] = {"welcome_embed_color"}
 SETTING_URLS: set[str] = {"welcome_embed_image_url"}
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
 SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
-SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id"}
+SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),
     "automod_spam_limit": (3, 30),
@@ -115,6 +119,7 @@ SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "antiraid_min_account_age_days": (0, 365),
     "verify_min_account_age_days": (0, 365),
     "logging_keep_days": (0, 90),
+    "tempvoice_user_limit": (0, 99),
 }
 # Text settings that may be longer than the usual 1000 characters.
 SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000}
