@@ -312,6 +312,7 @@ class PanelBridge(commands.Cog):
         r.add_get("/v1/guilds/{guild_id}/music", self.h_guild_music)
         r.add_get("/v1/guilds/{guild_id}/music/events", self.h_guild_music_events)
         r.add_get("/v1/guilds/{guild_id}/moderation", self.h_moderation)
+        r.add_get("/v1/guilds/{guild_id}/membersearch", self.h_member_search)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -1583,6 +1584,52 @@ class PanelBridge(commands.Cog):
             "bot_can_unmute": bool(permissions and permissions.moderate_members),
             "bot_can_unban": bool(permissions and permissions.ban_members),
         })
+
+    MEMBER_SEARCH_RESULTS = 25
+
+    async def h_member_search(self, request: web.Request) -> web.Response:
+        """Members of a server matching a name or ID, for its admins: who they
+        are, their roles, and how much moderation history they have. An exact
+        ID also finds someone who has left, as far as the bot still knows them."""
+        guild = self._guild(request)
+        self._rr_admin(guild, self._user_id(request, request.query.get("user_id", "")))
+        query = str(request.query.get("q", "")).strip().lower()[:60]
+        if not query:
+            return web.json_response({"members": [], "more": False})
+
+        def rank(member: discord.Member) -> int | None:
+            names = [member.name.lower(), member.display_name.lower(), (getattr(member, "global_name", None) or "").lower()]
+            if query == str(member.id) or query in names:
+                return 0
+            if any(name.startswith(query) for name in names):
+                return 1
+            return 2 if any(query in name for name in names) else None
+
+        ranked = sorted(((rank(m), m.display_name.lower(), m) for m in guild.members if rank(m) is not None), key=lambda item: item[:2])
+        found = [self._member_card(guild, member) for _, _, member in ranked[: self.MEMBER_SEARCH_RESULTS]]
+        if not found and query.isdigit():
+            user = self.bot.get_user(int(query))
+            found = [{"user_id": query, "name": str(user) if user else None, "display_name": str(user) if user else None,
+                      "avatar": _asset_url(getattr(user, "display_avatar", None)), "bot": bool(getattr(user, "bot", False)),
+                      "in_server": False, "joined_at": None, "created_at": _iso(getattr(user, "created_at", None)), "roles": [],
+                      "muted_until": None, **self._history_counts(guild.id, int(query))}]
+        return web.json_response({"members": found, "more": len(ranked) > self.MEMBER_SEARCH_RESULTS})
+
+    def _history_counts(self, guild_id: int, user_id: int) -> dict[str, int]:
+        return {"warnings": warning_store.count_warnings(self.storage, guild_id, user_id),
+                "cases": case_store.count_cases(self.storage, guild_id, user_id)}
+
+    def _member_card(self, guild: discord.Guild, member: discord.Member) -> dict[str, Any]:
+        roles = [{"id": str(role.id), "name": role.name, "color": f"#{role.color.value:06x}" if role.color.value else None}
+                 for role in sorted(member.roles, key=lambda r: r.position, reverse=True) if not role.is_default()]
+        muted = member.timed_out_until if member.is_timed_out() else None
+        return {
+            "user_id": str(member.id), "name": str(member), "display_name": member.display_name,
+            "avatar": _asset_url(getattr(member, "display_avatar", None)), "bot": member.bot, "in_server": True,
+            "owner": guild.owner_id == member.id, "admin": bool(guild.owner_id == member.id or member.guild_permissions.administrator),
+            "joined_at": _iso(member.joined_at), "created_at": _iso(member.created_at), "roles": roles[:30],
+            "muted_until": _iso(muted), **self._history_counts(guild.id, member.id),
+        }
 
     # ---------- ban appeals ----------
 

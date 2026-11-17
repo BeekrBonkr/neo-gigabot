@@ -245,6 +245,7 @@ def _music_world(storage, *, dj_mode=False, blocked=()):
     bot = SimpleNamespace(
         storage_path=storage, guilds=[guild], voice_clients=[voice],
         get_guild=lambda gid: guild if gid == 77 else None, get_cog=lambda name: music if name == "Music" else None,
+        get_user=lambda uid: None,
     )
     update_guild_settings(storage, 77, {"music_dj_enabled": dj_mode, "blocked_commands": list(blocked)})
     cog = PanelBridge(bot)
@@ -585,3 +586,46 @@ def test_moderation_tab_lists_timeouts_and_lifts_them_for_admins_only(storage):
 
     asyncio.run(run())
     assert warning_store.list_warnings(storage, 77, 2) == []
+
+
+def test_member_search_is_for_admins_and_ranks_exact_matches_first(storage):
+    from datetime import datetime, timezone
+
+    from utils import cases as case_store
+    from utils import warnings as warning_store
+
+    make_client, _, voice = _music_world(storage)
+    guild = voice.guild
+
+    def person(uid, name, display, admin=False, muted=False):
+        role = SimpleNamespace(id=50 + uid, name=f"r{uid}", position=uid, color=SimpleNamespace(value=0x112233 if uid == 2 else 0), is_default=lambda: False)
+        member = SimpleNamespace(id=uid, name=name, display_name=display, global_name=None, bot=False, display_avatar=None, roles=[role],
+                                 joined_at=datetime(2025, 1, 1, tzinfo=timezone.utc), created_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                                 timed_out_until=None, is_timed_out=lambda: muted, guild_permissions=SimpleNamespace(administrator=admin))
+        member.__str__ = lambda: name
+        return member
+
+    people = {1: person(1, "anna", "Anna Banana"), 2: person(2, "banana", "B", muted=True), 3: person(3, "zed", "Savannah"), 4: person(4, "boss", "Boss", admin=True)}
+    guild.get_member, guild.members = people.get, list(people.values())
+    warning_store.add_warning(storage, 77, 2, 4, "spam")
+    case_store.add_case(storage, 77, 2, 4, "Member Warned")
+
+    async def search(client, actor, query):
+        response = await client.get("/v1/guilds/77/membersearch", headers=AUTH, params={"user_id": str(actor), "q": query})
+        return response.status, (await response.json())
+
+    async def run():
+        async with make_client() as client:
+            assert (await search(client, 1, "ann"))[0] == 403
+            status, found = await search(client, 4, "ANNA")
+            assert status == 200 and [m["user_id"] for m in found["members"]] == ["1", "3"]      # exact name, then a name containing it
+            _, found = await search(client, 4, "banana")
+            assert [m["user_id"] for m in found["members"]] == ["2", "1"]
+            card = found["members"][0]
+            assert card["warnings"] == 1 and card["cases"] == 1 and card["roles"] == [{"id": "52", "name": "r2", "color": "#112233"}] and card["in_server"]
+            assert [m["user_id"] for m in (await search(client, 4, "3"))[1]["members"]] == ["3"]  # by ID
+            _, gone = await search(client, 4, "424242")
+            assert gone["members"][0]["in_server"] is False and gone["members"][0]["user_id"] == "424242"
+            assert (await search(client, 4, "  "))[1] == {"members": [], "more": False}
+
+    asyncio.run(run())
