@@ -40,6 +40,7 @@ from utils import cases as case_store
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
+from utils import schedules as schedule_store
 from utils import starboard as starboard_store
 from utils import sticky_roles as sticky_role_store
 from utils import tags as tag_store
@@ -322,6 +323,7 @@ class PanelBridge(commands.Cog):
         r.add_get("/v1/guilds/{guild_id}/moderation", self.h_moderation)
         r.add_get("/v1/guilds/{guild_id}/membersearch", self.h_member_search)
         r.add_post("/v1/guilds/{guild_id}/tags", self.h_tags_action)
+        r.add_post("/v1/guilds/{guild_id}/schedules", self.h_schedules_action)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -1611,6 +1613,37 @@ class PanelBridge(commands.Cog):
             if removed is None:
                 raise BridgeError(404, "That tag no longer exists.")
             return web.json_response({"ok": True, "detail": f"Deleted the tag {removed['name']}", "before": removed})
+        raise BridgeError(400, "Unknown action.")
+
+    async def h_schedules_action(self, request: web.Request) -> web.Response:
+        """Add or remove one of a server's scheduled messages, as one of its admins."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action = str(body.get("action", ""))
+        if action == "add":
+            channel_raw = str(body.get("channel_id", ""))
+            channel = guild.get_channel(int(channel_raw)) if channel_raw.isdigit() else None
+            if channel is None or not hasattr(channel, "send"):
+                raise BridgeError(400, "Choose a channel to post in.")
+            permissions = channel.permissions_for(guild.me) if guild.me else None
+            if permissions is None or not (permissions.view_channel and permissions.send_messages):
+                raise BridgeError(409, f"The bot can't send messages in #{channel.name}.")
+            run_at = schedule_store.parse_utc(str(body.get("run_at", "")))
+            interval = str(body.get("interval_minutes", "0"))
+            if run_at is None or not interval.isdigit():
+                raise BridgeError(400, "Choose when to post it.")
+            try:
+                entry = schedule_store.add(self.storage, guild.id, channel.id, str(body.get("content", "")), run_at, int(interval), admin.id)
+            except schedule_store.ScheduleError as exc:
+                raise BridgeError(400, str(exc)) from exc
+            return web.json_response({"ok": True, "detail": f"Scheduled a message in #{channel.name}", "id": entry["id"]})
+        if action == "remove":
+            raw = str(body.get("id", ""))
+            removed = schedule_store.remove(self.storage, guild.id, int(raw)) if raw.isdigit() else None
+            if removed is None:
+                raise BridgeError(404, "That scheduled message no longer exists.")
+            return web.json_response({"ok": True, "detail": "Cancelled the scheduled message", "before": removed})
         raise BridgeError(400, "Unknown action.")
 
     MEMBER_SEARCH_RESULTS = 25

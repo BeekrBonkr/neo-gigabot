@@ -33,6 +33,7 @@ COGS = [
     "cogs.suggestions",
     "cogs.tags",
     "cogs.tempvoice",
+    "cogs.schedules",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",
