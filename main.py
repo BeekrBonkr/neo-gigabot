@@ -28,6 +28,7 @@ COGS = [
     "cogs.image_filters",
     "cogs.image_animate",
     "cogs.image_memes",
+    "cogs.image_edit",
     "cogs.logging",
     "cogs.moderation",
     "cogs.cases",

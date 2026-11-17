@@ -32,7 +32,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   and queue/track-length caps — all from the dashboard
 - Commands that alter live playback require you to be in the bot's voice channel
 
-### 🖼️ Images — `/image …`
+### 🖼️ Images — `/image …`, `/filter …`, `/animate …`, `/memegen …`, `/edit …`
 - Grouped into `effects`, `transform`, `text`, `template`, and `misc`:
   deepfry, swirl, shake, jpegify, pixelate, blur, rotate/flip/flop/crop/stretch,
   caption/toptext/bottomtext, motivational posters, quote images, format conversion, and more
@@ -44,6 +44,8 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
 - **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted.
   The artwork is drawn in code, so there are no template images to ship
+- **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
+  resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,
