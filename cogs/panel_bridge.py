@@ -1623,34 +1623,62 @@ class PanelBridge(commands.Cog):
         raise BridgeError(400, "Unknown action.")
 
     async def h_schedules_action(self, request: web.Request) -> web.Response:
-        """Add or remove one of a server's scheduled messages, as one of its admins."""
+        """Add or remove one of a server's scheduled actions, as one of its admins."""
         guild = self._guild(request)
         body = await self._json(request)
         admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
         action = str(body.get("action", ""))
         if action == "add":
-            channel_raw = str(body.get("channel_id", ""))
-            channel = guild.get_channel(int(channel_raw)) if channel_raw.isdigit() else None
-            if channel is None or not hasattr(channel, "send"):
-                raise BridgeError(400, "Choose a channel to post in.")
-            permissions = channel.permissions_for(guild.me) if guild.me else None
-            if permissions is None or not (permissions.view_channel and permissions.send_messages):
-                raise BridgeError(409, f"The bot can't send messages in #{channel.name}.")
+            kind = str(body.get("kind") or "message")
+            spec = schedule_store.ACTIONS.get(kind)
+            if spec is None:
+                raise BridgeError(400, "Unknown action.")
+            options = body.get("options") if isinstance(body.get("options"), dict) else {}
+            content = str(body.get("content", ""))
+            channel = None
+            if spec["channel"]:
+                channel_raw = str(body.get("channel_id", ""))
+                channel = guild.get_channel(int(channel_raw)) if channel_raw.isdigit() else None
+                if channel is None or not hasattr(channel, "send"):
+                    raise BridgeError(400, "Choose a channel.")
+                permissions = channel.permissions_for(guild.me) if guild.me else discord.Permissions.none()
+                needed = {"message": (), "lock": ("manage_roles",), "unlock": ("manage_roles",), "slowmode": ("manage_channels",),
+                          "purge": ("manage_messages", "read_message_history")}[kind]
+                if kind == "message" or content.strip():
+                    needed += ("send_messages",)
+                missing = [name.replace("_", " ") for name in ("view_channel", *needed) if not getattr(permissions, name)]
+                if missing:
+                    raise BridgeError(409, f"The bot is missing permissions in #{channel.name}: {', '.join(missing)}.")
+            else:
+                try:
+                    cleaned = schedule_store.clean_options(kind, options)
+                except schedule_store.ScheduleError as exc:
+                    raise BridgeError(400, str(exc)) from exc
+                role = guild.get_role(cleaned["role_id"])
+                if role is None:
+                    raise BridgeError(400, "Choose a role.")
+                problem = self._rr_role_problem(guild, role, admin)
+                if problem:
+                    raise BridgeError(409, problem)
+                if guild.get_member(cleaned["user_id"]) is None:
+                    raise BridgeError(404, "That user ID isn't a member of this server.")
             run_at = schedule_store.parse_utc(str(body.get("run_at", "")))
             interval = str(body.get("interval_minutes", "0"))
             if run_at is None or not interval.isdigit():
                 raise BridgeError(400, "Choose when to post it.")
             try:
-                entry = schedule_store.add(self.storage, guild.id, channel.id, str(body.get("content", "")), run_at, int(interval), admin.id)
+                entry = schedule_store.add(self.storage, guild.id, channel.id if channel else 0, content, run_at, int(interval), admin.id,
+                                           action=kind, options=options)
             except schedule_store.ScheduleError as exc:
                 raise BridgeError(400, str(exc)) from exc
-            return web.json_response({"ok": True, "detail": f"Scheduled a message in #{channel.name}", "id": entry["id"]})
+            where = f" in #{channel.name}" if channel else ""
+            return web.json_response({"ok": True, "detail": f"Scheduled: {spec['label'].lower()}{where}", "id": entry["id"]})
         if action == "remove":
             raw = str(body.get("id", ""))
             removed = schedule_store.remove(self.storage, guild.id, int(raw)) if raw.isdigit() else None
             if removed is None:
-                raise BridgeError(404, "That scheduled message no longer exists.")
-            return web.json_response({"ok": True, "detail": "Cancelled the scheduled message", "before": removed})
+                raise BridgeError(404, "That scheduled action no longer exists.")
+            return web.json_response({"ok": True, "detail": "Cancelled the scheduled action", "before": removed})
         raise BridgeError(400, "Unknown action.")
 
     def _postable_channel(self, guild: discord.Guild, raw: str) -> Any:
