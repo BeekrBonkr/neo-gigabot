@@ -177,6 +177,30 @@ class PollView(discord.ui.View):
                 pass
 
 
+MAX_SLOWMODE_SECONDS = 21600  # Discord's limit: six hours
+
+
+def parse_slowmode(value: str) -> int | None:
+    """Seconds for a slowmode option: "off"/"0" is 0, a bare number is seconds,
+    otherwise a duration like 10s or 2m. None if it isn't one or is over 6 hours."""
+    text = (value or "").strip().lower()
+    if text in ("off", "none", "0"):
+        return 0
+    if text.isdigit():
+        seconds = int(text)
+    else:
+        delta = parse_duration(text)
+        if delta is None:
+            return None
+        seconds = int(delta.total_seconds())
+    return seconds if 0 <= seconds <= MAX_SLOWMODE_SECONDS else None
+
+
+def format_seconds(seconds: int) -> str:
+    parts = [(seconds // 3600, "h"), (seconds % 3600 // 60, "m"), (seconds % 60, "s")]
+    return " ".join(f"{amount}{unit}" for amount, unit in parts if amount) or "0s"
+
+
 class Moderation(commands.Cog):
     """Moderation commands: member actions, channel/message cleanup, and mass
     role management."""
@@ -572,6 +596,98 @@ class Moderation(commands.Cog):
             interaction.guild, event="ban", title="🔓 Member Unbanned", color=self.bot.embeds.success_color,
             target=user, moderator=interaction.user, reason=reason,
         )
+
+    @app_commands.command(name="softban", description="Kick a member and delete their recent messages (a ban that is lifted right away).")
+    @app_commands.describe(
+        user="Member to softban",
+        reason="Reason (shown to the member and in the audit log)",
+        delete_message_days="Delete this many days of their recent messages (1-7, default 1)",
+    )
+    @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.checks.bot_has_permissions(ban_members=True)
+    @app_commands.guild_only()
+    async def softban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str | None = None,
+        delete_message_days: app_commands.Range[int, 1, 7] = 1,
+    ) -> None:
+        if user.id == interaction.user.id:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't softban yourself.", ephemeral=True)
+            return
+        if user.top_role >= interaction.guild.me.top_role:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) mine.", ephemeral=True
+            )
+            return
+        if not self._invoker_outranks(interaction, user):
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) yours.", ephemeral=True
+            )
+            return
+
+        await self._try_dm(
+            user,
+            self.bot.embeds.warning_embed(
+                "You Were Kicked",
+                f"You were removed from **{interaction.guild.name}** and your recent messages were deleted. You can rejoin with an invite.\n"
+                f"Reason: {reason or 'No reason provided.'}",
+            ),
+            guild_id=interaction.guild.id,
+        )
+        audit_reason = f"Softban by {interaction.user} ({interaction.user.id}): {reason or 'No reason provided.'}"
+        try:
+            await user.ban(reason=audit_reason, delete_message_seconds=delete_message_days * 86400)
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Softban Failed", "I don't have permission to ban that member.", ephemeral=True)
+            return
+        try:
+            await interaction.guild.unban(user, reason=audit_reason)
+        except discord.HTTPException:
+            # The ban landed but lifting it didn't: say so, or the member stays banned without anyone knowing.
+            await self.bot.embeds.warning_interaction(
+                interaction, "Softban Incomplete", f"{user.mention} was banned, but I couldn't lift the ban. Use `/unban {user.id}` to finish."
+            )
+            return
+
+        await self.bot.embeds.success_interaction(
+            interaction, "Member Softbanned",
+            f"{user.mention} was removed and {delete_message_days} day(s) of their messages deleted. They can rejoin.\nReason: {reason or 'No reason provided.'}",
+        )
+        await self._log_mod_action(
+            interaction.guild, event="kick", title="🧹 Member Softbanned", color=self.bot.embeds.warning_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+
+    @app_commands.command(name="slowmode", description="Set how often members can send a message in a channel.")
+    @app_commands.describe(
+        delay="Time between messages, like 10s, 2m or 1h. Use 0 or off to turn slowmode off",
+        channel="Channel to change (defaults to the current channel)",
+    )
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def slowmode(self, interaction: discord.Interaction, delay: str, channel: discord.TextChannel | None = None) -> None:
+        target = channel or interaction.channel
+        if not hasattr(target, "slowmode_delay"):
+            await self.bot.embeds.error_interaction(interaction, "Not Supported", "Slowmode can't be set on this kind of channel.", ephemeral=True)
+            return
+        seconds = parse_slowmode(delay)
+        if seconds is None:
+            await self.bot.embeds.error_interaction(
+                interaction, "Invalid Delay", "Give a time like `10s`, `2m` or `1h` (up to 6 hours), or `off`.", ephemeral=True
+            )
+            return
+        try:
+            await target.edit(slowmode_delay=seconds, reason=f"Slowmode set by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Slowmode Failed", "I don't have permission to edit that channel.", ephemeral=True)
+            return
+        if seconds:
+            await self.bot.embeds.success_interaction(interaction, "Slowmode Set", f"Members can send one message every **{format_seconds(seconds)}** in {target.mention}.")
+        else:
+            await self.bot.embeds.success_interaction(interaction, "Slowmode Off", f"Slowmode is off in {target.mention}.")
 
     @app_commands.command(name="mute", description="Temporarily prevent a member from sending messages or speaking.")
     @app_commands.describe(user="Member to mute", duration="e.g. 10m, 2h, 1d (max 28 days)", reason="Optional reason")
