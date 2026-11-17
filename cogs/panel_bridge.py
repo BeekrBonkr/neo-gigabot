@@ -53,6 +53,8 @@ from utils.website import site_link
 from utils.settings import (
     get_mod_log_channel_id,
     SETTING_CHOICES,
+    SETTING_COLORS,
+    SETTING_URLS,
     SETTING_DURATIONS,
     SETTING_ID_LISTS,
     SETTING_IDS,
@@ -170,10 +172,15 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value, str) or parse_duration(value) is None:
                 raise SettingsValidationError(f"{key} must be a duration like 1h or 1d12h.")
             cleaned[key] = value.strip()
-        elif key == "embed_color":
+        elif key == "embed_color" or key in SETTING_COLORS:
             text = str(value or "").strip()
             if text and parse_hex_color(text) is None:
-                raise SettingsValidationError("embed_color must be a hex color like #5865F2, or empty.")
+                raise SettingsValidationError(f"{key} must be a hex color like #5865F2, or empty.")
+            cleaned[key] = text
+        elif key in SETTING_URLS:
+            text = str(value or "").strip()
+            if text and not (text.startswith("https://") and len(text) <= 500 and " " not in text):
+                raise SettingsValidationError(f"{key} must be an https:// link, or empty.")
             cleaned[key] = text
         elif isinstance(default_value, bool):
             if not isinstance(value, bool):

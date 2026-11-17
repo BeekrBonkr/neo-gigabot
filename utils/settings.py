@@ -79,6 +79,13 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "logging_keep_days": 30,
     # Where /suggest posts. Empty turns suggestions off.
     "suggestions_channel_id": "",
+    # Richer welcomes: how the join greeting is posted, and an optional DM.
+    "welcome_style": "text",
+    "welcome_embed_title": "Welcome to {server}!",
+    "welcome_embed_color": "",
+    "welcome_embed_image_url": "",
+    "welcome_embed_footer": "",
+    "welcome_dm_message": "",
 }
 
 # How the newer settings are validated when they arrive from the web panel
@@ -91,7 +98,11 @@ SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "automod_mentions_action": AUTOMOD_ACTIONS,
     "automod_spam_action": AUTOMOD_ACTIONS,
     "honeypot_action": ("ban", "softban", "kick"),
+    "welcome_style": ("text", "embed", "image"),
 }
+# Hex colors ("" for none) and https links ("" for none).
+SETTING_COLORS: set[str] = {"welcome_embed_color"}
+SETTING_URLS: set[str] = {"welcome_embed_image_url"}
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
 SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
 SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id"}
