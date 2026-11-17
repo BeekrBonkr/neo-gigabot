@@ -72,17 +72,22 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
         reward: app_commands.Range[str, 1, 20] = "$5,000", user: discord.User | None = None,
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
-        shown_name = name or (user.display_name if user else "")
+        texts: dict[str, object] = {}
+
+        async def prepare() -> None:
+            texts["name"] = await self.bot.image_tools.prepare_text(name or (user.display_name if user else ""), interaction.guild)
+            texts["reward"] = await self.bot.image_tools.prepare_text(reward, interaction.guild)
 
         def work(image_bytes: bytes, filename: str) -> tuple[bytes, str]:
             picture = load_frames(image_bytes, filename, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0]
-            return encode_frames([mm.wanted(picture, shown_name, reward)], [100], "wanted")
+            return encode_frames([mm.wanted(picture, texts["name"], texts["reward"])], [100], "wanted")
 
         async def avatar() -> tuple[bytes, str]:
             return await user.display_avatar.replace(size=512, static_format="png").read(), "avatar.png"
 
         await self.bot.image_tools.run_image_command(
-            interaction, "wanted", "Wanted", work, attachment=attachment, message_link=message_link, source=avatar if user else None
+            interaction, "wanted", "Wanted", work, attachment=attachment, message_link=message_link,
+            source=avatar if user else None, before=prepare,
         )
 
     @app_commands.command(name="drake", description="The two-panel format: one thing turned down, another preferred.")
@@ -100,24 +105,35 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
             await self.bot.image_tools.send_error(interaction, "Missing A Panel", "Give text or an image for both the top and the bottom panel.")
             return
         given = [image for image in (reject_image, approve_image) if image is not None]
+        texts: dict[str, object] = {}
+
+        async def prepare() -> None:
+            texts["reject"] = await self.bot.image_tools.prepare_text(reject or "", interaction.guild)
+            texts["approve"] = await self.bot.image_tools.prepare_text(approve or "", interaction.guild)
 
         def work(_bytes: bytes, _name: str, *pictures: bytes) -> tuple[bytes, str]:
             loaded = [load_frames(data, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0] for data in pictures]
             top = loaded.pop(0) if reject_image is not None else None
             bottom = loaded.pop(0) if approve_image is not None else None
-            return encode_frames([mm.drake(reject or "", approve or "", top, bottom)], [100], "drake")
+            return encode_frames([mm.drake(texts["reject"], texts["approve"], top, bottom)], [100], "drake")
 
         await self.bot.image_tools.run_image_command(
-            interaction, "drake", "Drake", work, source=_no_image, extra_sources=[(image, None) for image in given]
+            interaction, "drake", "Drake", work, source=_no_image, extra_sources=[(image, None) for image in given], before=prepare,
         )
 
     @app_commands.command(name="changemymind", description="Your statement on the sign of the change-my-mind table.")
     @app_commands.describe(text="The statement on the sign.")
     @app_commands.checks.cooldown(1, 3.0)
     async def changemymind(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 140]) -> None:
+        texts: dict[str, object] = {}
+
+        async def prepare() -> None:
+            texts["statement"] = await self.bot.image_tools.prepare_text(text, interaction.guild)
+
         await self.bot.image_tools.run_image_command(
             interaction, "changemymind", "Change My Mind",
-            lambda _bytes, _name: encode_frames([mm.change_my_mind(text)], [100], "changemymind"), source=_no_image,
+            lambda _bytes, _name: encode_frames([mm.change_my_mind(texts["statement"])], [100], "changemymind"),
+            source=_no_image, before=prepare,
         )
 
 

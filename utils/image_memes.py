@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from utils.image_filters import sepia
-from utils.imaging import fit_text, load_font
+from utils import richtext
 
 INK = (30, 24, 20, 255)
 
@@ -23,12 +23,10 @@ def _contain(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     return image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))), Image.LANCZOS)
 
 
-def _centered_text(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str, font_name: str, *, fill, max_size: int = 200,
-                   stroke_width: int = 0, stroke_fill=None, spacing: int = 6) -> None:
-    left, top, right, bottom = box
-    font, wrapped = fit_text(text, font_name, right - left, bottom - top, max_size=max_size, spacing=spacing)
-    draw.multiline_text(((left + right) // 2, (top + bottom) // 2), wrapped, font=font, fill=fill, anchor="mm", align="center",
-                        spacing=spacing, stroke_width=stroke_width, stroke_fill=stroke_fill)
+def _centered_text(image: Image.Image, box: tuple[int, int, int, int], text: "richtext.RichText | str", font_name: str, *, fill,
+                   max_size: int = 200, stroke_width: int = 0, stroke_fill=(0, 0, 0, 255), spacing: int = 6) -> None:
+    """Fit text to a box on the image and draw it centered there."""
+    richtext.draw_in_box(image, box, text, font_name, fill=fill, max_size=max_size, stroke=stroke_width, stroke_fill=stroke_fill, gap=spacing)
 
 
 # ---------- speech bubble ----------
@@ -90,7 +88,7 @@ def wasted(frame: Image.Image) -> Image.Image:
     overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     draw.rectangle((0, top, width, top + band_height), fill=(0, 0, 0, 150))
-    _centered_text(draw, (int(width * 0.08), top + band_height // 8, int(width * 0.92), top + band_height - band_height // 8), "WASTED",
+    _centered_text(overlay, (int(width * 0.08), top + band_height // 8, int(width * 0.92), top + band_height - band_height // 8), "WASTED",
                    "impact.ttf", fill=(200, 32, 44, 255), max_size=400, stroke_width=max(1, band_height // 28), stroke_fill=(20, 0, 0, 255))
     result.alpha_composite(overlay)
     return result
@@ -114,25 +112,26 @@ def _parchment(size: tuple[int, int]) -> Image.Image:
     return Image.fromarray(np.clip(paper, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
 
 
-def wanted(picture: Image.Image, name: str = "", reward: str = "$5,000") -> Image.Image:
+def wanted(picture: Image.Image, name: "richtext.RichText | str" = "", reward: "richtext.RichText | str" = "$5,000") -> Image.Image:
     """An old-west wanted poster around the picture."""
+    name, reward = richtext.as_rich(name).strip(), richtext.as_rich(reward).strip()
     width, height = WANTED_SIZE
     poster = _parchment(WANTED_SIZE)
     draw = ImageDraw.Draw(poster)
     draw.rectangle((18, 18, width - 19, height - 19), outline=INK, width=4)
     draw.rectangle((28, 28, width - 29, height - 29), outline=INK, width=1)
-    _centered_text(draw, (50, 40, width - 50, 170), "WANTED", "impact.ttf", fill=INK, max_size=170)
-    _centered_text(draw, (60, 172, width - 60, 214), "DEAD OR ALIVE", "impact.ttf", fill=INK, max_size=44)
+    _centered_text(poster, (50, 40, width - 50, 170), "WANTED", "impact.ttf", fill=INK, max_size=170)
+    _centered_text(poster, (60, 172, width - 60, 214), "DEAD OR ALIVE", "impact.ttf", fill=INK, max_size=44)
     photo_box = (110, 232, width - 110, 612)
     photo = sepia(_cover(picture, (photo_box[2] - photo_box[0], photo_box[3] - photo_box[1])))
     photo = ImageEnhance.Contrast(photo.convert("RGB")).enhance(1.15).convert("RGBA")
     poster.paste(photo, photo_box[:2])
     draw.rectangle((photo_box[0] - 5, photo_box[1] - 5, photo_box[2] + 4, photo_box[3] + 4), outline=INK, width=5)
     text_top = 628
-    if name.strip():
-        _centered_text(draw, (50, text_top, width - 50, text_top + 70), name.strip().upper(), "impact.ttf", fill=INK, max_size=64)
+    if name:
+        _centered_text(poster, (50, text_top, width - 50, text_top + 70), name.upper(), "impact.ttf", fill=INK, max_size=64)
         text_top += 76
-    _centered_text(draw, (50, text_top, width - 50, height - 44), f"REWARD {reward.strip()}".upper(), "impact.ttf", fill=(120, 24, 20, 255), max_size=78)
+    _centered_text(poster, (50, text_top, width - 50, height - 44), ("REWARD " + reward).upper(), "impact.ttf", fill=(120, 24, 20, 255), max_size=78)
     return poster
 
 
@@ -187,16 +186,16 @@ def _figure_panel(approve: bool) -> Image.Image:
     return panel.resize((DRAKE_PANEL, DRAKE_PANEL), Image.LANCZOS)
 
 
-def _content_panel(text: str, picture: Image.Image | None) -> Image.Image:
+def _content_panel(text: "richtext.RichText | str", picture: Image.Image | None) -> Image.Image:
     panel = Image.new("RGBA", (DRAKE_PANEL, DRAKE_PANEL), (255, 255, 255, 255))
     if picture is not None:
         panel.alpha_composite(_cover(picture, (DRAKE_PANEL, DRAKE_PANEL)))
-    elif text.strip():
-        _centered_text(ImageDraw.Draw(panel), (24, 24, DRAKE_PANEL - 24, DRAKE_PANEL - 24), text.strip(), "arial.ttf", fill=(20, 20, 20, 255), max_size=64)
+    elif richtext.as_rich(text):
+        _centered_text(panel, (24, 24, DRAKE_PANEL - 24, DRAKE_PANEL - 24), richtext.as_rich(text).strip(), "arial.ttf", fill=(20, 20, 20, 255), max_size=64)
     return panel
 
 
-def drake(reject_text: str = "", approve_text: str = "", reject_picture: Image.Image | None = None,
+def drake(reject_text: "richtext.RichText | str" = "", approve_text: "richtext.RichText | str" = "", reject_picture: Image.Image | None = None,
           approve_picture: Image.Image | None = None) -> Image.Image:
     """Two rows: the thing turned down, then the thing preferred. Each right-hand
     panel shows its picture if one was given, otherwise its text."""
@@ -216,7 +215,7 @@ def drake(reject_text: str = "", approve_text: str = "", reject_picture: Image.I
 CMM_SIZE = (800, 560)
 
 
-def change_my_mind(text: str) -> Image.Image:
+def change_my_mind(text: "richtext.RichText | str") -> Image.Image:
     """Someone at a table outdoors, with the statement on a sign and
     CHANGE MY MIND under it."""
     width, height = CMM_SIZE
@@ -249,6 +248,7 @@ def change_my_mind(text: str) -> Image.Image:
     sign = (300, 384, width - 62, height - 44)
     draw.rectangle(sign, fill=(255, 255, 255, 255), outline=INK, width=3)
     split = sign[3] - 46
-    _centered_text(draw, (sign[0] + 14, sign[1] + 8, sign[2] - 14, split - 4), text.strip(), "arial.ttf", fill=(20, 20, 20, 255), max_size=60)
-    _centered_text(draw, (sign[0] + 14, split, sign[2] - 14, sign[3] - 6), "CHANGE MY MIND", "impact.ttf", fill=(20, 20, 20, 255), max_size=40)
-    return scene.filter(ImageFilter.SMOOTH)
+    scene = scene.filter(ImageFilter.SMOOTH)  # soften the drawn shapes before the lettering goes on
+    _centered_text(scene, (sign[0] + 14, sign[1] + 8, sign[2] - 14, split - 4), richtext.as_rich(text).strip(), "arial.ttf", fill=(20, 20, 20, 255), max_size=60)
+    _centered_text(scene, (sign[0] + 14, split, sign[2] - 14, sign[3] - 6), "CHANGE MY MIND", "impact.ttf", fill=(20, 20, 20, 255), max_size=40)
+    return scene

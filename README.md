@@ -46,6 +46,10 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   The artwork is drawn in code, so there are no template images to ship
 - **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
   resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)
+- **Text that survives real input**: every command that writes on an image draws emoji in color (flags,
+  skin tones and joined emoji included), custom server emoji, accents, Cyrillic, Greek, Arabic, Hebrew,
+  Chinese, Japanese, Korean, Thai and Hindi, turns fancy Unicode letters into the command's own font, and
+  shows mentions as names. Fallback fonts live in `assets/fonts/`
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,

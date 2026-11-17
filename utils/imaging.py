@@ -6,6 +6,7 @@ import io
 import itertools
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,9 +17,10 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageSequence
+from PIL import Image, ImageEnhance, ImageFont, ImageSequence
 
 from utils.discord_links import fetch_message_from_link
+from utils.richtext import PLACEHOLDER_BASE, RichText
 
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 SOURCE_TTL_SECONDS = 60 * 15
@@ -45,6 +47,10 @@ CPU_BOUND_TIMEOUT_SECONDS = 60.0
 DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024
 # GIFs do not go faster than this in most viewers; shorter frames get slowed down instead.
 MIN_GIF_FRAME_MS = 20
+# How Discord writes custom emoji and mentions inside a message or a command option.
+CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w{1,32}):(\d{15,22})>")
+MENTION_PATTERN = re.compile(r"<(@!?|@&|#)(\d{15,22})>")
+MAX_CUSTOM_EMOJI = 20  # distinct ones fetched for one piece of text
 
 # The commands slow/heavy enough (DNN face detection, seam-carving DP, per-pixel
 # swirl warping, ...) that someone firing off a bunch back-to-back is actually
@@ -78,41 +84,6 @@ def load_font(name: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageF
         return ImageFont.truetype(str(FONTS_DIR / name), size)
     except OSError:
         return ImageFont.load_default(size)
-
-
-def fit_text(text: str, font_name: str, max_width: int, max_height: int, *, max_size: int = 200, min_size: int = 10,
-             spacing: int = 4) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, str]:
-    """The largest font size at which `text`, wrapped on spaces, fits the box.
-    Returns the font and the text with line breaks put in."""
-    probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-
-    def wrap(font) -> str:
-        lines: list[str] = []
-        for paragraph in text.split("\n"):
-            line = ""
-            for word in paragraph.split():
-                candidate = f"{line} {word}".strip()
-                if line and probe.textlength(candidate, font=font) > max_width:
-                    lines.append(line)
-                    line = word
-                else:
-                    line = candidate
-            lines.append(line)
-        return "\n".join(lines)
-
-    low, high = min_size, max_size
-    best = (load_font(font_name, min_size), wrap(load_font(font_name, min_size)))
-    while low <= high:  # binary search over the size
-        size = (low + high) // 2
-        font = load_font(font_name, size)
-        wrapped = wrap(font)
-        left, top, right, bottom = probe.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing)
-        if right - left <= max_width and bottom - top <= max_height:
-            best = (font, wrapped)
-            low = size + 1
-        else:
-            high = size - 1
-    return best
 
 
 @dataclass(slots=True)
@@ -266,18 +237,23 @@ class ImageToolkit:
         message_link: str | None = None,
         extra_sources: list[tuple[discord.Attachment | None, str | None]] | None = None,
         source: Callable[[], Awaitable[tuple[bytes, str]]] | None = None,
+        before: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """The whole life of a simple image command: the blocked-command check,
         finding the source image, running `work(image_bytes, filename, *extras)`
         off the event loop, and sending the file or a readable error. `work`
         returns (data, filename) or (data, filename, description). Each entry of
         `extra_sources` is another image to fetch and pass along as bytes, and
-        `source` replaces the usual search for the main image (an avatar, say)."""
+        `source` replaces the usual search for the main image (an avatar, say).
+        `before` runs once the command has been acknowledged and before the
+        work: the place for slow preparation such as `prepare_text`."""
         if not await self.ensure_command_allowed(interaction, command_name):
             return
         await self.note_heavy_command(interaction, command_name)
         await self.defer(interaction)
         try:
+            if before is not None:
+                await before()
             image_bytes, filename = await (source() if source else self.get_source_image(interaction, attachment, message_link))
             extras = [(await self.get_source_image(interaction, extra, link))[0] for extra, link in extra_sources or []]
             result = await self.run_cpu_bound(lambda: work(image_bytes, filename, *extras))
@@ -361,6 +337,43 @@ class ImageToolkit:
             await interaction.followup.send(embed=self.bot.embeds.success_embed(title, description), ephemeral=True)
         else:
             await self.bot.embeds.success_interaction(interaction, title, description, ephemeral=True)
+
+    # ---------- text ----------
+
+    async def prepare_text(self, text: str, guild: discord.Guild | None = None) -> RichText:
+        """Get text typed in Discord ready to draw: mentions become names
+        (@Name, #channel), and custom emoji become pictures the text renderer
+        puts inline. A custom emoji that can't be fetched is written as :name:."""
+
+        def mention(match: re.Match) -> str:
+            kind, target = match.group(1), int(match.group(2))
+            if guild is None:
+                return match.group(0)
+            if kind == "#":
+                channel = guild.get_channel_or_thread(target)
+                return f"#{channel.name}" if channel else "#unknown"
+            if kind == "@&":
+                role = guild.get_role(target)
+                return f"@{role.name}" if role else "@unknown"
+            member = guild.get_member(target)
+            return f"@{member.display_name}" if member else "@unknown"
+
+        text = MENTION_PATTERN.sub(mention, text)
+        images: dict[str, Image.Image] = {}
+        placeholders: dict[str, str] = {}  # emoji id -> the character standing in for it
+        for name, emoji_id in CUSTOM_EMOJI_PATTERN.findall(text):
+            if emoji_id in placeholders or len(images) >= MAX_CUSTOM_EMOJI:
+                continue
+            try:
+                data = await self.fetch_bytes_from_url(f"https://cdn.discordapp.com/emojis/{emoji_id}.png?size=96")
+                with Image.open(io.BytesIO(data)) as picture:
+                    key = chr(PLACEHOLDER_BASE + len(images))
+                    images[key] = picture.convert("RGBA")
+                    placeholders[emoji_id] = key
+            except Exception:  # deleted emoji, network trouble, not an image: fall back to its name
+                continue
+        text = CUSTOM_EMOJI_PATTERN.sub(lambda match: placeholders.get(match.group(2), f":{match.group(1)}:"), text)
+        return RichText(text, images)
 
     # ---------- source selection helpers ----------
 

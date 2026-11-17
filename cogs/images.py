@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import io
 import math
 import random
@@ -13,8 +12,9 @@ import discord
 import numpy as np
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageSequence
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequence
 
+from utils import richtext
 from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS
 
 LINE_SPACING = 6
@@ -452,183 +452,14 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
     # the system-font paths below are only a last-resort fallback if those ever go
     # missing, and cover both common Linux font layouts (Debian/Ubuntu vs Fedora/RHEL).
 
-    MEME_FONT_FILENAMES: tuple[str, ...] = ("impact.ttf", "Impact.ttf")
-    MEME_FONT_SYSTEM_FALLBACKS: tuple[str, ...] = (
-        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    )
-    QUOTE_FONT_FILENAMES: tuple[str, ...] = ("arial.ttf", "Arial.ttf")
-    QUOTE_FONT_SYSTEM_FALLBACKS: tuple[str, ...] = (
-        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    )
-
-    @staticmethod
-    @functools.lru_cache(maxsize=64)
-    def _load_truetype_font(path: str, size: int) -> ImageFont.FreeTypeFont:
-        # Arial.ttf alone is ~4MB; without this cache, the meme-text auto-shrink loop
-        # (which re-requests a font at several sizes per call) would reparse it from
-        # disk every single time.
-        return ImageFont.truetype(path, size=size)
-
-    def _resolve_font_path(self, filenames: tuple[str, ...], system_fallbacks: tuple[str, ...]) -> str | None:
-        fonts_dir = self.bot.project_root / "assets" / "fonts"
-        for name in filenames:
-            candidate = fonts_dir / name
-            if candidate.exists():
-                return str(candidate)
-        for path in system_fallbacks:
-            if Path(path).exists():
-                return path
-        return None
-
-    def _load_font_or_default(self, path: str | None, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        if path is not None:
-            try:
-                return self._load_truetype_font(path, size)
-            except OSError:
-                pass
-        return ImageFont.load_default()
-
-    def _get_meme_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        path = self._resolve_font_path(self.MEME_FONT_FILENAMES, self.MEME_FONT_SYSTEM_FALLBACKS)
-        return self._load_font_or_default(path, size)
-
-    def _get_quote_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        path = self._resolve_font_path(self.QUOTE_FONT_FILENAMES, self.QUOTE_FONT_SYSTEM_FALLBACKS)
-        return self._load_font_or_default(path, size)
-
-    def _text_width(
-        self,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    ) -> int:
-        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=3)
-        return bbox[2] - bbox[0]
-
-    def _split_long_token(
-        self,
-        draw: ImageDraw.ImageDraw,
-        token: str,
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-        max_width: int,
-    ) -> list[str]:
-        """Hard-break a single token too wide to fit on its own line (e.g. a long
-        URL or a no-spaces wall of text), character by character, so it can't
-        render off the edge of the image."""
-        pieces: list[str] = []
-        current = ""
-        for char in token:
-            candidate = current + char
-            if current and self._text_width(draw, candidate, font) > max_width:
-                pieces.append(current)
-                current = char
-            else:
-                current = candidate
-        if current:
-            pieces.append(current)
-        return pieces
-
-    def _wrap_text(
-        self,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-        max_width: int,
-    ) -> list[str]:
-        lines: list[str] = []
-        for paragraph in text.splitlines() or [text]:
-            words = paragraph.split()
-            if not words:
-                lines.append("")
-                continue
-
-            current = ""
-            for word in words:
-                if self._text_width(draw, word, font) > max_width:
-                    if current:
-                        lines.append(current)
-                        current = ""
-                    lines.extend(self._split_long_token(draw, word, font, max_width))
-                    continue
-
-                candidate = f"{current} {word}".strip()
-                if not current or self._text_width(draw, candidate, font) <= max_width:
-                    current = candidate
-                else:
-                    lines.append(current)
-                    current = word
-
-            if current:
-                lines.append(current)
-        return lines
-
-    def _measure_lines(
-        self,
-        draw: ImageDraw.ImageDraw,
-        lines: list[str],
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    ) -> tuple[int, int]:
-        if not lines:
-            return 0, 0
-        widths = []
-        total_height = 0
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line or " ", font=font, stroke_width=3)
-            widths.append(bbox[2] - bbox[0])
-            total_height += (bbox[3] - bbox[1]) + LINE_SPACING
-        return max(widths), max(0, total_height - LINE_SPACING)
-
-    def _fit_text_to_box(
-        self,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font_loader: Callable[[int], ImageFont.FreeTypeFont | ImageFont.ImageFont],
-        *,
-        max_width: int,
-        max_height: int,
-        min_size: int,
-        max_size: int,
-    ) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, list[str]]:
-        """Binary-search the largest font size in [min_size, max_size] at which the
-        word-wrapped text fits within max_width x max_height, so text is always as
-        large as it can be without touching the edges - instead of shrinking down
-        from (or being stuck at) a fixed default size.
-
-        Always returns *some* font+lines, even if the text can't fit at min_size
-        (e.g. absurdly long input in a tiny box) - callers never need to handle a
-        "nothing fit" case.
-        """
-        max_width = max(1, max_width)
-        max_height = max(1, max_height)
-        min_size = max(1, min_size)
-        max_size = max(min_size, max_size)
-
-        def try_size(size: int) -> tuple[bool, ImageFont.FreeTypeFont | ImageFont.ImageFont, list[str]]:
-            font = font_loader(size)
-            wrapped = self._wrap_text(draw, text, font, max_width)
-            width, height = self._measure_lines(draw, wrapped, font)
-            return (width <= max_width and height <= max_height), font, wrapped
-
-        _, best_font, best_wrapped = try_size(min_size)
-
-        low, high = min_size, max_size
-        while low <= high:
-            mid = (low + high) // 2
-            fits, font, wrapped = try_size(mid)
-            if fits:
-                best_font, best_wrapped = font, wrapped
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        return best_font, best_wrapped
+    MEME_FONT = "impact.ttf"
+    QUOTE_FONT = "arial.ttf"
+    MEME_STROKE_PX = 3
 
     def _draw_meme_text(
         self,
         image: Image.Image,
-        text: str,
+        text: richtext.RichText | str,
         *,
         position: str,
         max_size: int | None = None,
@@ -636,9 +467,8 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         # Classic Impact meme text is conventionally all-caps regardless of how the
         # user typed it - every major meme generator (imgflip, Kapwing, etc.) does
         # this automatically.
-        text = text.upper()
+        text = richtext.as_rich(text).upper()
         working = image.convert("RGBA")
-        draw = ImageDraw.Draw(working)
 
         margin_x = max(MEME_TEXT_MIN_MARGIN_PX, int(working.width * MEME_TEXT_MARGIN_RATIO))
         margin_y = max(MEME_TEXT_MIN_MARGIN_PX, int(working.height * MEME_TEXT_MARGIN_RATIO))
@@ -646,38 +476,17 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         max_block_height = max(1, int(working.height * MEME_TEXT_MAX_BLOCK_HEIGHT_RATIO))
         size_ceiling = min(max_size, MEME_TEXT_MAX_SIZE) if max_size else MEME_TEXT_MAX_SIZE
 
-        font, wrapped = self._fit_text_to_box(
-            draw,
-            text,
-            self._get_meme_font,
-            max_width=max_width,
-            max_height=max_block_height,
-            min_size=MEME_TEXT_MIN_SIZE,
-            max_size=size_ceiling,
+        arranged = richtext.fit(
+            text, self.MEME_FONT, max_width, max_block_height,
+            min_size=MEME_TEXT_MIN_SIZE, max_size=size_ceiling, stroke=self.MEME_STROKE_PX, gap=LINE_SPACING,
         )
-        _, text_height = self._measure_lines(draw, wrapped, font)
-
         if position == "top":
             y = margin_y
         elif position == "bottom":
-            y = working.height - margin_y - text_height
+            y = working.height - margin_y - arranged.height
         else:
-            y = (working.height - text_height) // 2
-
-        for line in wrapped:
-            bbox = draw.textbbox((0, 0), line, font=font, stroke_width=3)
-            line_width = bbox[2] - bbox[0]
-            line_height = bbox[3] - bbox[1]
-            line_x = (working.width - line_width) // 2
-            draw.text(
-                (line_x, y),
-                line,
-                font=font,
-                fill=(255, 255, 255, 255),
-                stroke_width=3,
-                stroke_fill=(0, 0, 0, 255),
-            )
-            y += line_height + LINE_SPACING
+            y = (working.height - arranged.height) // 2
+        arranged.draw(working, margin_x, y, max_width, fill=(255, 255, 255, 255), stroke_fill=(0, 0, 0, 255))
         return working
 
     # ---------- generic image processing helpers ----------
@@ -813,12 +622,20 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         return path
 
     async def _build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
-        content = (message.content or "").strip()
-        if not content:
+        raw = (message.content or "").strip()
+        if not raw:
             raise ValueError("That message does not have any text to quote.")
 
-        if len(content) > QUOTE_MAX_INPUT_LENGTH:
-            content = content[:QUOTE_MAX_INPUT_LENGTH].rstrip() + "..."
+        # Mentions become names and custom emoji become pictures; then the
+        # markdown markers (**, __, ~~, backticks) are dropped, as they would
+        # only show up as stray symbols.
+        content = await self.bot.image_tools.prepare_text(raw, message.guild)
+        content = richtext.RichText(discord.utils.remove_markdown(content.text).strip(), content.images)
+        if not content:
+            raise ValueError("That message does not have any text to quote.")
+        pieces = richtext.clusters(content.text)
+        if len(pieces) > QUOTE_MAX_INPUT_LENGTH:
+            content = richtext.RichText("".join(pieces[:QUOTE_MAX_INPUT_LENGTH]).rstrip() + "...", content.images)
 
         avatar = message.author.display_avatar.replace(size=512)
         avatar_bytes = await avatar.read()
@@ -842,50 +659,30 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 110))
         img = Image.alpha_composite(img, overlay)
 
-        draw = ImageDraw.Draw(img)
-        font = self._get_quote_font(23)
-        base_content = content
-        truncate_len = len(base_content)
-        text = f'"{base_content}"\n\n- {message.author.display_name}'
+        author = message.author.display_name
         max_width = int(img.width * 0.9)
-        lines = self._wrap_text(draw, text, font, max_width)
+
+        def arrange(quoted: str) -> richtext.Layout:
+            body = richtext.RichText(f'"{quoted}"\n\n- {author}', content.images)
+            return richtext.layout(body, self.QUOTE_FONT, 23, max_width, gap=6)
 
         # Shrink toward a shorter quote until it fits in 11 lines. Cuts by whichever
         # is bigger of 10 chars or 10% of what's left, so this converges quickly even
         # from the full QUOTE_MAX_INPUT_LENGTH, and is capped to guarantee it always
         # terminates rather than looping on a string that can't shrink further.
+        pieces = richtext.clusters(content.text)
+        arranged = arrange(content.text)
+        keep = len(pieces)
         attempts = 0
-        while len(lines) > 11 and truncate_len > 20 and attempts < QUOTE_MAX_SHRINK_ATTEMPTS:
+        while len(arranged.lines) > 11 and keep > 20 and attempts < QUOTE_MAX_SHRINK_ATTEMPTS:
             attempts += 1
-            truncate_len = max(20, truncate_len - max(10, truncate_len // 10))
-            shorter = base_content[:truncate_len].rstrip() + "..."
-            text = f'"{shorter}"\n\n- {message.author.display_name}'
-            lines = self._wrap_text(draw, text, font, max_width)
+            keep = max(20, keep - max(10, keep // 10))
+            arranged = arrange("".join(pieces[:keep]).rstrip() + "...")
 
-        line_metrics = []
-        total_height = 0
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_width = bbox[2] - bbox[0]
-            line_height = bbox[3] - bbox[1]
-            line_metrics.append((line, line_width, line_height))
-            total_height += line_height + 6
-        total_height = max(0, total_height - 6)
-
-        y_text = img.height // 2 - total_height // 2
-        shadow_offset = 2
-
-        for line, line_width, line_height in line_metrics:
-            x_text = img.width // 2 - line_width // 2
-            for shadow_x, shadow_y in [
-                (x_text - shadow_offset, y_text - shadow_offset),
-                (x_text + shadow_offset, y_text + shadow_offset),
-                (x_text + shadow_offset, y_text - shadow_offset),
-                (x_text - shadow_offset, y_text + shadow_offset),
-            ]:
-                draw.text((shadow_x, shadow_y), line, font=font, fill=(0, 0, 0, 255))
-            draw.text((x_text, y_text), line, font=font, fill=(255, 255, 255, 255))
-            y_text += line_height + 6
+        arranged.draw(
+            img, (img.width - max_width) // 2, img.height // 2 - arranged.height // 2, max_width,
+            fill=(255, 255, 255, 255), shadow=(2, (0, 0, 0, 255)),
+        )
 
         output = io.BytesIO()
         img.save(output, "PNG")
@@ -1332,6 +1129,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+            text = await self.bot.image_tools.prepare_text(text, interaction.guild)
             output, out_name = await self._run_cpu_bound(
                 lambda: self.bot.image_tools.process_image_bytes(
                     image_bytes,
@@ -1348,16 +1146,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
 
     # ---------- white box caption ----------
 
-    def _caption_frame(
-        self,
-        frame: Image.Image,
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-        wrapped: list[str],
-        text_height: int,
-        box_height: int,
-        *,
-        position: str,
-    ) -> Image.Image:
+    def _caption_frame(self, frame: Image.Image, arranged: richtext.Layout, box_height: int, margin_x: int, *, position: str) -> Image.Image:
         frame = frame.convert("RGBA")
         canvas = Image.new("RGBA", (frame.width, frame.height + box_height), (255, 255, 255, 255))
         if position == "top":
@@ -1366,50 +1155,33 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         else:
             canvas.paste(frame, (0, 0), frame)
             text_area_top = frame.height
-
-        draw = ImageDraw.Draw(canvas)
-        y = text_area_top + max(0, (box_height - text_height) // 2)
-        for line in wrapped:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_width = bbox[2] - bbox[0]
-            line_height = bbox[3] - bbox[1]
-            x = (canvas.width - line_width) // 2
-            draw.text((x, y), line, font=font, fill=(0, 0, 0, 255))
-            y += line_height + LINE_SPACING
+        arranged.draw(
+            canvas, margin_x, text_area_top + max(0, (box_height - arranged.height) // 2), frame.width - 2 * margin_x, fill=(0, 0, 0, 255)
+        )
         return canvas
 
-    def _caption_bytes(self, image_bytes: bytes, filename: str, text: str, *, position: str) -> tuple[bytes, str]:
+    def _caption_bytes(self, image_bytes: bytes, filename: str, text: richtext.RichText | str, *, position: str) -> tuple[bytes, str]:
         with Image.open(io.BytesIO(image_bytes)) as image:
             is_gif = self.bot.image_tools.is_gif(image, filename)
             first_frame = (
                 next(ImageSequence.Iterator(image)).convert("RGBA") if is_gif else image.convert("RGBA")
             )
 
-            # A throwaway 1x1 image just to get a Draw object for measuring text -
-            # PIL's text measurement doesn't depend on the underlying image's size.
-            probe_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
             margin_x = max(MEME_TEXT_MIN_MARGIN_PX, int(first_frame.width * CAPTION_SIDE_MARGIN_RATIO))
             max_width = max(1, first_frame.width - 2 * margin_x)
             max_height = max(1, int(first_frame.height * CAPTION_MAX_BOX_HEIGHT_RATIO))
 
-            font, wrapped = self._fit_text_to_box(
-                probe_draw,
-                text,
-                self._get_meme_font,
-                max_width=max_width,
-                max_height=max_height,
-                min_size=CAPTION_MIN_FONT_SIZE,
-                max_size=CAPTION_MAX_FONT_SIZE,
+            arranged = richtext.fit(
+                text, self.MEME_FONT, max_width, max_height, min_size=CAPTION_MIN_FONT_SIZE, max_size=CAPTION_MAX_FONT_SIZE, gap=LINE_SPACING
             )
-            _, text_height = self._measure_lines(probe_draw, wrapped, font)
             box_height = max(
                 int(first_frame.height * CAPTION_MIN_BOX_HEIGHT_RATIO),
-                text_height + CAPTION_VERTICAL_PADDING_PX * 2,
+                arranged.height + CAPTION_VERTICAL_PADDING_PX * 2,
             )
 
             if is_gif:
                 frames = [
-                    self._caption_frame(frame, font, wrapped, text_height, box_height, position=position)
+                    self._caption_frame(frame, arranged, box_height, margin_x, position=position)
                     for frame in self.bot.image_tools.gif_frames(image)
                 ]
                 output = io.BytesIO()
@@ -1417,7 +1189,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 return output.getvalue(), "caption.gif"
 
             output = io.BytesIO()
-            rendered = self._caption_frame(first_frame, font, wrapped, text_height, box_height, position=position)
+            rendered = self._caption_frame(first_frame, arranged, box_height, margin_x, position=position)
             rendered.save(output, "PNG")
             return output.getvalue(), "caption.png"
 
@@ -1453,6 +1225,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+            text = await self.bot.image_tools.prepare_text(text, interaction.guild)
             output, out_name = await self._run_cpu_bound(
                 lambda: self._caption_bytes(image_bytes, filename, text, position=chosen_position)
             )
@@ -1480,34 +1253,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             border = MOTIVATE_BORDER_PX
             framed_size = (MOTIVATE_PHOTO_WIDTH + border * 2, target_height + border * 2)
 
-            probe_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
             text_max_width = framed_size[0]
 
-            title_font, title_lines = self._fit_text_to_box(
-                probe_draw,
-                title.upper(),
-                self._get_meme_font,
-                max_width=text_max_width,
-                max_height=MOTIVATE_TITLE_MAX_HEIGHT,
-                min_size=MOTIVATE_TITLE_MIN_SIZE,
-                max_size=MOTIVATE_TITLE_MAX_SIZE,
+            title_layout = richtext.fit(
+                richtext.as_rich(title).upper(), self.MEME_FONT, text_max_width, MOTIVATE_TITLE_MAX_HEIGHT,
+                min_size=MOTIVATE_TITLE_MIN_SIZE, max_size=MOTIVATE_TITLE_MAX_SIZE, gap=LINE_SPACING,
             )
-            _, title_height = self._measure_lines(probe_draw, title_lines, title_font)
+            title_height = title_layout.height
 
-            subtitle_font = None
-            subtitle_lines: list[str] = []
+            subtitle_layout = None
             subtitle_height = 0
             if subtitle:
-                subtitle_font, subtitle_lines = self._fit_text_to_box(
-                    probe_draw,
-                    subtitle,
-                    self._get_quote_font,
-                    max_width=text_max_width,
-                    max_height=MOTIVATE_SUBTITLE_MAX_HEIGHT,
-                    min_size=MOTIVATE_SUBTITLE_MIN_SIZE,
-                    max_size=MOTIVATE_SUBTITLE_MAX_SIZE,
+                subtitle_layout = richtext.fit(
+                    subtitle, self.QUOTE_FONT, text_max_width, MOTIVATE_SUBTITLE_MAX_HEIGHT,
+                    min_size=MOTIVATE_SUBTITLE_MIN_SIZE, max_size=MOTIVATE_SUBTITLE_MAX_SIZE, gap=LINE_SPACING,
                 )
-                _, subtitle_height = self._measure_lines(probe_draw, subtitle_lines, subtitle_font)
+                subtitle_height = subtitle_layout.height
 
             canvas_width = framed_size[0] + MOTIVATE_MARGIN_PX * 2
             canvas_height = (
@@ -1515,7 +1276,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 + framed_size[1]
                 + MOTIVATE_TEXT_GAP_PX
                 + title_height
-                + (MOTIVATE_TEXT_GAP_PX + subtitle_height if subtitle_lines else 0)
+                + (MOTIVATE_TEXT_GAP_PX + subtitle_height if subtitle_layout else 0)
                 + MOTIVATE_MARGIN_PX
             )
 
@@ -1527,25 +1288,12 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 canvas = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 255))
                 canvas.paste(framed, (MOTIVATE_MARGIN_PX, MOTIVATE_MARGIN_PX))
 
-                draw = ImageDraw.Draw(canvas)
                 y = MOTIVATE_MARGIN_PX + framed_size[1] + MOTIVATE_TEXT_GAP_PX
-                for line in title_lines:
-                    bbox = draw.textbbox((0, 0), line, font=title_font)
-                    line_width = bbox[2] - bbox[0]
-                    line_height = bbox[3] - bbox[1]
-                    x = (canvas_width - line_width) // 2
-                    draw.text((x, y), line, font=title_font, fill=(255, 255, 255, 255))
-                    y += line_height + LINE_SPACING
-
-                if subtitle_lines:
-                    y += MOTIVATE_TEXT_GAP_PX - LINE_SPACING
-                    for line in subtitle_lines:
-                        bbox = draw.textbbox((0, 0), line, font=subtitle_font)
-                        line_width = bbox[2] - bbox[0]
-                        line_height = bbox[3] - bbox[1]
-                        x = (canvas_width - line_width) // 2
-                        draw.text((x, y), line, font=subtitle_font, fill=(190, 190, 190, 255))
-                        y += line_height + LINE_SPACING
+                title_layout.draw(canvas, MOTIVATE_MARGIN_PX, y, text_max_width, fill=(255, 255, 255, 255))
+                if subtitle_layout:
+                    subtitle_layout.draw(
+                        canvas, MOTIVATE_MARGIN_PX, y + title_height + MOTIVATE_TEXT_GAP_PX, text_max_width, fill=(190, 190, 190, 255)
+                    )
 
                 return canvas
 
@@ -1586,6 +1334,8 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         await self.bot.image_tools.defer(interaction)
         try:
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+            title = await self.bot.image_tools.prepare_text(title, interaction.guild)
+            subtitle = await self.bot.image_tools.prepare_text(subtitle, interaction.guild) if subtitle else None
             output, out_name = await self._run_cpu_bound(
                 lambda: self._build_motivate_image(image_bytes, filename, title, subtitle)
             )

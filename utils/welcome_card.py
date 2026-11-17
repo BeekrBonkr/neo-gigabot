@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from utils import richtext
+
 FONT_DIR = Path(__file__).resolve().parents[1] / "assets" / "fonts"
 CARD_SIZE = (1000, 360)
 AVATAR_SIZE = 220
@@ -18,17 +20,6 @@ def _font(name: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.truetype(str(FONT_DIR / name), size)
     except OSError:
         return ImageFont.load_default()
-
-
-def _fit(draw: ImageDraw.ImageDraw, text: str, font_name: str, size: int, max_width: int) -> tuple[str, ImageFont.ImageFont]:
-    """The largest font down to 60% of `size` that fits; then the text is cut."""
-    for candidate in range(size, int(size * 0.6) - 1, -4):
-        font = _font(font_name, candidate)
-        if draw.textlength(text, font=font) <= max_width:
-            return text, font
-    while len(text) > 1 and draw.textlength(text + "…", font=font) > max_width:
-        text = text[:-1]
-    return text + "…", font
 
 
 def render_card(avatar_png: bytes | None, *, name: str, server: str, member_number: int, accent: int | None = None) -> bytes:
@@ -58,10 +49,12 @@ def render_card(avatar_png: bytes | None, *, name: str, server: str, member_numb
 
     text_left, max_width = left + AVATAR_SIZE + 50, width - (left + AVATAR_SIZE + 50) - 40
     draw.text((text_left, 70), "WELCOME", font=_font("impact.ttf", 44), fill=(red, green, blue) if (red + green + blue) > 240 else (235, 235, 245))
-    shown, font = _fit(draw, name, "arial.ttf", 76, max_width)
-    draw.text((text_left, 125), shown, font=font, fill=(255, 255, 255))
-    line, small = _fit(draw, f"Member #{member_number:,} of {server}", "arial.ttf", 34, max_width)
-    draw.text((text_left, 235), line, font=small, fill=(200, 203, 215))
+    # Names are whatever people chose: emoji, other scripts, fancy letters. richtext draws all of those,
+    # shrinking each line to 60% at most and then cutting it short.
+    richtext.fit_line(name, "arial.ttf", 76, max_width, min_size=46).draw(card, text_left, 125, align="left", fill=(255, 255, 255))
+    richtext.fit_line(f"Member #{member_number:,} of {server}", "arial.ttf", 34, max_width, min_size=20).draw(
+        card, text_left, 235, align="left", fill=(200, 203, 215)
+    )
 
     out = io.BytesIO()
     card.save(out, format="PNG", optimize=True)

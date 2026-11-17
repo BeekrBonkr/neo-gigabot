@@ -170,3 +170,51 @@ def test_an_attachment_wins_over_the_channels_latest_image():
     harness = Harness()
     sent = harness.run(ImageEdit, "resize", percent=100, attachment=FakeAttachment(png_bytes((10, 20))))
     assert Image.open(io.BytesIO(sent["data"])).size == (10, 20)
+
+
+# ---------- the older /image text commands, which share the text renderer ----------
+
+from pathlib import Path
+
+from cogs.images import Images
+
+HARD_TEXT = "𝓯𝓪𝓷𝓬𝔂 ça 日本 한국 😀 🇺🇸 <@1> ​ ★"
+
+
+class _Embeds:
+    pass
+
+
+def images_cog(harness: Harness) -> Images:
+    harness.bot.project_root = Path(__file__).resolve().parents[1]
+    harness.bot.tree = types.SimpleNamespace(add_command=lambda *a, **k: None, remove_command=lambda *a, **k: None)
+    return Images(harness.bot)
+
+
+@pytest.mark.parametrize("command, options", [
+    ("toptext", {"text": HARD_TEXT}), ("middletext", {"text": HARD_TEXT, "max_size": 40}), ("bottomtext", {"text": HARD_TEXT}),
+    ("caption", {"text": HARD_TEXT}), ("motivate", {"title": HARD_TEXT, "subtitle": HARD_TEXT}),
+])
+def test_text_commands_draw_text_no_single_font_could(command, options):
+    harness = Harness()
+    harness.channel_image = (png_bytes((400, 300)), "recent.png")
+    cog = images_cog(harness)
+    asyncio.run(getattr(cog, command).callback(cog, harness.interaction, **options))
+    assert harness.errors == [] and len(harness.sent) == 1
+    result = Image.open(io.BytesIO(harness.sent[0]["data"])).convert("RGB")
+    plain = Image.open(io.BytesIO(png_bytes((400, 300)))).convert("RGB")
+    assert result.size[0] >= 400 and (result.size != plain.size or result.tobytes() != plain.tobytes())
+
+
+def test_quote_image_handles_markdown_mentions_and_emoji():
+    harness = Harness()
+    cog = images_cog(harness)
+    guild = types.SimpleNamespace(
+        get_member=lambda target: types.SimpleNamespace(display_name="Ana"), get_role=lambda target: None, get_channel_or_thread=lambda target: None
+    )
+    author = types.SimpleNamespace(display_name="Zoë 🌸", display_avatar=FakeAvatar())
+    message = types.SimpleNamespace(content="**bold** claim by <@111111111111111111>: ça marche 😀 " + "long " * 150, guild=guild, author=author)
+    data, name = asyncio.run(cog._build_quote_image(message))
+    assert name == "quote.png" and Image.open(io.BytesIO(data)).size == (400, 400)
+    with pytest.raises(ValueError, match="any text"):
+        asyncio.run(cog._build_quote_image(types.SimpleNamespace(content="   ", guild=guild, author=author)))
