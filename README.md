@@ -50,6 +50,17 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - Role hierarchy enforced everywhere: mods can't act on (or warn) members ranked at/above them
 - Mass tools: `/role` (add/remove for everyone), `/autorole` (+ apply now), `/prune`
 - Channel tools: `/purge`, `/clean`, `/lock`, `/unlock`, `/say`, `/nick`
+- **Automod**: invite links, banned words, mass mentions and message spam, each with its own
+  action (delete, warn or mute); automatic warnings feed the same escalation
+- **Anti-raid**: a burst of joins starts a lockdown (`/lockdown on|off|status`), plus a minimum
+  account age for new members
+- **Verification gate** (`/verification …`): a Verify button that grants a role, with an optional
+  minimum account age
+- **Honeypot channel** (`/honeypot …`): anyone who posts in it is banned, softbanned or kicked
+- **Case history and notes**: every action is recorded (`/modhistory`), with private moderator
+  notes (`/note add|remove`)
+- **Ban appeals**: the ban DM links to an appeal form on the website; admins approve or deny there
+- `/softban` and `/slowmode`
 - **Sticky roles**: restores a returning member's roles (never roles with elevated permissions)
 - **Mod log**: kick/ban/mute/warn actions posted to a channel, filterable per action type,
   with optional DM notices to the actioned member
@@ -58,7 +69,16 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - **Reaction roles** (`/reactionrole …`): map emoji on any message to roles, one at a time,
   in batch, or with a guided builder that creates the message for you
 - **Starboard**: messages that collect enough ⭐ (emoji/threshold configurable) get reposted
-- **Welcome / leave messages** with `{mention}` / `{server}` templates and auto-delete
+- **Welcome / leave messages** as plain text, a custom embed or a generated image card, with
+  `{mention}` / `{name}` / `{server}` / `{count}` templates, an optional DM to new members, and auto-delete
+- **Role menus** (`/rolemenu …`): buttons or a dropdown members use to pick roles, with an
+  only-one-of-these mode
+- **Suggestions** (`/suggest`, `/suggestion approve|deny`): numbered suggestions with vote buttons
+- **Tags** (`/tag`, `/tags set|delete|list`): custom canned replies
+- **Sticky messages** (`/stick`, `/stickembed`, `/stickslow`, `/stickstop`, `/stickstart`,
+  `/stickremove`, `/getstickies`): a message kept at the bottom of a channel
+- **Scheduled messages** (`/schedule add|list|remove`): announcements at a set time, once or on repeat
+- **Temporary voice channels**: joining a hub channel creates a voice channel of your own
 - **Activity log**: message edits/deletes, joins/leaves, role/channel/voice changes to a
   log channel, with per-channel and per-user ignores
 
