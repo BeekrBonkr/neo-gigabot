@@ -15,6 +15,7 @@ class Config:
     openweathermap_api_key: str = ""
     giphy_api_key: str = ""
     support_server_invite: str = ""
+    website_url: str = ""
     legacy_data_path: str = ""
 
     @property
@@ -25,6 +26,12 @@ class Config:
     def giphy_enabled(self) -> bool:
         return bool(self.giphy_api_key.strip())
 
+
+
+def _http_url(value: str) -> str:
+    """A configured link, without a trailing slash; anything that isn't http(s) is dropped."""
+    value = (value or "").strip().rstrip("/")
+    return value if value.startswith(("https://", "http://")) else ""
 
 
 def load_config() -> Config:
@@ -48,5 +55,6 @@ def load_config() -> Config:
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
         giphy_api_key=os.getenv("GIPHY_API_KEY", ""),
         support_server_invite=os.getenv("SUPPORT_SERVER_INVITE", ""),
+        website_url=_http_url(os.getenv("WEBSITE_URL", "")),
         legacy_data_path=os.getenv("LEGACY_DATA_PATH", ""),
     )

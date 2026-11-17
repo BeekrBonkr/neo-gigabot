@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.warnings import count_warnings
+from utils.website import site_link
 
 SUPPORT_FALLBACK_MESSAGE = "No support server has been configured for this bot yet."
 
@@ -71,13 +72,19 @@ class Info(commands.Cog):
         )
         fields.append(self.bot.embeds.field("Invite Me", f"[Click here]({invite_url})", True))
 
+        website = site_link(self.bot, "Open the website")
+        if website:
+            fields.append(self.bot.embeds.field("Website", website, True))
+
         support_invite = getattr(self.bot.config, "support_server_invite", "") or ""
         if support_invite:
             fields.append(self.bot.embeds.field("Support Server", f"[Join here]({support_invite})", True))
 
         embed = self.bot.embeds.create(
             title=f"About {self.bot.user.name}",
-            description="Use `/help` for a categorized list of everything I can do.",
+            description="Use `/help` for a categorized list of everything I can do."
+            + (f"\nOn the {site_link(self.bot, 'website')} you can control music from your browser, manage playlists, "
+               "and (as an admin) change every server setting." if website else ""),
             color=discord.Color.blurple(),
             thumbnail_url=self.bot.user.display_avatar.url,
             fields=fields,

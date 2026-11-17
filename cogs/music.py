@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import discord
 import yt_dlp
@@ -16,6 +16,7 @@ from discord.ext import commands
 
 from utils import playlists as playlist_store
 from utils.playlists import PlaylistError
+from utils.website import site_link, site_url
 from utils.settings import (
     get_guild_settings,
     get_music_djadmin_role_id,
@@ -1440,7 +1441,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                                 self.bot.embeds.field("Duration", track.duration_label, True),
                                 self.bot.embeds.field("Uploader", track.uploader or "Unknown", True),
                                 self.bot.embeds.field("Requested By", track.requested_by_name or "Unknown", False),
-                            ],
+                            ]
+                            + ([self.bot.embeds.field("Web Player", site_link(self.bot, "Control it from your browser", f"/app/{guild_id}"), False)]
+                               if site_url(self.bot) else []),
                             thumbnail_url=track.thumbnail,
                         )
                     except discord.HTTPException as exc:
@@ -1533,6 +1536,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         max_page = max(0, (len(queue_list) - 1) // per_page)
         loop_label = f" • Loop: {state.loop_mode}" if state.loop_mode != "off" else ""
+        web_player = site_link(self.bot, "Open the web player", f"/app/{guild_id}")
+        if web_player:
+            description += f"\n🌐 {web_player} to see and reorder the queue from your browser."
         return self.bot.embeds.info_embed(
             "Music Queue",
             description,
@@ -1570,6 +1576,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         loop_label = f" • Loop: {state.loop_mode}" if state.loop_mode != "off" else ""
         channel_name = voice_client.channel.name if voice_client and voice_client.channel else "voice"
+        web_player = site_link(self.bot, "web player", f"/app/{guild_id}")
+        if web_player:
+            description += f"\n🌐 The same controls, plus the full queue, are on the {web_player}."
         return self.bot.embeds.info_embed(
             "🎛️ Music Remote",
             description,
@@ -1592,9 +1601,10 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         else:
             body = "This playlist is empty."
 
+        on_site = site_link(self.bot, "View and edit on the website", f"/playlists/{playlist['owner_id']}/{quote(playlist['name'], safe='')}")
         return self.bot.embeds.create(
             title=f"🎵 {playlist['display_name']} ({'Private' if playlist['status'] == 'private' else 'Public'})",
-            description=playlist["description"] or "No description.",
+            description=(playlist["description"] or "No description.") + (f"\n🌐 {on_site}" if on_site else ""),
             color=discord.Color.teal(),
             fields=[self.bot.embeds.field(f"Songs ({len(songs)})", body)],
             footer=f"❤️ {len(playlist['likes'])} like(s) • Page {page + 1}/{max_page + 1}",

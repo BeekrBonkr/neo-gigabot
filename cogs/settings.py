@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.durations import parse_duration
+from utils.website import site_link
 from utils.settings import (
     MOD_LOG_EVENT_KINDS,
     create_guild_settings,
@@ -996,6 +997,9 @@ class SettingsDashboardView(discord.ui.View):
         )
         embed = self.bot.embeds.create(title=f"{emoji} Server Settings — {label}", color=self.bot.embeds.default_color)
         embed.description = blurb
+        website = site_link(self.bot, "website", f"/app/{self.guild_id}/settings")
+        if website:
+            embed.description += f"\n🌐 Prefer a browser? Every setting here is also on the {website}, with previews and a change history."
         embed.set_footer(text="Changes save instantly • Only you can see this panel")
 
         if self.category == "general":
@@ -1118,6 +1122,23 @@ class Settings(commands.Cog):
         if guild_settings_exists(self.bot.storage_path, guild.id):
             return
         create_guild_settings(self.bot.storage_path, guild.id)
+        await self._introduce(guild)
+
+    async def _introduce(self, guild: discord.Guild) -> None:
+        """Say hello once in a brand-new server, so admins know where setup
+        lives. Best-effort: no system channel or no permission means no message."""
+        channel = guild.system_channel
+        me = guild.me
+        if channel is None or me is None or not channel.permissions_for(me).send_messages:
+            return
+        website = site_link(self.bot, "website", f"/app/{guild.id}")
+        lines = ["Thanks for adding me! Admins can set everything up with `/settings`, and `/help` lists what I can do."]
+        if website:
+            lines.append(f"There is also a {website}: a web music player and playlists for everyone, and a settings dashboard for admins.")
+        try:
+            await channel.send(embed=self.bot.embeds.info_embed(f"👋 Hi, I'm {self.bot.user.name}", "\n".join(lines)))
+        except discord.HTTPException:
+            pass
 
     @app_commands.command(name="settings", description="Open the interactive server settings dashboard.")
     @app_commands.checks.has_permissions(administrator=True)

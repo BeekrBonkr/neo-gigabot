@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.website import site_link
 from utils.discord_links import fetch_message_from_link
 from utils.settings import parse_hex_color
 from utils.reactionroles import (
@@ -381,6 +382,9 @@ class ReactionRoles(
             f"`{entry['emoji']}` → <@&{entry['role_id']}> (message `{entry['message_id']}` in <#{entry['channel_id']}>)"
             for entry in entries[:25]
         ]
+        website = site_link(self.bot, "website", f"/app/{interaction.guild_id}/reactions")
+        if website:
+            lines.append(f"\n🌐 Reaction roles can also be created and removed on the {website}.")
         embed = self.bot.embeds.info_embed(f"Reaction Roles ({len(entries)})", "\n".join(lines))
         await self.bot.embeds.respond(interaction, embed=embed, ephemeral=True)
 

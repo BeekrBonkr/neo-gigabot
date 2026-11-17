@@ -127,6 +127,7 @@ chmod 600 .env
 | `OPENWEATHERMAP_API_KEY` | | Enables `/weather` ([free key](https://openweathermap.org/api)) |
 | `GIPHY_API_KEY` | | Enables `/gif`, `/cute`, `/beans` ([free key](https://developers.giphy.com/)) |
 | `SUPPORT_SERVER_INVITE` | | Shown in `/about` |
+| `WEBSITE_URL` | | Address of the bot's website (the public site of neogigabot-panel, if you run it). When set, `/about`, `/help`, `/settings`, the music and playlist embeds and the first-join greeting link to it |
 | `LEGACY_DATA_PATH` | | Old gigabot install root, for `/owner migrate` |
 
 ### Run
