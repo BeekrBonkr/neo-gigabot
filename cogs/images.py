@@ -920,6 +920,13 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
             self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
             self.bot.embeds.field("Other", "`/image effects deepfry` `/image misc pfp` `/image misc clearimagesource`"),
+            self.bot.embeds.field("Color Filters", "`/filter invert/grayscale/sepia/hue/adjust/posterize/edges/emboss/vaporwave`"),
+            self.bot.embeds.field(
+                "Animations & GIF Tools",
+                "`/animate spin/rainbow/wave/zoom/pet/bonk` • `/animate speed/reverse/frames/togif`",
+            ),
+            self.bot.embeds.field("More Meme Formats", "`/memegen speechbubble/wanted/drake/changemymind/jail/wasted`"),
+            self.bot.embeds.field("Layout & Utility", "`/edit mirror/tile/collage/border/circle/resize/palette/removebg`"),
         ]
         await self.bot.embeds.respond(interaction, title="Image Commands", fields=fields)
 
