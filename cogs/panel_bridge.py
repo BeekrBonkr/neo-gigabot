@@ -42,6 +42,7 @@ from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
 from utils import starboard as starboard_store
 from utils import sticky_roles as sticky_role_store
+from utils import tags as tag_store
 from utils import tempbans as tempban_store
 from utils import warnings as warning_store
 from utils.db import connect
@@ -313,6 +314,7 @@ class PanelBridge(commands.Cog):
         r.add_get("/v1/guilds/{guild_id}/music/events", self.h_guild_music_events)
         r.add_get("/v1/guilds/{guild_id}/moderation", self.h_moderation)
         r.add_get("/v1/guilds/{guild_id}/membersearch", self.h_member_search)
+        r.add_post("/v1/guilds/{guild_id}/tags", self.h_tags_action)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -1584,6 +1586,25 @@ class PanelBridge(commands.Cog):
             "bot_can_unmute": bool(permissions and permissions.moderate_members),
             "bot_can_unban": bool(permissions and permissions.ban_members),
         })
+
+    async def h_tags_action(self, request: web.Request) -> web.Response:
+        """Create, replace or delete one of a server's tags, as one of its admins."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action, name = str(body.get("action", "")), str(body.get("name", ""))
+        if action == "set":
+            try:
+                saved, created = tag_store.set_tag(self.storage, guild.id, name, str(body.get("content", "")), admin.id)
+            except tag_store.TagError as exc:
+                raise BridgeError(400, str(exc)) from exc
+            return web.json_response({"ok": True, "detail": f"{'Created' if created else 'Updated'} the tag {saved['name']}", "tag": saved["name"]})
+        if action == "delete":
+            removed = tag_store.delete_tag(self.storage, guild.id, name)
+            if removed is None:
+                raise BridgeError(404, "That tag no longer exists.")
+            return web.json_response({"ok": True, "detail": f"Deleted the tag {removed['name']}", "before": removed})
+        raise BridgeError(400, "Unknown action.")
 
     MEMBER_SEARCH_RESULTS = 25
 

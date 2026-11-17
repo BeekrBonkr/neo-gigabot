@@ -43,7 +43,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
             "nick", "poll", "say", "modhistory", "note", "softban", "slowmode", "lockdown", "verification", "honeypot",
         ],
     ),
-    ("community", "💬", "Community", ["suggest", "suggestion"]),
+    ("community", "💬", "Community", ["suggest", "suggestion", "tag", "tags"]),
     ("reactionroles", "🎭", "Reaction Roles", ["reactionrole"]),
     ("settings", "⚙️", "Server Settings", ["settings"]),
     ("info", "ℹ️", "Info & Support", ["about", "userinfo", "feedback"]),

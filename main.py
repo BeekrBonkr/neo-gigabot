@@ -31,6 +31,7 @@ COGS = [
     "cogs.verification",
     "cogs.honeypot",
     "cogs.suggestions",
+    "cogs.tags",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",
