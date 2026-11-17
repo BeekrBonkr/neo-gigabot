@@ -38,6 +38,8 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   caption/toptext/bottomtext, motivational posters, quote images, format conversion, and more
 - **Face detection** (OpenCV DNN): `facebox`, `blurfaces`, `facecrop`, `faceswap`, `googlyeyes`
 - **Content-aware scale** (seam carving), GIF-aware — effects apply to every frame
+- **Color filters** (`/filter …`): invert, grayscale, sepia, hue, adjust (brightness, contrast, saturation),
+  posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,

@@ -31,7 +31,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
             "simon", "hotpotato",
         ],
     ),
-    ("images", "🖼️", "Images & Memes", ["image"]),
+    ("images", "🖼️", "Images & Memes", ["image", "filter"]),
     ("music", "🎵", "Music", ["music"]),
     (
         "moderation",
