@@ -151,6 +151,8 @@ chmod 600 .env
 | `LOG_LEVEL` | | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`) |
 | `OPENWEATHERMAP_API_KEY` | | Enables `/weather` ([free key](https://openweathermap.org/api)) |
 | `GIPHY_API_KEY` | | Enables `/gif`, `/cute`, `/beans` ([free key](https://developers.giphy.com/)) |
+| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` | | Let `/meme`, `/reddit` and `/cursed` read Reddit through its API. Without them the bot uses Reddit's public pages, which Reddit refuses from many servers. Create a "script" app at [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) |
+| `REDDIT_USER_AGENT` | | How the bot names itself to Reddit, such as `discord:my-bot:v1 (by /u/yourname)` |
 | `SUPPORT_SERVER_INVITE` | | Shown in `/about` |
 | `WEBSITE_URL` | | Address of the bot's website (the public site of neogigabot-panel, if you run it). When set, `/about`, `/help`, `/settings`, the music and playlist embeds and the first-join greeting link to it |
 | `LEGACY_DATA_PATH` | | Old gigabot install root, for `/owner migrate` |
