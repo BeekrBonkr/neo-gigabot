@@ -322,10 +322,21 @@ class Moderation(commands.Cog):
             pass
 
     async def _maybe_escalate_warning(self, interaction: discord.Interaction, user: discord.Member, warning_count: int) -> None:
+        async def announce(title: str, description: str) -> None:
+            await self.bot.embeds.info_interaction(interaction, title, description)
+
+        await self.escalate_warning(interaction.guild, user, warning_count, announce)
+
+    async def escalate_warning(self, guild: discord.Guild, user: discord.Member, warning_count: int, announce=None) -> None:
         """Automatically mute/kick/ban a member once their warning count reaches
         this guild's configured threshold. A no-op unless an admin has opted in
-        via the settings dashboard (warn_threshold > 0 and warn_action != "none")."""
-        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        via the settings dashboard (warn_threshold > 0 and warn_action != "none").
+        `announce(title, description)` tells whoever caused the warning what
+        happened; automatic warnings (automod) pass their own or none."""
+        if announce is None:
+            async def announce(title: str, description: str) -> None:
+                return None
+        settings = get_guild_settings(self.bot.storage_path, guild.id)
         threshold = int(settings.get("warn_threshold", 0) or 0)
         action = settings.get("warn_action", "none")
         if threshold <= 0 or action == "none":
@@ -334,10 +345,10 @@ class Moderation(commands.Cog):
         # infractions age out instead of counting against the member forever.
         window_days = int(settings.get("warn_window_days", 0) or 0)
         if window_days > 0:
-            warning_count = count_warnings(self.bot.storage_path, interaction.guild.id, user.id, within_days=window_days)
+            warning_count = count_warnings(self.bot.storage_path, guild.id, user.id, within_days=window_days)
         if warning_count < threshold:
             return
-        if user.top_role >= interaction.guild.me.top_role:
+        if user.top_role >= guild.me.top_role:
             return
 
         reason = f"Automatic action: reached {warning_count} warning(s) (threshold {threshold})"
@@ -353,15 +364,13 @@ class Moderation(commands.Cog):
             await self._try_dm(
                 user,
                 self.bot.embeds.warning_embed(
-                    "You Were Muted", f"You were automatically muted in **{interaction.guild.name}** after reaching {warning_count} warnings."
+                    "You Were Muted", f"You were automatically muted in **{guild.name}** after reaching {warning_count} warnings."
                 ),
-                guild_id=interaction.guild.id,
+                guild_id=guild.id,
             )
-            await self.bot.embeds.info_interaction(
-                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically muted."
-            )
+            await announce("Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically muted.")
             await self._log_mod_action(
-                interaction.guild, event="mute", title="🔇 Auto-Muted (Warning Threshold)", color=self.bot.embeds.warning_color,
+                guild, event="mute", title="🔇 Auto-Muted (Warning Threshold)", color=self.bot.embeds.warning_color,
                 target=user, moderator=self.bot.user, reason=reason,
             )
         elif action == "kick":
@@ -369,11 +378,9 @@ class Moderation(commands.Cog):
                 await user.kick(reason=reason)
             except discord.Forbidden:
                 return
-            await self.bot.embeds.info_interaction(
-                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically kicked."
-            )
+            await announce("Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically kicked.")
             await self._log_mod_action(
-                interaction.guild, event="kick", title="👢 Auto-Kicked (Warning Threshold)", color=self.bot.embeds.warning_color,
+                guild, event="kick", title="👢 Auto-Kicked (Warning Threshold)", color=self.bot.embeds.warning_color,
                 target=user, moderator=self.bot.user, reason=reason,
             )
         elif action == "ban":
@@ -381,11 +388,9 @@ class Moderation(commands.Cog):
                 await user.ban(reason=reason)
             except discord.Forbidden:
                 return
-            await self.bot.embeds.info_interaction(
-                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically banned."
-            )
+            await announce("Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically banned.")
             await self._log_mod_action(
-                interaction.guild, event="ban", title="🔨 Auto-Banned (Warning Threshold)", color=self.bot.embeds.error_color,
+                guild, event="ban", title="🔨 Auto-Banned (Warning Threshold)", color=self.bot.embeds.error_color,
                 target=user, moderator=self.bot.user, reason=reason,
             )
 

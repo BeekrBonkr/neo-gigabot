@@ -48,7 +48,38 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "web_player_enabled": True,
     "web_join_enabled": True,
     "web_discovery_enabled": True,
+    # Automod: each rule is off, or deletes the message and optionally warns or mutes.
+    "automod_invites_action": "off",
+    "automod_words_action": "off",
+    "automod_banned_words": "",
+    "automod_mentions_action": "off",
+    "automod_mention_limit": 6,
+    "automod_spam_action": "off",
+    "automod_spam_limit": 6,
+    "automod_mute_duration": "10m",
+    "automod_exempt_roles": [],
+    "automod_exempt_channels": [],
 }
+
+# How the newer settings are validated when they arrive from the web panel
+# (cogs/panel_bridge.py validate_settings). Declared here, next to the
+# defaults, so adding a setting is one edit in one file.
+AUTOMOD_ACTIONS = ("off", "delete", "warn", "mute")
+SETTING_CHOICES: dict[str, tuple[str, ...]] = {
+    "automod_invites_action": AUTOMOD_ACTIONS,
+    "automod_words_action": AUTOMOD_ACTIONS,
+    "automod_mentions_action": AUTOMOD_ACTIONS,
+    "automod_spam_action": AUTOMOD_ACTIONS,
+}
+SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
+SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
+SETTING_IDS: set[str] = set()
+SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
+    "automod_mention_limit": (2, 50),
+    "automod_spam_limit": (3, 30),
+}
+# Text settings that may be longer than the usual 1000 characters.
+SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000}
 
 WARN_ACTION_CHOICES = ("none", "mute", "kick", "ban")
 MOD_LOG_EVENT_KINDS = ("warn", "mute", "kick", "ban")

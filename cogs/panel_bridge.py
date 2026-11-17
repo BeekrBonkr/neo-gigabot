@@ -48,6 +48,12 @@ from utils.discord_links import parse_message_link
 from utils.durations import parse_duration
 from utils.newsletter_sender import NewsletterSender, NewsletterView, ResubscribeView, collect_recipients
 from utils.settings import (
+    SETTING_CHOICES,
+    SETTING_DURATIONS,
+    SETTING_ID_LISTS,
+    SETTING_IDS,
+    SETTING_INT_RANGES,
+    SETTING_TEXT_LIMITS,
     MOD_LOG_EVENT_KINDS,
     WARN_ACTION_CHOICES,
     clear_settings_caches,
@@ -122,7 +128,7 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
     for key, default_value in defaults.items():
         value = data.get(key, default_value)
 
-        if key in ID_LIST_KEYS:
+        if key in ID_LIST_KEYS or key in SETTING_ID_LISTS:
             if not isinstance(value, list) or len(value) > MAX_ID_LIST_LENGTH:
                 raise SettingsValidationError(f"{key} must be a list of up to {MAX_ID_LIST_LENGTH} IDs.")
             ids: list[int] = []
@@ -132,7 +138,7 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
                 if int(item) not in ids:
                     ids.append(int(item))
             cleaned[key] = ids
-        elif key in ID_SCALAR_KEYS:
+        elif key in ID_SCALAR_KEYS or key in SETTING_IDS:
             text = str(value or "").strip()
             if text and not text.isdigit():
                 raise SettingsValidationError(f"{key} must be an ID or empty.")
@@ -152,9 +158,13 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
             if value not in WARN_ACTION_CHOICES:
                 raise SettingsValidationError(f"warn_action must be one of {', '.join(WARN_ACTION_CHOICES)}.")
             cleaned[key] = value
-        elif key == "warn_mute_duration":
+        elif key in SETTING_CHOICES:
+            if value not in SETTING_CHOICES[key]:
+                raise SettingsValidationError(f"{key} must be one of {', '.join(SETTING_CHOICES[key])}.")
+            cleaned[key] = value
+        elif key == "warn_mute_duration" or key in SETTING_DURATIONS:
             if not isinstance(value, str) or parse_duration(value) is None:
-                raise SettingsValidationError("warn_mute_duration must be a duration like 1h or 1d12h.")
+                raise SettingsValidationError(f"{key} must be a duration like 1h or 1d12h.")
             cleaned[key] = value.strip()
         elif key == "embed_color":
             text = str(value or "").strip()
@@ -168,13 +178,14 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(default_value, int):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise SettingsValidationError(f"{key} must be a whole number.")
-            low, high = INT_RANGES.get(key, (0, 1_000_000))
+            low, high = SETTING_INT_RANGES.get(key) or INT_RANGES.get(key, (0, 1_000_000))
             if not low <= value <= high:
                 raise SettingsValidationError(f"{key} must be between {low} and {high}.")
             cleaned[key] = value
         elif isinstance(default_value, str):
-            if not isinstance(value, str) or len(value) > MAX_TEXT_LENGTH:
-                raise SettingsValidationError(f"{key} must be text of up to {MAX_TEXT_LENGTH} characters.")
+            limit = SETTING_TEXT_LIMITS.get(key, MAX_TEXT_LENGTH)
+            if not isinstance(value, str) or len(value) > limit:
+                raise SettingsValidationError(f"{key} must be text of up to {limit} characters.")
             if key in ("starboard_emoji", "music_dj_role_name") and not value.strip():
                 raise SettingsValidationError(f"{key} can't be empty.")
             cleaned[key] = value
