@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils import schedules as store
+from utils.modules import module_enabled
 from utils.durations import parse_duration
 from utils.website import site_link
 
@@ -63,6 +64,8 @@ class Schedules(commands.Cog):
                 # The server or channel is gone: there is nowhere to post, ever.
                 store.remove(self.bot.storage_path, entry["guild_id"], entry["id"])
                 continue
+            if not module_enabled(self.bot.storage_path, guild.id, "schedules"):
+                continue  # kept, and picked up again when the module is turned back on
             try:
                 await channel.send(entry["content"], allowed_mentions=ADMIN_MENTIONS)
             except discord.Forbidden:

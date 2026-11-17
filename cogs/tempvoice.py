@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands
 
 from utils import tempvoice as store
+from utils.modules import enabled_in
 from utils.settings import get_guild_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ class TempVoice(commands.Cog):
         self._swept = False
 
     def _hub_id(self, guild_id: int) -> int | None:
-        raw = str(get_guild_settings(self.bot.storage_path, guild_id).get("tempvoice_hub_channel_id") or "")
+        settings = get_guild_settings(self.bot.storage_path, guild_id)
+        raw = str(settings.get("tempvoice_hub_channel_id") or "") if enabled_in(settings, "tempvoice") else ""
         return int(raw) if raw.isdigit() else None
 
     @commands.Cog.listener()

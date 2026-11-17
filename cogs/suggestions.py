@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import suggestions as store
+from utils.modules import enabled_in
 from utils.settings import get_guild_settings, update_guild_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -66,7 +67,8 @@ class Suggestions(commands.Cog):
         self.bot.add_view(SuggestionView(self))
 
     def _channel(self, guild: discord.Guild) -> discord.TextChannel | None:
-        raw = str(get_guild_settings(self.bot.storage_path, guild.id).get("suggestions_channel_id") or "")
+        settings = get_guild_settings(self.bot.storage_path, guild.id)
+        raw = str(settings.get("suggestions_channel_id") or "") if enabled_in(settings, "suggestions") else ""
         channel = guild.get_channel(int(raw)) if raw.isdigit() else None
         return channel if isinstance(channel, discord.TextChannel) else None
 

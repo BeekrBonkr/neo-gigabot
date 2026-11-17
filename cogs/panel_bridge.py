@@ -686,7 +686,10 @@ class PanelBridge(commands.Cog):
     def _web_enabled(self, guild: discord.Guild, key: str) -> bool:
         """A server's website switches: web_player_enabled, web_join_enabled,
         web_discovery_enabled. All default to on."""
-        return bool(get_guild_settings(self.storage, guild.id).get(key, True))
+        settings = get_guild_settings(self.storage, guild.id)
+        if key != "web_discovery_enabled" and not settings.get("music_enabled", True):
+            return False  # the Music module is off, so there is no player to show
+        return bool(settings.get(key, True))
 
     def _command_refusal(self, guild: discord.Guild, member: discord.Member, command: str | None) -> str:
         """Why this server's settings stop the member from using a music

@@ -7,6 +7,7 @@ import logging
 import discord
 from discord.ext import commands
 
+from utils.modules import enabled_in
 from utils.settings import get_embed_color_value, get_guild_settings, get_welcome_delete_after, parse_hex_color
 from utils.welcome_card import render_card
 
@@ -106,6 +107,8 @@ class Welcome(commands.Cog):
         if member.bot:
             return
         settings = get_guild_settings(self.bot.storage_path, member.guild.id)
+        if not enabled_in(settings, "welcome"):
+            return
 
         dm_text = str(settings.get("welcome_dm_message") or "")
         if dm_text:
@@ -132,6 +135,8 @@ class Welcome(commands.Cog):
         if member.bot:
             return
         settings = get_guild_settings(self.bot.storage_path, member.guild.id)
+        if not enabled_in(settings, "welcome"):
+            return
         # Leave messages go to their own channels when configured, otherwise
         # they share the welcome channel(s) as before.
         channel_ids = settings.get("leave_channel_ids") or settings.get("welcome_channel_ids") or []

@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.modules import enabled_in
 from utils.settings import get_guild_settings, update_guild_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class Honeypot(commands.Cog):
 
     def _trapped(self, message: discord.Message, settings: dict) -> bool:
         raw = str(settings.get("honeypot_channel_id") or "")
-        if not raw.isdigit() or message.channel.id != int(raw):
+        if not enabled_in(settings, "honeypot") or not raw.isdigit() or message.channel.id != int(raw):
             return False
         author = message.author
         if not isinstance(author, discord.Member) or author.bot:
@@ -115,8 +116,8 @@ class Honeypot(commands.Cog):
     @honeypot.command(name="off", description="Turn the honeypot off.")
     @app_commands.checks.has_permissions(administrator=True)
     async def off(self, interaction: discord.Interaction) -> None:
-        update_guild_settings(self.bot.storage_path, interaction.guild.id, {"honeypot_channel_id": ""})
-        await self.bot.embeds.success_interaction(interaction, "Honeypot Off", "Posting in the old honeypot channel no longer does anything. You can delete the channel.", ephemeral=True)
+        update_guild_settings(self.bot.storage_path, interaction.guild.id, {"honeypot_enabled": False})
+        await self.bot.embeds.success_interaction(interaction, "Honeypot Off", "Posting in the honeypot channel no longer does anything. `/honeypot set` turns it back on.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

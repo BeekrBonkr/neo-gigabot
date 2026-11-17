@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.cases import add_case
+from utils.modules import enabled_in
 from utils.settings import get_guild_settings, get_logging_channel_id, get_mod_log_channel_id
 
 LOGGER = logging.getLogger(__name__)
@@ -95,6 +96,8 @@ class AntiRaid(commands.Cog):
             return
         guild = member.guild
         settings = get_guild_settings(self.bot.storage_path, guild.id)
+        if not enabled_in(settings, "antiraid"):
+            return
         min_days = int(settings.get("antiraid_min_account_age_days", 0) or 0)
         if account_too_new(member.created_at, min_days):
             await self._turn_away(

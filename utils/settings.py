@@ -90,7 +90,57 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "tempvoice_hub_channel_id": "",
     "tempvoice_name": "{name}'s channel",
     "tempvoice_user_limit": 0,
+    # Module switches (utils/modules.py). Features that work from commands are
+    # on by default; features that need setting up start off.
+    "welcome_enabled": False,
+    "member_roles_enabled": False,
+    "moderation_enabled": True,
+    "automod_enabled": False,
+    "raid_protection_enabled": False,
+    "verify_enabled": False,
+    "honeypot_enabled": False,
+    "suggestions_enabled": False,
+    "tempvoice_enabled": False,
+    "starboard_enabled": False,
+    "music_enabled": True,
+    "tags_enabled": True,
+    "stickies_enabled": True,
+    "rolemenus_enabled": True,
+    "reactionroles_enabled": True,
+    "schedules_enabled": True,
 }
+
+# Module switches that start off, and the settings that mean the module is in
+# use. Two jobs: a server saved before the switches existed keeps what it had
+# configured (derive_module_flags), and setting a module up from Discord turns
+# it on (update_guild_settings).
+MODULE_TRIGGERS: dict[str, tuple[str, ...]] = {
+    "welcome_enabled": ("welcome_channel_ids", "welcome_dm_message"),
+    "member_roles_enabled": ("autoroles", "sticky_roles"),
+    "automod_enabled": ("automod_invites_action", "automod_words_action", "automod_mentions_action", "automod_spam_action"),
+    "raid_protection_enabled": ("antiraid_enabled", "antiraid_min_account_age_days"),
+    "verify_enabled": ("verify_role_id",),
+    "honeypot_enabled": ("honeypot_channel_id",),
+    "suggestions_enabled": ("suggestions_channel_id",),
+    "tempvoice_enabled": ("tempvoice_hub_channel_id",),
+    "starboard_enabled": ("starboard_channel_id",),
+}
+
+
+def _in_use(value: Any) -> bool:
+    return value not in ("", "off", 0, False, None) and value != []
+
+
+def derive_module_flags(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill in module switches missing from stored settings: on when the
+    module was already configured, so upgrading never turns a feature off."""
+    missing = [flag for flag in MODULE_TRIGGERS if flag not in data]
+    if not missing:
+        return data
+    derived = dict(data)
+    for flag in missing:
+        derived[flag] = any(_in_use(data.get(key)) for key in MODULE_TRIGGERS[flag])
+    return derived
 
 # How the newer settings are validated when they arrive from the web panel
 # (cogs/panel_bridge.py validate_settings). Declared here, next to the
@@ -329,7 +379,7 @@ def get_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, Any
         _upsert_guild_settings(storage_path, guild_id, defaults)
         return deepcopy(defaults)
 
-    synced = sync_with_default(loaded, defaults)
+    synced = sync_with_default(derive_module_flags(loaded), defaults)
     if synced != loaded:
         _upsert_guild_settings(storage_path, guild_id, synced)
     else:
@@ -351,6 +401,10 @@ def update_guild_settings(
 ) -> dict[str, Any]:
     current = get_guild_settings(storage_path, guild_id)
     updated = apply_patch(current, patch)
+    # Setting a module up (choosing its channel, say) turns it on.
+    for flag, triggers in MODULE_TRIGGERS.items():
+        if flag not in patch and any(_in_use(patch.get(key)) for key in triggers if key in patch):
+            updated[flag] = True
     save_guild_settings(storage_path, guild_id, updated)
     return get_guild_settings(storage_path, guild_id)
 
@@ -366,7 +420,7 @@ def sync_all_guild_settings(storage_path: Path) -> int:
     for row in rows:
         guild_id = int(row["guild_id"])
         loaded = _deserialize(row["data"])
-        synced = sync_with_default(loaded, defaults)
+        synced = sync_with_default(derive_module_flags(loaded), defaults)
         if synced != loaded:
             _upsert_guild_settings(storage_path, guild_id, synced)
             updated_count += 1

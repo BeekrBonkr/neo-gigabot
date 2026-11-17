@@ -18,8 +18,9 @@ from utils.settings import (
     get_mod_log_channel_id,
     is_mod_log_enabled,
     is_mod_log_event_enabled,
-    save_guild_settings,
+    update_guild_settings,
 )
+from utils.modules import enabled_in
 from utils.sticky_roles import pop_roles as pop_sticky_roles
 from utils.sticky_roles import save_roles as save_sticky_roles
 from utils.warnings import add_warning, clear_warnings, count_warnings, list_warnings, remove_warning
@@ -1090,8 +1091,7 @@ class Moderation(commands.Cog):
                 await self.bot.embeds.warning_interaction(interaction, "Already An Autorole", f"{role.mention} is already an autorole.", ephemeral=True)
                 return
             autoroles.append(role.id)
-            settings["autoroles"] = autoroles
-            save_guild_settings(self.bot.storage_path, interaction.guild.id, settings)
+            update_guild_settings(self.bot.storage_path, interaction.guild.id, {"autoroles": autoroles})
             await self.bot.embeds.success_interaction(interaction, "Autorole Added", f"{role.mention} will now be given to new members.", ephemeral=True)
             return
 
@@ -1103,8 +1103,7 @@ class Moderation(commands.Cog):
                 await self.bot.embeds.warning_interaction(interaction, "Not An Autorole", f"{role.mention} isn't currently an autorole.", ephemeral=True)
                 return
             autoroles.remove(role.id)
-            settings["autoroles"] = autoroles
-            save_guild_settings(self.bot.storage_path, interaction.guild.id, settings)
+            update_guild_settings(self.bot.storage_path, interaction.guild.id, {"autoroles": autoroles})
             await self.bot.embeds.success_interaction(interaction, "Autorole Removed", f"{role.mention} will no longer be given to new members.", ephemeral=True)
             return
 
@@ -1204,6 +1203,8 @@ class Moderation(commands.Cog):
             return
 
         settings = get_guild_settings(self.bot.storage_path, member.guild.id)
+        if not enabled_in(settings, "member_roles"):
+            return
         roles_to_add: list[discord.Role] = []
 
         if settings.get("sticky_roles", False):
@@ -1237,7 +1238,7 @@ class Moderation(commands.Cog):
             return
 
         settings = get_guild_settings(self.bot.storage_path, member.guild.id)
-        if not settings.get("sticky_roles", False):
+        if not enabled_in(settings, "member_roles") or not settings.get("sticky_roles", False):
             return
 
         role_ids = [r.id for r in member.roles if not r.is_default() and not r.managed and not self._role_is_elevated(r)]
