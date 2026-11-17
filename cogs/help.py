@@ -40,7 +40,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
         [
             "kick", "ban", "tempban", "unban", "mute", "unmute", "warn", "warnings",
             "purge", "clean", "lock", "unlock", "prune", "role", "autorole",
-            "nick", "poll", "say",
+            "nick", "poll", "say", "modhistory", "note",
         ],
     ),
     ("reactionroles", "🎭", "Reaction Roles", ["reactionrole"]),

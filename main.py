@@ -25,6 +25,7 @@ COGS = [
     "cogs.images",
     "cogs.logging",
     "cogs.moderation",
+    "cogs.cases",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",

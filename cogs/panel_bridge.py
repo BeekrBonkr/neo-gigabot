@@ -35,6 +35,7 @@ from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
+from utils import cases as case_store
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
@@ -1574,9 +1575,21 @@ class PanelBridge(commands.Cog):
         body = await self._json(request)
         admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
         action, target_raw = str(body.get("action", "")), str(body.get("target_id", ""))
+        if action == "remove_note":
+            note_raw = str(body.get("note_id", ""))
+            removed = case_store.remove_note(self.storage, guild.id, int(note_raw)) if note_raw.isdigit() else None
+            if removed is None:
+                raise BridgeError(404, "That note no longer exists.")
+            return web.json_response({"ok": True, "detail": "Removed the note", "before": removed})
         if not target_raw.isdigit():
             raise BridgeError(400, "A member ID is required.")
         target_id = int(target_raw)
+        if action == "add_note":
+            try:
+                note_id = case_store.add_note(self.storage, guild.id, target_id, admin.id, str(body.get("note", "")))
+            except case_store.CaseError as exc:
+                raise BridgeError(400, str(exc)) from exc
+            return web.json_response({"ok": True, "detail": "Saved the note", "note_id": note_id})
         moderation = self.bot.get_cog("Moderation")
 
         async def mod_log(event: str, title: str, target: Any) -> None:

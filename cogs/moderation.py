@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils.cases import add_case
 from utils.durations import parse_duration
 from utils.tempbans import add_tempban, due_tempbans, remove_tempban
 from utils.settings import (
@@ -266,7 +267,17 @@ class Moderation(commands.Cog):
         general audit trail admins opt into per-channel/per-user; this is
         specifically for kick/ban/mute/warn actions, which nothing previously
         recorded anywhere persistent. `event` is the filterable action kind
-        ("warn"/"mute"/"kick"/"ban") admins can toggle from the dashboard."""
+        ("warn"/"mute"/"kick"/"ban") admins can toggle from the dashboard.
+
+        Every action is also recorded as a case first, mod log or not, so a
+        member's history exists even in servers that never set a channel."""
+        try:
+            add_case(
+                self.bot.storage_path, guild.id, target.id, moderator.id,
+                title.lstrip("".join(ch for ch in title if not ch.isascii())).strip() or event, reason, duration,
+            )
+        except Exception:  # noqa: BLE001 - history is a record of the action, never a reason to fail it
+            LOGGER.exception("Could not record a moderation case in guild %s", guild.id)
         if not is_mod_log_enabled(self.bot.storage_path, guild.id):
             return
         if not is_mod_log_event_enabled(self.bot.storage_path, guild.id, event):

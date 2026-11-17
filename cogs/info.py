@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.cases import count_cases
 from utils.warnings import count_warnings
 from utils.website import site_link
 
@@ -129,6 +130,8 @@ class Info(commands.Cog):
         if isinstance(invoker, discord.Member) and invoker.guild_permissions.moderate_members:
             warning_count = count_warnings(self.bot.storage_path, interaction.guild.id, member.id)
             fields.append(self.bot.embeds.field("Warnings", str(warning_count), True))
+            case_count = count_cases(self.bot.storage_path, interaction.guild.id, member.id)
+            fields.append(self.bot.embeds.field("Mod Cases", f"{case_count} (see `/modhistory`)" if case_count else "0", True))
 
         embed = self.bot.embeds.create(
             title=f"User Info - {member.display_name}",
