@@ -112,3 +112,59 @@ def test_pressing_changes_only_roles_the_bot_can_manage(storage, monkeypatch):
     assert added == [2] and "couldn't be changed" in replies[-1]              # role 3 is above the bot
     asyncio.run(cog.handle_press(press(f"{BUTTON_PREFIX}2", message_id=555), f"{BUTTON_PREFIX}2"))
     assert "no longer active" in replies[-1] and added == [2]                  # a deleted menu's old message does nothing
+
+
+def test_the_website_creates_menus_through_the_same_role_checks(storage):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from cogs.panel_bridge import PanelBridge
+
+    sent, deleted = [], []
+
+    class Channel:
+        id, name = 7, "roles"
+
+        def permissions_for(self, me):
+            return SimpleNamespace(view_channel=True, send_messages=True)
+
+        async def send(self, embed=None, view=None):
+            sent.append((embed, [item.custom_id for item in view.children]))
+            return SimpleNamespace(id=900 + len(sent))
+
+        def get_partial_message(self, message_id):
+            async def delete():
+                deleted.append(message_id)
+            return SimpleNamespace(delete=delete)
+
+    roles = {1: Role(1), 2: Role(2), 3: Role(3, ban_members=True)}
+    admin = SimpleNamespace(id=4, guild_permissions=SimpleNamespace(administrator=True), top_role=Role(91, position=15))
+    member = SimpleNamespace(id=5, guild_permissions=SimpleNamespace(administrator=False))
+    guild = SimpleNamespace(id=1, owner_id=99, me=SimpleNamespace(top_role=Role(90, position=20)), get_role=roles.get,
+                            get_channel=lambda cid: Channel() if cid == 7 else None, get_member={4: admin, 5: member}.get)
+    cog = RoleMenus(SimpleNamespace(storage_path=storage))
+    bot = SimpleNamespace(storage_path=storage, guilds=[guild], voice_clients=[], get_guild=lambda gid: guild if gid == 1 else None,
+                          get_cog=lambda name: cog if name == "RoleMenus" else None, embeds=SimpleNamespace(info_embed=lambda title, text: (title, text)))
+    bridge = PanelBridge(bot)
+    bridge._token = "t" * 40
+
+    async def run():
+        async with TestClient(TestServer(bridge.build_app())) as client:
+            async def act(actor, **body):
+                response = await client.post("/v1/guilds/1/rolemenus", headers={"Authorization": "Bearer " + "t" * 40}, json={"user_id": str(actor), **body})
+                return response.status, await response.json()
+
+            new = {"action": "create", "channel_id": "7", "title": "Colors", "style": "dropdown", "mode": "single", "role_ids": ["1", "2", "1"]}
+            assert (await act(5, **new))[0] == 403
+            status, done = await act(4, **new)
+            assert status == 200 and done["detail"] == "Posted a role menu with 2 roles in #roles" and sent[0][1] == ["rolemenu:select"]
+            assert "one of these at a time" in sent[0][0][1] and store.get_by_message(storage, 901)["role_ids"] == [1, 2]
+            refused = await act(4, **{**new, "role_ids": ["3"]})
+            assert refused[0] == 400 and "moderation or admin" in refused[1]["error"]
+            assert (await act(4, **{**new, "role_ids": []}))[0] == 400 and (await act(4, **{**new, "style": "wheel"}))[0] == 400
+            assert (await act(4, **{**new, "channel_id": "8"}))[0] == 400
+            assert len(sent) == 1
+            assert (await act(4, action="delete", id=str(done["id"])))[0] == 200 and deleted == [901]
+            assert (await act(4, action="delete", id=str(done["id"])))[0] == 404
+
+    asyncio.run(run())
+    assert store.list_menus(storage, 1) == []

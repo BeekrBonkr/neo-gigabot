@@ -40,6 +40,7 @@ from utils import cases as case_store
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
+from utils import rolemenus as role_menu_store
 from utils import schedules as schedule_store
 from utils import starboard as starboard_store
 from utils import stickies as sticky_store
@@ -326,6 +327,7 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/guilds/{guild_id}/tags", self.h_tags_action)
         r.add_post("/v1/guilds/{guild_id}/schedules", self.h_schedules_action)
         r.add_post("/v1/guilds/{guild_id}/stickies", self.h_stickies_action)
+        r.add_post("/v1/guilds/{guild_id}/rolemenus", self.h_rolemenus_action)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -1698,6 +1700,57 @@ class PanelBridge(commands.Cog):
                 except discord.HTTPException:
                     pass
             return web.json_response({"ok": True, "detail": f"Removed the sticky in {name}", "before": existing})
+        raise BridgeError(400, "Unknown action.")
+
+    async def h_rolemenus_action(self, request: web.Request) -> web.Response:
+        """Post or delete a role menu, as a server admin. Creating one goes
+        through the same role checks as /rolemenu create."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action = str(body.get("action", ""))
+        cog = self.bot.get_cog("RoleMenus")
+        if cog is None:
+            raise BridgeError(503, "Role menus are not available right now.")
+        if action == "create":
+            from cogs.rolemenus import build_view  # the cog's own components, so presses are handled the same way
+
+            channel = self._postable_channel(guild, str(body.get("channel_id", "")))
+            style, mode = str(body.get("style", "buttons")), str(body.get("mode", "multiple"))
+            title = str(body.get("title", "")).strip()[:200] or "Pick your roles"
+            description = str(body.get("description", "")).strip()[:1000]
+            raw_roles = body.get("role_ids")
+            if style not in role_menu_store.STYLES or mode not in role_menu_store.MODES or not isinstance(raw_roles, list):
+                raise BridgeError(400, "Choose a style, a mode and the roles to offer.")
+            role_ids = list(dict.fromkeys(int(r) for r in raw_roles if str(r).isdigit()))
+            try:
+                if role_menu_store.count_menus(self.storage, guild.id) >= role_menu_store.MAX_MENUS_PER_GUILD:
+                    raise role_menu_store.RoleMenuError(f"This server already has {role_menu_store.MAX_MENUS_PER_GUILD} role menus. Delete one first.")
+                roles = cog._check_roles(guild, admin, role_ids)
+            except role_menu_store.RoleMenuError as exc:
+                raise BridgeError(400, str(exc).replace("`", "")) from exc
+            hint = "Press a button to get a role; press it again to remove it." if style == "buttons" else "Open the menu and pick. Unpick a role to remove it."
+            if mode == "single":
+                hint += " You can have one of these at a time."
+            embed = self.bot.embeds.info_embed(f"🎭 {title}", (description + "\n\n" if description else "") + hint)
+            try:
+                message = await channel.send(embed=embed, view=build_view(roles, style, mode))
+            except discord.HTTPException as exc:
+                raise BridgeError(409, f"Discord refused the message: {exc}") from exc
+            menu_id = role_menu_store.add_menu(self.storage, guild.id, channel.id, message.id, title, style, mode, [r.id for r in roles], admin.id)
+            return web.json_response({"ok": True, "detail": f"Posted a role menu with {len(roles)} role{'s' if len(roles) != 1 else ''} in #{channel.name}", "id": menu_id})
+        if action == "delete":
+            raw = str(body.get("id", ""))
+            menu = role_menu_store.delete_menu(self.storage, guild.id, int(raw)) if raw.isdigit() else None
+            if menu is None:
+                raise BridgeError(404, "That role menu no longer exists.")
+            channel = guild.get_channel(menu["channel_id"])
+            if channel is not None:
+                try:
+                    await channel.get_partial_message(menu["message_id"]).delete()
+                except discord.HTTPException:
+                    pass  # the message is already gone
+            return web.json_response({"ok": True, "detail": "Deleted the role menu", "before": menu})
         raise BridgeError(400, "Unknown action.")
 
     MEMBER_SEARCH_RESULTS = 25
