@@ -56,7 +56,9 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   account age for new members
 - **Verification gate** (`/verification …`): a Verify button that grants a role, with an optional
   minimum account age
-- **Honeypot channel** (`/honeypot …`): anyone who posts in it is banned, softbanned or kicked
+- **Honeypot channel** (`/honeypot create|set|off`): anyone who posts in it is banned, softbanned
+  or kicked. The bot can create the channel itself and keeps a notice in it that counts how many
+  accounts it has caught; chosen users and roles can be exempted
 - **Case history and notes**: every action is recorded (`/modhistory`), with private moderator
   notes (`/note add|remove`)
 - **Ban appeals**: the ban DM links to an appeal form on the website; admins approve or deny there

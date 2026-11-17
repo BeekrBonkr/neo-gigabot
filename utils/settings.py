@@ -72,6 +72,8 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     # Honeypot: a channel nobody should post in. Whoever does is removed.
     "honeypot_channel_id": "",
     "honeypot_action": "ban",
+    "honeypot_exempt_roles": [],
+    "honeypot_exempt_users": [],
     # Ban appeals: banned users can answer these questions on the website.
     "appeals_enabled": False,
     "appeals_questions": "",
@@ -158,7 +160,7 @@ SETTING_CHOICES: dict[str, tuple[str, ...]] = {
 SETTING_COLORS: set[str] = {"welcome_embed_color"}
 SETTING_URLS: set[str] = {"welcome_embed_image_url"}
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
-SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
+SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels", "honeypot_exempt_roles", "honeypot_exempt_users"}
 SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),

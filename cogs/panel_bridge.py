@@ -328,6 +328,7 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/guilds/{guild_id}/schedules", self.h_schedules_action)
         r.add_post("/v1/guilds/{guild_id}/stickies", self.h_stickies_action)
         r.add_post("/v1/guilds/{guild_id}/rolemenus", self.h_rolemenus_action)
+        r.add_post("/v1/guilds/{guild_id}/honeypot", self.h_honeypot_action)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -1679,6 +1680,36 @@ class PanelBridge(commands.Cog):
             if removed is None:
                 raise BridgeError(404, "That scheduled action no longer exists.")
             return web.json_response({"ok": True, "detail": "Cancelled the scheduled action", "before": removed})
+        raise BridgeError(400, "Unknown action.")
+
+    async def h_honeypot_action(self, request: web.Request) -> web.Response:
+        """create: make a honeypot channel and switch the honeypot on for it.
+        notice: post (or re-post) the warning with the count in the current one."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action = str(body.get("action", ""))
+        cog = self.bot.get_cog("Honeypot")
+        if cog is None:
+            raise BridgeError(503, "The honeypot isn't loaded on the bot.")
+        permissions = guild.me.guild_permissions if guild.me else discord.Permissions.none()
+        if action == "create":
+            if not permissions.manage_channels:
+                raise BridgeError(409, "The bot needs the Manage Channels permission to create a channel.")
+            try:
+                channel = await cog.create_channel(guild, str(body.get("name", "")), f"{admin} ({admin.id}) from the website")
+            except discord.HTTPException as exc:
+                raise BridgeError(409, f"Discord refused: {exc}") from exc
+            warning = "" if permissions.ban_members else " The bot still needs the Ban Members permission to remove anyone"
+            return web.json_response({"ok": True, "detail": f"Created #{channel.name} and turned the honeypot on.{warning}", "channel_id": str(channel.id)})
+        if action == "notice":
+            settings = get_guild_settings(self.storage, guild.id)
+            channel = self._postable_channel(guild, str(settings.get("honeypot_channel_id") or ""))
+            try:
+                await cog.post_notice(channel)
+            except discord.HTTPException as exc:
+                raise BridgeError(409, f"Discord refused: {exc}") from exc
+            return web.json_response({"ok": True, "detail": f"Posted the notice in #{channel.name}"})
         raise BridgeError(400, "Unknown action.")
 
     def _postable_channel(self, guild: discord.Guild, raw: str) -> Any:
