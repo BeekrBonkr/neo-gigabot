@@ -69,6 +69,9 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "verify_role_id": "",
     "verify_min_account_age_days": 0,
     "verify_message": "Welcome! Press the button below to get access to the rest of the server.",
+    # Honeypot: a channel nobody should post in. Whoever does is removed.
+    "honeypot_channel_id": "",
+    "honeypot_action": "ban",
 }
 
 # How the newer settings are validated when they arrive from the web panel
@@ -80,10 +83,11 @@ SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "automod_words_action": AUTOMOD_ACTIONS,
     "automod_mentions_action": AUTOMOD_ACTIONS,
     "automod_spam_action": AUTOMOD_ACTIONS,
+    "honeypot_action": ("ban", "softban", "kick"),
 }
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
 SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
-SETTING_IDS: set[str] = {"verify_role_id"}
+SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),
     "automod_spam_limit": (3, 30),

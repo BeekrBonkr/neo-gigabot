@@ -29,6 +29,7 @@ COGS = [
     "cogs.automod",
     "cogs.antiraid",
     "cogs.verification",
+    "cogs.honeypot",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",
