@@ -7,6 +7,7 @@ from typing import Iterable
 import discord
 from discord.ext import commands
 
+from utils.activity_log import record as record_activity
 from utils.settings import get_guild_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -109,6 +110,16 @@ class Logging(commands.Cog):
             ignored_users = {int(u) for u in (settings.get("ignored_users") or [])}
             if int(user_id) in ignored_users:
                 return
+
+        # Keep a copy for the website's log viewer, whether or not a channel is set.
+        try:
+            record_activity(
+                self.bot.storage_path, guild.id, title=embed.title or "Event", description=embed.description or "",
+                fields=[(field.name or "", field.value or "") for field in embed.fields], footer=(embed.footer.text or "") if embed.footer else "",
+                user_id=user_id, channel_id=channel_id, keep_days=int(settings.get("logging_keep_days", 30) or 0),
+            )
+        except Exception:  # noqa: BLE001 - the copy is a convenience; the channel log must still go out
+            LOGGER.exception("Could not store an activity log entry for guild %s", guild.id)
 
         raw_log_channel_id = settings.get("logging_channel_id")
         if not raw_log_channel_id:

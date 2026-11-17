@@ -75,6 +75,8 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     # Ban appeals: banned users can answer these questions on the website.
     "appeals_enabled": False,
     "appeals_questions": "",
+    # How long the website's searchable copy of the activity log is kept. 0 keeps no copy.
+    "logging_keep_days": 30,
 }
 
 # How the newer settings are validated when they arrive from the web panel
@@ -99,6 +101,7 @@ SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "antiraid_lockdown_minutes": (1, 1440),
     "antiraid_min_account_age_days": (0, 365),
     "verify_min_account_age_days": (0, 365),
+    "logging_keep_days": (0, 90),
 }
 # Text settings that may be longer than the usual 1000 characters.
 SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000}
