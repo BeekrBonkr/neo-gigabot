@@ -65,6 +65,10 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "antiraid_window_seconds": 30,
     "antiraid_lockdown_minutes": 10,
     "antiraid_min_account_age_days": 0,
+    # Verification gate: a button that grants a role.
+    "verify_role_id": "",
+    "verify_min_account_age_days": 0,
+    "verify_message": "Welcome! Press the button below to get access to the rest of the server.",
 }
 
 # How the newer settings are validated when they arrive from the web panel
@@ -79,7 +83,7 @@ SETTING_CHOICES: dict[str, tuple[str, ...]] = {
 }
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
 SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
-SETTING_IDS: set[str] = set()
+SETTING_IDS: set[str] = {"verify_role_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),
     "automod_spam_limit": (3, 30),
@@ -87,6 +91,7 @@ SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "antiraid_window_seconds": (5, 600),
     "antiraid_lockdown_minutes": (1, 1440),
     "antiraid_min_account_age_days": (0, 365),
+    "verify_min_account_age_days": (0, 365),
 }
 # Text settings that may be longer than the usual 1000 characters.
 SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000}

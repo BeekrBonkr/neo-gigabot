@@ -28,6 +28,7 @@ COGS = [
     "cogs.cases",
     "cogs.automod",
     "cogs.antiraid",
+    "cogs.verification",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",
