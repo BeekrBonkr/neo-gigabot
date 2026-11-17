@@ -35,6 +35,7 @@ from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
+from utils import appeals as appeal_store
 from utils import cases as case_store
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
@@ -47,7 +48,9 @@ from utils.db import connect
 from utils.discord_links import parse_message_link
 from utils.durations import parse_duration
 from utils.newsletter_sender import NewsletterSender, NewsletterView, ResubscribeView, collect_recipients
+from utils.website import site_link
 from utils.settings import (
+    get_mod_log_channel_id,
     SETTING_CHOICES,
     SETTING_DURATIONS,
     SETTING_ID_LISTS,
@@ -310,6 +313,8 @@ class PanelBridge(commands.Cog):
         r.add_get("/v1/guilds/{guild_id}/music/events", self.h_guild_music_events)
         r.add_get("/v1/guilds/{guild_id}/moderation", self.h_moderation)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
+        r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
+        r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
         r.add_post("/v1/guilds/{guild_id}/music/action", self.h_music_action)
         r.add_get("/v1/commands", self.h_commands)
         r.add_post("/v1/users/resolve", self.h_users_resolve)
@@ -1579,6 +1584,99 @@ class PanelBridge(commands.Cog):
             "bot_can_unban": bool(permissions and permissions.ban_members),
         })
 
+    # ---------- ban appeals ----------
+
+    async def _appeal_context(self, request: web.Request, user_id: int) -> tuple[discord.Guild, dict[str, Any]]:
+        """The server and its settings, for a user who is banned there. Anyone
+        else gets the same 404 as for a server that doesn't exist or doesn't
+        take appeals, so the form can't be used to look servers up."""
+        raw = request.match_info["guild_id"]
+        guild = self.bot.get_guild(int(raw)) if raw.isdigit() else None
+        settings = get_guild_settings(self.storage, guild.id) if guild else {}
+        if guild is None or not settings.get("appeals_enabled"):
+            raise BridgeError(404, "This server isn't taking appeals.")
+        try:
+            await guild.fetch_ban(discord.Object(id=user_id))
+        except discord.NotFound:
+            raise BridgeError(404, "This server isn't taking appeals.") from None
+        except discord.HTTPException as exc:
+            raise BridgeError(409, "The bot can't read this server's ban list right now.") from exc
+        return guild, settings
+
+    async def h_appeal_form(self, request: web.Request) -> web.Response:
+        user_id = self._user_id(request, request.query.get("user_id", ""))
+        guild, settings = await self._appeal_context(request, user_id)
+        latest = appeal_store.latest_appeal(self.storage, guild.id, user_id)
+        allowed, why = appeal_store.can_appeal(latest)
+        return web.json_response({
+            "guild": {"id": str(guild.id), "name": guild.name, "icon": _asset_url(guild.icon)},
+            "questions": appeal_store.questions_for(settings),
+            "can_appeal": allowed, "reason": why,
+            "latest": {"status": latest["status"], "created_at": latest["created_at"], "decision_note": latest["decision_note"]} if latest else None,
+            "limits": {"answer": appeal_store.MAX_ANSWER_LENGTH},
+        })
+
+    async def h_appeal_submit(self, request: web.Request) -> web.Response:
+        body = await self._json(request)
+        user_id = self._user_id(request, str(body.get("user_id", "")))
+        guild, settings = await self._appeal_context(request, user_id)
+        answers = body.get("answers")
+        if not isinstance(answers, list):
+            raise BridgeError(400, "Answers are required.")
+        try:
+            appeal_id = appeal_store.submit(self.storage, guild.id, user_id, str(body.get("user_name", "")),
+                                            appeal_store.questions_for(settings), [str(a) for a in answers])
+        except appeal_store.AppealError as exc:
+            raise BridgeError(409, str(exc)) from exc
+        # Let the moderators know there is something to read.
+        channel_id = get_mod_log_channel_id(self.storage, guild.id)
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel is not None:
+            where = site_link(self.bot, "Review it on the website", f"/app/{guild.id}/moderation#appeals") or "Review it on the website's Moderation tab"
+            try:
+                await channel.send(embed=self.bot.embeds.info_embed("📨 New Ban Appeal", f"<@{user_id}> (`{user_id}`) appealed their ban. {where}."))
+            except discord.HTTPException:
+                pass
+        return web.json_response({"ok": True, "appeal_id": appeal_id})
+
+    async def _decide_appeal(self, guild: discord.Guild, admin: discord.Member, approved: bool, appeal_raw: str, note: str, mod_log) -> web.Response:
+        if not appeal_raw.isdigit():
+            raise BridgeError(400, "An appeal ID is required.")
+        appeal_store.ensure_table(self.storage)
+        if approved:
+            # Unban first: if Discord refuses, the appeal stays open instead of
+            # reading "approved" while the user is still banned.
+            with connect(self.storage) as connection:
+                row = connection.execute("SELECT user_id FROM ban_appeals WHERE id = ? AND guild_id = ? AND status = 'pending'",
+                                         (int(appeal_raw), guild.id)).fetchone()
+            if row is None:
+                raise BridgeError(404, "That appeal was already decided.")
+            try:
+                await guild.unban(discord.Object(id=int(row["user_id"])), reason=f"Ban appeal approved by {admin} ({admin.id})")
+            except discord.NotFound:
+                pass  # already unbanned by hand
+            except discord.HTTPException as exc:
+                raise BridgeError(409, f"Discord refused the unban: {exc}") from exc
+            tempban_store.remove_tempban(self.storage, guild.id, int(row["user_id"]))
+        decided = appeal_store.decide(self.storage, guild.id, int(appeal_raw), approved, admin.id, note)
+        if decided is None:
+            raise BridgeError(404, "That appeal was already decided.")
+        target = self.bot.get_user(decided["user_id"])
+        if target is None:
+            try:
+                target = await self.bot.fetch_user(decided["user_id"])
+            except discord.HTTPException:
+                target = None
+        await mod_log("ban", "🔓 Ban Appeal Approved" if approved else "📪 Ban Appeal Denied", target)
+        if target is not None:
+            text = (f"Your ban appeal for **{guild.name}** was approved. You can rejoin the server." if approved
+                    else f"Your ban appeal for **{guild.name}** was denied.") + (f"\nNote from the moderators: {decided['decision_note']}" if decided["decision_note"] else "")
+            try:
+                await target.send(embed=self.bot.embeds.info_embed("Ban Appeal", text))
+            except discord.HTTPException:
+                pass  # they share no server with the bot, or have DMs closed
+        return web.json_response({"ok": True, "detail": "Approved the appeal and unbanned the user" if approved else "Denied the appeal", "before": decided})
+
     async def h_moderation_action(self, request: web.Request) -> web.Response:
         """unmute (lift a timeout) or clear_warnings (all of one member's), by a
         server admin. Both are reported to the mod log like the commands."""
@@ -1586,6 +1684,21 @@ class PanelBridge(commands.Cog):
         body = await self._json(request)
         admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
         action, target_raw = str(body.get("action", "")), str(body.get("target_id", ""))
+        moderation = self.bot.get_cog("Moderation")
+
+        async def mod_log(event: str, title: str, target: Any) -> None:
+            if moderation is None or target is None:
+                return
+            try:
+                await moderation._log_mod_action(
+                    guild, event=event, title=title, color=self.bot.embeds.success_color,
+                    target=target, moderator=admin, reason=str(body.get("note") or "From the web panel"),
+                )
+            except Exception:  # noqa: BLE001 - the action already happened; a failed log entry mustn't undo that
+                log.exception("Could not write a mod-log entry for a panel action")
+
+        if action in ("approve_appeal", "deny_appeal"):
+            return await self._decide_appeal(guild, admin, action == "approve_appeal", str(body.get("appeal_id", "")), str(body.get("note", "")), mod_log)
         if action == "remove_note":
             note_raw = str(body.get("note_id", ""))
             removed = case_store.remove_note(self.storage, guild.id, int(note_raw)) if note_raw.isdigit() else None
@@ -1601,19 +1714,6 @@ class PanelBridge(commands.Cog):
             except case_store.CaseError as exc:
                 raise BridgeError(400, str(exc)) from exc
             return web.json_response({"ok": True, "detail": "Saved the note", "note_id": note_id})
-        moderation = self.bot.get_cog("Moderation")
-
-        async def mod_log(event: str, title: str, target: Any) -> None:
-            if moderation is None or target is None:
-                return
-            try:
-                await moderation._log_mod_action(
-                    guild, event=event, title=title, color=self.bot.embeds.success_color,
-                    target=target, moderator=admin, reason="From the web panel",
-                )
-            except Exception:  # noqa: BLE001 - the action already happened; a failed log entry mustn't undo that
-                log.exception("Could not write a mod-log entry for a panel action")
-
         if action == "unmute":
             member = guild.get_member(target_id)
             if member is None:

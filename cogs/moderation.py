@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.cases import add_case
+from utils.website import site_link
 from utils.durations import parse_duration
 from utils.tempbans import add_tempban, due_tempbans, remove_tempban
 from utils.settings import (
@@ -264,6 +265,13 @@ class Moderation(commands.Cog):
             return False
         return interaction.user.top_role > target.top_role
 
+    def _appeal_note(self, guild: discord.Guild) -> str:
+        """A line for ban DMs pointing at the appeal form, when this server
+        takes appeals and the bot has a website to host the form."""
+        settings = get_guild_settings(self.bot.storage_path, guild.id)
+        link = site_link(self.bot, "Appeal this ban", f"/appeal/{guild.id}")
+        return f"\n\nIf you think this was a mistake: {link}." if settings.get("appeals_enabled") and link else ""
+
     async def _try_dm(self, user: discord.abc.User, embed: discord.Embed, *, guild_id: int | None = None) -> None:
         # Guild-scoped DMs (kick/ban/mute/warn notices) can be turned off per
         # guild; pass no guild_id for DMs that aren't moderation notices.
@@ -478,7 +486,10 @@ class Moderation(commands.Cog):
 
         await self._try_dm(
             user,
-            self.bot.embeds.error_embed("You Were Banned", f"You were banned from **{interaction.guild.name}**.\nReason: {reason or 'No reason provided.'}"),
+            self.bot.embeds.error_embed(
+                "You Were Banned",
+                f"You were banned from **{interaction.guild.name}**.\nReason: {reason or 'No reason provided.'}" + self._appeal_note(interaction.guild),
+            ),
             guild_id=interaction.guild.id,
         )
 
@@ -541,7 +552,7 @@ class Moderation(commands.Cog):
             self.bot.embeds.error_embed(
                 "You Were Banned",
                 f"You were banned from **{interaction.guild.name}** until {discord.utils.format_dt(unban_at, 'F')}.\n"
-                f"Reason: {reason or 'No reason provided.'}",
+                f"Reason: {reason or 'No reason provided.'}" + self._appeal_note(interaction.guild),
             ),
             guild_id=interaction.guild.id,
         )

@@ -72,6 +72,9 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     # Honeypot: a channel nobody should post in. Whoever does is removed.
     "honeypot_channel_id": "",
     "honeypot_action": "ban",
+    # Ban appeals: banned users can answer these questions on the website.
+    "appeals_enabled": False,
+    "appeals_questions": "",
 }
 
 # How the newer settings are validated when they arrive from the web panel
