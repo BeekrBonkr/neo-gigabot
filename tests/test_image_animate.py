@@ -1,0 +1,96 @@
+import io
+
+import pytest
+from PIL import Image
+
+from utils import image_animate as an
+from utils.imaging import Frames, encode_frames, load_frames
+
+
+def still(size=(60, 40)) -> Frames:
+    image = Image.new("RGBA", size, (200, 40, 40, 255))
+    image.paste((40, 40, 200, 255), (0, 0, size[0] // 2, size[1]))
+    return Frames([image], [100])
+
+
+def moving(count=6, durations=None) -> Frames:
+    frames = [Image.new("RGBA", (30, 20), (index * 40, 100, 200, 255)) for index in range(count)]
+    return Frames(frames, durations or [100] * count, animated=True)
+
+
+@pytest.mark.parametrize("build", [an.spin, an.rainbow, an.wave, an.zoom])
+def test_stills_become_a_loop_and_gifs_keep_their_frames(build):
+    frames, durations = build(still())
+    assert len(frames) == len(durations) == an.STILL_FRAMES and all(frame.mode == "RGBA" for frame in frames)
+    assert len({frame.tobytes() for frame in frames}) > 1  # it really moves
+    frames, durations = build(moving(durations=[30, 40, 50, 60, 70, 80]))
+    assert len(frames) == 6 and durations == [30, 40, 50, 60, 70, 80]
+
+
+def test_spin_is_a_circle_that_turns_the_asked_way():
+    clockwise, _ = an.spin(still((40, 40)), 50, True)
+    counter, _ = an.spin(still((40, 40)), 50, False)
+    assert clockwise[0].size == (40, 40) and clockwise[0].getpixel((0, 0))[3] == 0 and clockwise[0].getpixel((20, 20))[3] == 255
+    assert clockwise[3].tobytes() != counter[3].tobytes()
+    assert clockwise[3].tobytes() == counter[an.STILL_FRAMES - 3].tobytes()
+
+
+def test_pet_and_bonk_build_a_fixed_animation_around_the_picture():
+    frames, durations = an.pet(still(), 40)
+    assert len(frames) == an.PET_FRAMES and frames[0].size == (an.PET_SIZE, an.PET_SIZE) and set(durations) == {40}
+    frames, durations = an.bonk(still(), 50)
+    assert len(frames) == len(an.BONK_ANGLES) and frames[0].size == an.BONK_CANVAS
+    assert max(durations) == 200 and durations.count(200) == 1  # the hit is held
+    data, name = encode_frames(frames, durations, "bonk")
+    result = Image.open(io.BytesIO(data))
+    total = 0
+    for index in range(result.n_frames):
+        result.seek(index)
+        total += result.info["duration"]
+    # the encoder merges frames that are identical (the held hit), keeping the loop's length
+    assert name == "bonk.gif" and 6 <= result.n_frames <= len(an.BONK_ANGLES) and total == sum(durations)
+
+
+def test_speed_scales_timing_and_drops_frames_it_cannot_show():
+    frames, durations = an.speed(moving(), 2.0)
+    assert len(frames) == 6 and durations == [50] * 6
+    frames, durations = an.speed(moving(), 0.5)
+    assert durations == [200] * 6
+    frames, durations = an.speed(moving(count=12, durations=[40] * 12), 8.0)  # 5ms frames: below what a GIF can show
+    assert len(frames) == 3 and durations == [20, 20, 20] and sum(durations) == 60  # the loop is still 8 times as fast
+    with pytest.raises(ValueError, match="single frame"):
+        an.speed(moving(count=2, durations=[20, 20]), 10.0)
+
+
+def test_gif_tools_refuse_stills_with_a_reason():
+    for call in (lambda: an.speed(still(), 2.0), lambda: an.reverse(still()), lambda: an.pick_frame(still(), 1)):
+        with pytest.raises(ValueError, match="needs a GIF"):
+            call()
+
+
+def test_reverse_and_pick_frame():
+    source = moving(durations=[10, 20, 30, 40, 50, 60])
+    frames, durations = an.reverse(source)
+    assert durations == [60, 50, 40, 30, 20, 10] and frames[0] is source.frames[-1]
+    frame, summary = an.pick_frame(source, 2)
+    assert frame is source.frames[1] and summary == "Frame 2 of 6 · 30x20 · 0.2s per loop"
+    with pytest.raises(ValueError, match="6 frames"):
+        an.pick_frame(source, 7)
+
+
+def test_join_fits_every_picture_on_the_first_ones_canvas():
+    wide = Image.new("RGBA", (80, 20), (0, 255, 0, 255))
+    frames, durations = an.join([still().frames[0], wide], 300)
+    assert [frame.size for frame in frames] == [(60, 40), (60, 40)] and durations == [300, 300]
+    assert frames[1].getpixel((30, 20))[1] == 255 and frames[1].getpixel((30, 2))[3] == 0  # letterboxed, not stretched
+
+
+def test_a_real_gif_round_trips_through_the_tools():
+    buffer = io.BytesIO()
+    source = moving()
+    source.frames[0].save(buffer, format="GIF", save_all=True, append_images=source.frames[1:], duration=[30, 40, 50, 60, 70, 80], loop=0)
+    loaded = load_frames(buffer.getvalue(), "a.gif")
+    frames, durations = an.reverse(loaded)
+    data, name = encode_frames(frames, durations, "reverse")
+    result = Image.open(io.BytesIO(data))
+    assert name == "reverse.gif" and result.n_frames == 6 and result.info["duration"] == 80

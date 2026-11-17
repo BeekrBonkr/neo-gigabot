@@ -40,6 +40,8 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - **Content-aware scale** (seam carving), GIF-aware — effects apply to every frame
 - **Color filters** (`/filter …`): invert, grayscale, sepia, hue, adjust (brightness, contrast, saturation),
   posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
+- **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet and bonk (on an image or a member's avatar),
+  plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,

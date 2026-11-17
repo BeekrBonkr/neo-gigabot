@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import io
 import itertools
 import logging
@@ -8,14 +9,14 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageEnhance, ImageSequence
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageSequence
 
 from utils.discord_links import fetch_message_from_link
 
@@ -64,6 +65,54 @@ SNARK_LINES = (
     "I see we're doing a lot of this today. Cool, cool, cool, no rush on my end at all.",
     "Another one already? I'm flattered, but also tired.",
 )
+
+
+FONTS_DIR = Path(__file__).resolve().parents[1] / "assets" / "fonts"
+
+
+@functools.lru_cache(maxsize=64)
+def load_font(name: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """A font from assets/fonts ("impact.ttf", "arial.ttf") at a pixel size,
+    or Pillow's built-in font if the file is missing."""
+    try:
+        return ImageFont.truetype(str(FONTS_DIR / name), size)
+    except OSError:
+        return ImageFont.load_default(size)
+
+
+def fit_text(text: str, font_name: str, max_width: int, max_height: int, *, max_size: int = 200, min_size: int = 10,
+             spacing: int = 4) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, str]:
+    """The largest font size at which `text`, wrapped on spaces, fits the box.
+    Returns the font and the text with line breaks put in."""
+    probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+
+    def wrap(font) -> str:
+        lines: list[str] = []
+        for paragraph in text.split("\n"):
+            line = ""
+            for word in paragraph.split():
+                candidate = f"{line} {word}".strip()
+                if line and probe.textlength(candidate, font=font) > max_width:
+                    lines.append(line)
+                    line = word
+                else:
+                    line = candidate
+            lines.append(line)
+        return "\n".join(lines)
+
+    low, high = min_size, max_size
+    best = (load_font(font_name, min_size), wrap(load_font(font_name, min_size)))
+    while low <= high:  # binary search over the size
+        size = (low + high) // 2
+        font = load_font(font_name, size)
+        wrapped = wrap(font)
+        left, top, right, bottom = probe.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing)
+        if right - left <= max_width and bottom - top <= max_height:
+            best = (font, wrapped)
+            low = size + 1
+        else:
+            high = size - 1
+    return best
 
 
 @dataclass(slots=True)
@@ -216,18 +265,20 @@ class ImageToolkit:
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
         extra_sources: list[tuple[discord.Attachment | None, str | None]] | None = None,
+        source: Callable[[], Awaitable[tuple[bytes, str]]] | None = None,
     ) -> None:
         """The whole life of a simple image command: the blocked-command check,
         finding the source image, running `work(image_bytes, filename, *extras)`
         off the event loop, and sending the file or a readable error. `work`
         returns (data, filename) or (data, filename, description). Each entry of
-        `extra_sources` is another image to fetch and pass along as bytes."""
+        `extra_sources` is another image to fetch and pass along as bytes, and
+        `source` replaces the usual search for the main image (an avatar, say)."""
         if not await self.ensure_command_allowed(interaction, command_name):
             return
         await self.note_heavy_command(interaction, command_name)
         await self.defer(interaction)
         try:
-            image_bytes, filename = await self.get_source_image(interaction, attachment, message_link)
+            image_bytes, filename = await (source() if source else self.get_source_image(interaction, attachment, message_link))
             extras = [(await self.get_source_image(interaction, extra, link))[0] for extra, link in extra_sources or []]
             result = await self.run_cpu_bound(lambda: work(image_bytes, filename, *extras))
             data, out_name = result[0], result[1]

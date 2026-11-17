@@ -26,6 +26,7 @@ COGS = [
     "cogs.fun",
     "cogs.images",
     "cogs.image_filters",
+    "cogs.image_animate",
     "cogs.logging",
     "cogs.moderation",
     "cogs.cases",
