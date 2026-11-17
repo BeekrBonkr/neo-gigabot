@@ -28,6 +28,11 @@ def build_view(roles: list[discord.Role], style: str, mode: str) -> discord.ui.V
     return view
 
 
+def menu_hint(style: str, mode: str) -> str:
+    hint = "Press a button to get a role; press it again to remove it." if style == "buttons" else "Open the menu and pick. Unpick a role to remove it."
+    return hint + (" You can have one of these at a time." if mode == "single" else "")
+
+
 class RoleMenus(commands.Cog):
     """Messages with buttons or a dropdown that members press to give
     themselves roles, with an optional "only one of these" mode."""
@@ -89,19 +94,83 @@ class RoleMenus(commands.Cog):
         except store.RoleMenuError as exc:
             await self.bot.embeds.error_interaction(interaction, "Role Menu Not Created", str(exc), ephemeral=True)
             return
-        hint = "Press a button to get a role; press it again to remove it." if style_value == "buttons" else "Open the menu and pick. Unpick a role to remove it."
-        if mode_value == "single":
-            hint += " You can have one of these at a time."
-        embed = self.bot.embeds.info_embed(f"🎭 {title}", (description + "\n\n" if description else "") + hint)
         try:
-            message = await target.send(embed=embed, view=build_view(chosen, style_value, mode_value))
+            message = await target.send(embed=self.menu_embed(title, description or "", style_value, mode_value), view=build_view(chosen, style_value, mode_value))
         except (discord.HTTPException, AttributeError):
             await self.bot.embeds.error_interaction(interaction, "Could Not Post", "I can't send messages in that channel.", ephemeral=True)
             return
         menu_id = store.add_menu(self.bot.storage_path, interaction.guild.id, target.id, message.id, title, style_value, mode_value,
-                                 [role.id for role in chosen], interaction.user.id)
+                                 [role.id for role in chosen], interaction.user.id, description or "")
         await self.bot.embeds.success_interaction(
             interaction, "Role Menu Posted", f"Menu `#{menu_id}` with {len(chosen)} role(s) is up in {target.mention}: {message.jump_url}", ephemeral=True
+        )
+
+    def menu_embed(self, title: str, description: str, style: str, mode: str) -> discord.Embed:
+        return self.bot.embeds.info_embed(f"🎭 {title}", (description + "\n\n" if description else "") + menu_hint(style, mode))
+
+    async def apply_edit(self, guild: discord.Guild, editor: discord.Member, menu_id: int, *, title: str | None = None, description: str | None = None,
+                         style: str | None = None, mode: str | None = None, role_ids: list[int] | None = None) -> dict:
+        """Change an existing menu in place: its message is edited, so members
+        keep the roles they picked and the link to it stays valid. Anything
+        left as None is kept. Raises RoleMenuError with a message for the admin."""
+        menu = store.get_menu(self.bot.storage_path, guild.id, menu_id)
+        if menu is None:
+            raise store.RoleMenuError("There is no role menu with that number here.")
+        new = {
+            "title": (title if title is not None else menu["title"]).strip()[:200] or menu["title"],
+            "description": (description if description is not None else menu.get("description") or "").strip()[:1000],
+            "style": style or menu["style"], "mode": mode or menu["mode"],
+            "role_ids": list(role_ids) if role_ids is not None else menu["role_ids"],
+        }
+        if new["style"] not in store.STYLES or new["mode"] not in store.MODES:
+            raise store.RoleMenuError("Choose buttons or dropdown, and any-number or one-at-a-time.")
+        if role_ids is None:
+            # Roles deleted since the menu was made are dropped rather than blocking the edit.
+            new["role_ids"] = [r for r in new["role_ids"] if guild.get_role(r) is not None]
+        roles = self._check_roles(guild, editor, new["role_ids"])
+        channel = guild.get_channel(menu["channel_id"])
+        if channel is None:
+            raise store.RoleMenuError("The channel this menu was posted in no longer exists. Delete the menu and post a new one.")
+        try:
+            await channel.get_partial_message(menu["message_id"]).edit(
+                embed=self.menu_embed(new["title"], new["description"], new["style"], new["mode"]), view=build_view(roles, new["style"], new["mode"]))
+        except discord.NotFound:
+            raise store.RoleMenuError("The menu's message was deleted in Discord. Delete the menu and post a new one.") from None
+        except discord.HTTPException as exc:
+            raise store.RoleMenuError(f"Discord refused the edit: {exc}") from exc
+        store.update_menu(self.bot.storage_path, guild.id, menu_id, **new)
+        return {**menu, **new}
+
+    @rolemenu.command(name="edit", description="Change a role menu in place. Leave an option out to keep it as it is.")
+    @app_commands.describe(
+        menu_id="The menu's number, shown in /rolemenu list",
+        roles="The full new list of roles: mention them, like @Red @Blue @Green",
+        title="New heading", description="New text under the heading (type none to clear it)",
+        style="Buttons or a dropdown", mode="Whether members can hold several of these roles or only one",
+    )
+    @app_commands.choices(
+        style=[app_commands.Choice(name="Buttons", value="buttons"), app_commands.Choice(name="Dropdown", value="dropdown")],
+        mode=[app_commands.Choice(name="Any number of these roles", value="multiple"), app_commands.Choice(name="Only one of these roles", value="single")],
+    )
+    @app_commands.checks.has_permissions(manage_roles=True)
+    @app_commands.checks.bot_has_permissions(manage_roles=True)
+    async def edit(self, interaction: discord.Interaction, menu_id: int, roles: str | None = None, title: app_commands.Range[str, 1, 200] | None = None,
+                   description: app_commands.Range[str, 1, 1000] | None = None, style: app_commands.Choice[str] | None = None,
+                   mode: app_commands.Choice[str] | None = None) -> None:
+        if description is not None and description.strip().lower() == "none":
+            description = ""
+        try:
+            menu = await self.apply_edit(
+                interaction.guild, interaction.user, menu_id, title=title, description=description, style=style.value if style else None,
+                mode=mode.value if mode else None, role_ids=store.parse_role_ids(roles) if roles is not None else None,
+            )
+        except store.RoleMenuError as exc:
+            await self.bot.embeds.error_interaction(interaction, "Role Menu Not Changed", str(exc), ephemeral=True)
+            return
+        await self.bot.embeds.success_interaction(
+            interaction, "Role Menu Updated",
+            f"Menu `#{menu_id}` now offers {len(menu['role_ids'])} role(s) as {menu['style']}. Members keep the roles they already picked, "
+            "including any you removed from the menu.", ephemeral=True,
         )
 
     @rolemenu.command(name="list", description="List this server's role menus.")

@@ -1729,16 +1729,26 @@ class PanelBridge(commands.Cog):
                 roles = cog._check_roles(guild, admin, role_ids)
             except role_menu_store.RoleMenuError as exc:
                 raise BridgeError(400, str(exc).replace("`", "")) from exc
-            hint = "Press a button to get a role; press it again to remove it." if style == "buttons" else "Open the menu and pick. Unpick a role to remove it."
-            if mode == "single":
-                hint += " You can have one of these at a time."
-            embed = self.bot.embeds.info_embed(f"🎭 {title}", (description + "\n\n" if description else "") + hint)
             try:
-                message = await channel.send(embed=embed, view=build_view(roles, style, mode))
+                message = await channel.send(embed=cog.menu_embed(title, description, style, mode), view=build_view(roles, style, mode))
             except discord.HTTPException as exc:
                 raise BridgeError(409, f"Discord refused the message: {exc}") from exc
-            menu_id = role_menu_store.add_menu(self.storage, guild.id, channel.id, message.id, title, style, mode, [r.id for r in roles], admin.id)
+            menu_id = role_menu_store.add_menu(self.storage, guild.id, channel.id, message.id, title, style, mode, [r.id for r in roles], admin.id, description)
             return web.json_response({"ok": True, "detail": f"Posted a role menu with {len(roles)} role{'s' if len(roles) != 1 else ''} in #{channel.name}", "id": menu_id})
+        if action == "edit":
+            raw, raw_roles = str(body.get("id", "")), body.get("role_ids")
+            if not raw.isdigit() or not isinstance(raw_roles, list):
+                raise BridgeError(400, "Choose the roles to offer.")
+            before = role_menu_store.get_menu(self.storage, guild.id, int(raw))
+            try:
+                menu = await cog.apply_edit(
+                    guild, admin, int(raw), title=str(body.get("title", "")), description=str(body.get("description", "")),
+                    style=str(body.get("style", "")), mode=str(body.get("mode", "")),
+                    role_ids=list(dict.fromkeys(int(r) for r in raw_roles if str(r).isdigit())),
+                )
+            except role_menu_store.RoleMenuError as exc:
+                raise BridgeError(404 if before is None else 400, str(exc).replace("`", "")) from exc
+            return web.json_response({"ok": True, "detail": f"Updated the role menu {menu['title']}", "before": before})
         if action == "delete":
             raw = str(body.get("id", ""))
             menu = role_menu_store.delete_menu(self.storage, guild.id, int(raw)) if raw.isdigit() else None

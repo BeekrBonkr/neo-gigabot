@@ -134,14 +134,21 @@ def test_the_website_creates_menus_through_the_same_role_checks(storage):
         def get_partial_message(self, message_id):
             async def delete():
                 deleted.append(message_id)
-            return SimpleNamespace(delete=delete)
 
+            async def edit(embed=None, view=None):
+                if gone:
+                    raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "unknown message")
+                edits.append((message_id, embed[0], [item.custom_id for item in view.children]))
+
+            return SimpleNamespace(delete=delete, edit=edit)
+
+    edits, gone = [], []
     roles = {1: Role(1), 2: Role(2), 3: Role(3, ban_members=True)}
     admin = SimpleNamespace(id=4, guild_permissions=SimpleNamespace(administrator=True), top_role=Role(91, position=15))
     member = SimpleNamespace(id=5, guild_permissions=SimpleNamespace(administrator=False))
     guild = SimpleNamespace(id=1, owner_id=99, me=SimpleNamespace(top_role=Role(90, position=20)), get_role=roles.get,
                             get_channel=lambda cid: Channel() if cid == 7 else None, get_member={4: admin, 5: member}.get)
-    cog = RoleMenus(SimpleNamespace(storage_path=storage))
+    cog = RoleMenus(SimpleNamespace(storage_path=storage, embeds=SimpleNamespace(info_embed=lambda title, text: (title, text))))
     bot = SimpleNamespace(storage_path=storage, guilds=[guild], voice_clients=[], get_guild=lambda gid: guild if gid == 1 else None,
                           get_cog=lambda name: cog if name == "RoleMenus" else None, embeds=SimpleNamespace(info_embed=lambda title, text: (title, text)))
     bridge = PanelBridge(bot)
@@ -163,8 +170,58 @@ def test_the_website_creates_menus_through_the_same_role_checks(storage):
             assert (await act(4, **{**new, "role_ids": []}))[0] == 400 and (await act(4, **{**new, "style": "wheel"}))[0] == 400
             assert (await act(4, **{**new, "channel_id": "8"}))[0] == 400
             assert len(sent) == 1
+            # Editing changes the same message in place.
+            change = {"action": "edit", "id": str(done["id"]), "title": "Team colors", "description": "new text", "style": "buttons", "mode": "multiple", "role_ids": ["2"]}
+            assert (await act(5, **change))[0] == 403
+            status, edited = await act(4, **change)
+            assert status == 200 and edited["detail"] == "Updated the role menu Team colors" and edited["before"]["role_ids"] == [1, 2]
+            assert edits[-1] == (901, "🎭 Team colors", ["rolemenu:btn:2"]) and len(sent) == 1
+            saved = store.get_by_message(storage, 901)
+            assert (saved["title"], saved["description"], saved["style"], saved["mode"], saved["role_ids"]) == ("Team colors", "new text", "buttons", "multiple", [2])
+            assert (await act(4, **{**change, "role_ids": ["3"]}))[0] == 400 and (await act(4, **{**change, "role_ids": []}))[0] == 400
+            assert (await act(4, **{**change, "id": "999"}))[0] == 404
+            assert store.get_by_message(storage, 901)["role_ids"] == [2]      # a refused edit changes nothing
+            gone.append(True)                                                 # the message was deleted in Discord
+            lost = await act(4, **change)
+            assert lost[0] == 400 and "was deleted in Discord" in lost[1]["error"]
             assert (await act(4, action="delete", id=str(done["id"])))[0] == 200 and deleted == [901]
             assert (await act(4, action="delete", id=str(done["id"])))[0] == 404
 
     asyncio.run(run())
     assert store.list_menus(storage, 1) == []
+
+
+def test_editing_keeps_what_is_left_out_and_drops_roles_that_no_longer_exist(storage):
+    edits = []
+
+    class Channel:
+        def get_partial_message(self, message_id):
+            async def edit(embed=None, view=None):
+                edits.append((embed, [item.custom_id for item in view.children]))
+            return SimpleNamespace(edit=edit)
+
+    roles = {1: Role(1), 2: Role(2)}
+    guild = SimpleNamespace(id=1, owner_id=999, get_role=roles.get, me=SimpleNamespace(top_role=Role(90, position=20)), get_channel=lambda cid: Channel())
+    editor = SimpleNamespace(id=10, top_role=Role(91, position=15))
+    cog = RoleMenus(SimpleNamespace(storage_path=storage, embeds=SimpleNamespace(info_embed=lambda title, text: (title, text))))
+    menu_id = store.add_menu(storage, 1, 7, 900, "Colors", "buttons", "single", [1, 2, 404], 9, "pick one")
+    menu = asyncio.run(cog.apply_edit(guild, editor, menu_id, title="Shades"))
+    assert (menu["title"], menu["description"], menu["style"], menu["mode"], menu["role_ids"]) == ("Shades", "pick one", "buttons", "single", [1, 2])
+    assert edits[-1][0][0] == "🎭 Shades" and "pick one" in edits[-1][0][1] and "one of these at a time" in edits[-1][0][1]
+    asyncio.run(cog.apply_edit(guild, editor, menu_id, description="", style="dropdown"))
+    assert edits[-1][1] == ["rolemenu:select"] and store.get_menu(storage, 1, menu_id)["description"] == ""
+    with pytest.raises(store.RoleMenuError, match="no role menu"):
+        asyncio.run(cog.apply_edit(guild, editor, menu_id + 50, title="x"))
+    with pytest.raises(store.RoleMenuError, match="no role menu"):
+        asyncio.run(cog.apply_edit(SimpleNamespace(id=2), editor, menu_id, title="x"))   # another server's menu
+
+
+def test_an_older_table_without_descriptions_is_upgraded(storage):
+    from utils.db import connect
+
+    with connect(storage) as connection:
+        connection.execute("CREATE TABLE role_menus (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, "
+                           "message_id INTEGER NOT NULL UNIQUE, title TEXT NOT NULL, style TEXT NOT NULL, mode TEXT NOT NULL, role_ids TEXT NOT NULL, "
+                           "created_by INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        connection.execute("INSERT INTO role_menus (guild_id, channel_id, message_id, title, style, mode, role_ids, created_by) VALUES (1, 7, 900, 'Old', 'buttons', 'multiple', '[1]', 9)")
+    assert store.get_by_message(storage, 900)["description"] == ""

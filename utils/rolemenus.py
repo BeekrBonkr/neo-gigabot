@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS role_menus (
     channel_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL UNIQUE,
     title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     style TEXT NOT NULL,
     mode TEXT NOT NULL,
     role_ids TEXT NOT NULL,
@@ -42,6 +43,9 @@ class RoleMenuError(ValueError):
 def ensure_table(storage_path: Path) -> None:
     with connect(storage_path) as connection:
         connection.executescript(CREATE_SQL)
+        # Tables made before menus could be edited have no description column.
+        if "description" not in {row[1] for row in connection.execute("PRAGMA table_info(role_menus)")}:
+            connection.execute("ALTER TABLE role_menus ADD COLUMN description TEXT NOT NULL DEFAULT ''")
 
 
 def _row(row) -> dict[str, Any]:
@@ -60,14 +64,30 @@ def parse_role_ids(text: str) -> list[int]:
 
 
 def add_menu(storage_path: Path, guild_id: int, channel_id: int, message_id: int, title: str, style: str, mode: str,
-             role_ids: list[int], created_by: int) -> int:
+             role_ids: list[int], created_by: int, description: str = "") -> int:
     ensure_table(storage_path)
     with connect(storage_path) as connection:
         cursor = connection.execute(
-            "INSERT INTO role_menus (guild_id, channel_id, message_id, title, style, mode, role_ids, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (int(guild_id), int(channel_id), int(message_id), title[:200], style, mode, json.dumps([int(r) for r in role_ids]), int(created_by)),
+            "INSERT INTO role_menus (guild_id, channel_id, message_id, title, description, style, mode, role_ids, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(guild_id), int(channel_id), int(message_id), title[:200], (description or "")[:1000], style, mode,
+             json.dumps([int(r) for r in role_ids]), int(created_by)),
         )
         return int(cursor.lastrowid)
+
+
+def get_menu(storage_path: Path, guild_id: int, menu_id: int) -> dict[str, Any] | None:
+    ensure_table(storage_path)
+    with connect(storage_path) as connection:
+        row = connection.execute("SELECT * FROM role_menus WHERE id = ? AND guild_id = ?", (int(menu_id), int(guild_id))).fetchone()
+    return _row(row) if row else None
+
+
+def update_menu(storage_path: Path, guild_id: int, menu_id: int, *, title: str, description: str, style: str, mode: str, role_ids: list[int]) -> None:
+    with connect(storage_path) as connection:
+        connection.execute(
+            "UPDATE role_menus SET title = ?, description = ?, style = ?, mode = ?, role_ids = ? WHERE id = ? AND guild_id = ?",
+            (title[:200], (description or "")[:1000], style, mode, json.dumps([int(r) for r in role_ids]), int(menu_id), int(guild_id)),
+        )
 
 
 def count_menus(storage_path: Path, guild_id: int) -> int:
