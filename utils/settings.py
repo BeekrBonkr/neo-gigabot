@@ -44,6 +44,10 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "embed_color": "",
     "music_max_queue_length": 0,
     "music_max_track_minutes": 0,
+    "music_autoplay": False,
+    "web_player_enabled": True,
+    "web_join_enabled": True,
+    "web_discovery_enabled": True,
 }
 
 WARN_ACTION_CHOICES = ("none", "mute", "kick", "ban")

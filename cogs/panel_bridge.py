@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import json
 import logging
 import math
 import os
@@ -193,6 +194,18 @@ def _asset_url(asset) -> str | None:
     return str(asset.url) if asset else None
 
 
+WEB_PLAYER_OFF = "The web player is turned off for this server."
+# Live updates: how often a stream looks for changes, how long it may stay
+# quiet, how long one connection lasts (the browser reconnects), and caps.
+STREAM_TICK_SECONDS = 0.5
+STREAM_HEARTBEAT_SECONDS = 15
+STREAM_MAX_SECONDS = 600
+STREAM_MAX_PER_USER = 4
+STREAM_MAX_TOTAL = 300
+POPULAR_PLAYLISTS = 12
+PLAYLIST_SEARCH_RESULTS = 30
+
+
 class BridgeError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
@@ -209,6 +222,8 @@ class PanelBridge(commands.Cog):
         self._token = ""
         self._process = psutil.Process()
         self._presence: dict[str, str] | None = None
+        # Open live-update streams, per user, so they can be capped and closed on unload.
+        self._streams: dict[int, set[asyncio.Task]] = {}
         self.newsletter = NewsletterSender(bot)
 
     # ---------- lifecycle ----------
@@ -249,6 +264,9 @@ class PanelBridge(commands.Cog):
         log.info("Panel bridge listening on %s:%s", BRIDGE_HOST, port)
 
     async def cog_unload(self) -> None:
+        for tasks in list(self._streams.values()):
+            for task in list(tasks):
+                task.cancel()
         await self.newsletter.shutdown()
         if self._runner is not None:
             await self._runner.cleanup()
@@ -268,11 +286,18 @@ class PanelBridge(commands.Cog):
         r.add_put("/v1/defaults", self.h_defaults_put)
         r.add_get("/v1/music", self.h_music)
         r.add_get("/v1/users/{user_id}/guilds", self.h_user_guilds)
+        r.add_get("/v1/users/{user_id}/listening", self.h_user_listening)
         r.add_get("/v1/users/{user_id}/playlists", self.h_playlists)
+        r.add_get("/v1/users/{user_id}/playlists/discover", self.h_playlists_discover)
+        r.add_get("/v1/users/{user_id}/playlists/search", self.h_playlists_search)
+        r.add_get("/v1/users/{user_id}/profiles/{owner_id}", self.h_profile)
         r.add_get("/v1/users/{user_id}/playlists/{owner_id}/{name}", self.h_playlist_view)
         r.add_post("/v1/users/{user_id}/playlists/action", self.h_playlist_action)
         r.add_get("/v1/guilds/{guild_id}/members/{user_id}", self.h_member)
         r.add_get("/v1/guilds/{guild_id}/music", self.h_guild_music)
+        r.add_get("/v1/guilds/{guild_id}/music/events", self.h_guild_music_events)
+        r.add_get("/v1/guilds/{guild_id}/moderation", self.h_moderation)
+        r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_post("/v1/guilds/{guild_id}/music/action", self.h_music_action)
         r.add_get("/v1/commands", self.h_commands)
         r.add_post("/v1/users/resolve", self.h_users_resolve)
@@ -540,7 +565,10 @@ class PanelBridge(commands.Cog):
             }
 
         queue = list(state.queue) if state else []
+        position = music.playback_position(guild) if music is not None and hasattr(music, "playback_position") else None
         return {
+            "position": round(position, 1) if position is not None else None,
+            "autoplay": bool(get_guild_settings(self.storage, guild.id).get("music_autoplay", False)),
             "guild_id": str(guild.id),
             "guild_name": guild.name,
             "guild_icon": _asset_url(guild.icon),
@@ -611,25 +639,82 @@ class PanelBridge(commands.Cog):
         member = guild.get_member(user_id)
         if member is None:
             return False, "You are not a member of this server."
+        if not self._web_enabled(guild, "web_player_enabled"):
+            return False, WEB_PLAYER_OFF
         voice_client = guild.voice_client
         if voice_client is None or not voice_client.is_connected() or voice_client.channel is None:
             return False, "The bot is not in a voice channel right now."
         if member.voice is None or member.voice.channel != voice_client.channel:
             return False, f"Join {voice_client.channel.name} to control the music."
 
+        refusal = self._command_refusal(guild, member, command)
+        return not refusal, refusal
+
+    def _web_enabled(self, guild: discord.Guild, key: str) -> bool:
+        """A server's website switches: web_player_enabled, web_join_enabled,
+        web_discovery_enabled. All default to on."""
+        return bool(get_guild_settings(self.storage, guild.id).get(key, True))
+
+    def _command_refusal(self, guild: discord.Guild, member: discord.Member, command: str | None) -> str:
+        """Why this server's settings stop the member from using a music
+        command (disabled command, DJ mode), or "" if they don't."""
         settings = get_guild_settings(self.storage, guild.id)
         if command:
             blocked = {str(name).lower() for name in (settings.get("blocked_commands") or [])}
             if command in blocked:
-                return False, f"/{command} is disabled in this server."
+                return f"/{command} is disabled in this server."
         if settings.get("music_dj_enabled"):
             role_name = str(settings.get("music_dj_role_name", "dj"))
             djadmin = str(settings.get("music_djadmin_role_id") or "")
             has_dj = any(role.name == role_name for role in member.roles)
             has_djadmin = djadmin.isdigit() and any(role.id == int(djadmin) for role in member.roles)
             if not (has_dj or has_djadmin):
-                return False, f"DJ mode is on. You need the {role_name} role."
-        return True, ""
+                return f"DJ mode is on. You need the {role_name} role."
+        return ""
+
+    def _join_target(self, guild: discord.Guild, user_id: int) -> tuple[Any, str]:
+        """The voice channel this user could bring the bot to right now (what
+        /music join would do), or None and why not. The reason is "" when the
+        bot is simply already in their channel. The bot is never pulled out of
+        a channel where it has music playing, paused or queued."""
+        member = guild.get_member(user_id)
+        if member is None:
+            return None, "You are not a member of this server."
+        if not self._web_enabled(guild, "web_player_enabled"):
+            return None, WEB_PLAYER_OFF
+        if not self._web_enabled(guild, "web_join_enabled"):
+            return None, "Bringing the bot into a voice channel from the website is turned off for this server."
+        channel = getattr(getattr(member, "voice", None), "channel", None)
+        if channel is None:
+            return None, "Join a voice channel in Discord first."
+        voice_client = guild.voice_client
+        if voice_client is not None and voice_client.is_connected() and voice_client.channel is not None:
+            if voice_client.channel == channel:
+                return None, ""
+            music = self.bot.get_cog("Music")
+            state = getattr(music, "guild_states", {}).get(guild.id) if music else None
+            if voice_client.is_playing() or voice_client.is_paused() or (state and (state.current or state.queue)):
+                return None, f"The bot is already playing music in {voice_client.channel.name}."
+        refusal = self._command_refusal(guild, member, "music join")
+        return (None, refusal) if refusal else (channel, "")
+
+    async def _music_join(self, guild: discord.Guild, user_id: int, music: Any) -> web.Response:
+        channel, reason = self._join_target(guild, user_id)
+        if channel is None and reason:
+            raise BridgeError(403, reason)
+        if channel is None:
+            detail = f"Already in {guild.voice_client.channel.name}"
+        else:
+            try:
+                voice_client = await music.connect_to_channel(guild, channel)
+            except RuntimeError as exc:
+                raise BridgeError(409, str(exc)) from exc
+            # Nothing is queued yet: leave again if it stays that way.
+            if not (voice_client.is_playing() or voice_client.is_paused()):
+                await music.schedule_idle_disconnect(guild.id)
+            detail = f"Joined {channel.name}"
+            log.info("Panel music action join in guild %s by user %s", guild.id, user_id)
+        return web.json_response({"ok": True, "detail": detail, "session": self._music_session(guild)})
 
     async def h_user_guilds(self, request: web.Request) -> web.Response:
         """Every guild the bot shares with this user, with their standing in each."""
@@ -640,7 +725,8 @@ class PanelBridge(commands.Cog):
             if not access["member"]:
                 continue
             summary = self._guild_summary(guild)
-            session = self._music_session(guild)
+            session = self._music_session(guild) if self._web_enabled(guild, "web_player_enabled") else None
+            summary["voice_active"] = session is not None
             summary.update(
                 {
                     "owner": access["owner"],
@@ -650,11 +736,42 @@ class PanelBridge(commands.Cog):
                     # Whether this user could control playback here right now
                     # (in the bot's voice channel, DJ mode allowing).
                     "can_control": self._music_access(guild, user_id)[0] if session else False,
+                    # The user's own voice channel here, if the bot could be
+                    # brought into it right now.
+                    "join_channel": getattr(self._join_target(guild, user_id)[0], "name", None),
                 }
             )
             guilds.append(summary)
         guilds.sort(key=lambda g: (not g["voice_active"], g["name"].lower()))
         return web.json_response({"guilds": guilds})
+
+    async def h_user_listening(self, request: web.Request) -> web.Response:
+        """Where this user is listening right now: the guild whose voice
+        channel they share with the bot while a track is loaded (paused
+        counts), or None. Only walks the live voice sessions, so the site can
+        ask on every page."""
+        user_id = self._user_id(request)
+        for voice_client in self.bot.voice_clients:
+            guild = getattr(voice_client, "guild", None)
+            channel = getattr(voice_client, "channel", None)
+            if guild is None or channel is None or not any(getattr(m, "id", None) == user_id for m in channel.members):
+                continue
+            if not self._web_enabled(guild, "web_player_enabled"):
+                continue
+            session = self._music_session(guild)
+            if session and session["current"]:
+                return web.json_response(
+                    {
+                        "listening": {
+                            "guild_id": session["guild_id"],
+                            "guild_name": session["guild_name"],
+                            "channel": session["channel"],
+                            "title": session["current"]["title"],
+                            "paused": session["paused"],
+                        }
+                    }
+                )
+        return web.json_response({"listening": None})
 
     async def h_member(self, request: web.Request) -> web.Response:
         guild = self._guild(request)
@@ -662,21 +779,73 @@ class PanelBridge(commands.Cog):
         access["guild"] = self._guild_summary(guild)
         return web.json_response(access)
 
+    def _music_view(self, guild: discord.Guild, user_id: int) -> dict[str, Any]:
+        """A member's view of this server's player: what the website shows."""
+        if not self._web_enabled(guild, "web_player_enabled"):
+            return {"session": None, "can_control": False, "reason": WEB_PLAYER_OFF, "join_channel": None,
+                    "queue_limit": self._queue_limit(guild.id), "disabled": True}
+        can_control, reason = self._music_access(guild, user_id)
+        return {
+            "session": self._music_session(guild),
+            "can_control": can_control,
+            "reason": reason,
+            "join_channel": getattr(self._join_target(guild, user_id)[0], "name", None),
+            "queue_limit": self._queue_limit(guild.id),
+            "disabled": False,
+        }
+
     async def h_guild_music(self, request: web.Request) -> web.Response:
         guild = self._guild(request)
         user_id = self._user_id(request, request.query.get("user_id", ""))
-        access = self._member_access(guild, user_id)
-        if not access["member"]:
+        if not self._member_access(guild, user_id)["member"]:
             raise BridgeError(403, "You are not a member of this server.")
-        can_control, reason = self._music_access(guild, user_id)
-        return web.json_response(
-            {
-                "session": self._music_session(guild),
-                "can_control": can_control,
-                "reason": reason,
-                "queue_limit": self._queue_limit(guild.id),
-            }
-        )
+        return web.json_response(self._music_view(guild, user_id))
+
+    async def h_guild_music_events(self, request: web.Request) -> web.StreamResponse:
+        """The same view as h_guild_music, as a server-sent event stream: a
+        message whenever something changes, so the website doesn't have to
+        poll. The position isn't part of "changed" (it always moves); a message
+        goes out when it jumps (a seek) and with each heartbeat."""
+        guild = self._guild(request)
+        user_id = self._user_id(request, request.query.get("user_id", ""))
+        if not self._member_access(guild, user_id)["member"]:
+            raise BridgeError(403, "You are not a member of this server.")
+        mine = self._streams.setdefault(user_id, set())
+        if len(mine) >= STREAM_MAX_PER_USER or sum(len(tasks) for tasks in self._streams.values()) >= STREAM_MAX_TOTAL:
+            raise BridgeError(429, "Too many live connections.")
+
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        await response.prepare(request)
+        task = asyncio.current_task()
+        mine.add(task)
+        started = time.monotonic()
+        last_key, last_sent, expected = None, 0.0, None
+        try:
+            while time.monotonic() - started < STREAM_MAX_SECONDS:
+                guild = self.bot.get_guild(guild.id)
+                if guild is None or guild.get_member(user_id) is None:
+                    break
+                view = self._music_view(guild, user_id)
+                session = view["session"] or {}
+                position, now = session.get("position"), time.monotonic()
+                key = json.dumps({**view, "session": {**session, "position": None} if session else None}, sort_keys=True, default=str)
+                jumped = position is not None and expected is not None and abs(position - expected(now)) > 1.5
+                if key != last_key or jumped or now - last_sent >= STREAM_HEARTBEAT_SECONDS:
+                    await response.write(b"data: " + json.dumps(view, default=str).encode() + b"\n\n")
+                    last_key, last_sent = key, now
+                    if position is not None:
+                        rate = 1.0 if session.get("playing") else 0.0
+                        expected = lambda at, p=position, t=now, r=rate: p + (at - t) * r  # noqa: E731
+                    else:
+                        expected = None
+                await asyncio.sleep(STREAM_TICK_SECONDS)
+        except (ConnectionError, asyncio.CancelledError):
+            pass  # the browser went away, or the bridge is shutting down
+        finally:
+            mine.discard(task)
+            if not mine:
+                self._streams.pop(user_id, None)
+        return response
 
     def _queue_limit(self, guild_id: int) -> int:
         music = self.bot.get_cog("Music")
@@ -692,13 +861,15 @@ class PanelBridge(commands.Cog):
         music = self.bot.get_cog("Music")
         if music is None:
             raise BridgeError(503, "Music is not available right now.")
+        if action == "join":  # the one action that doesn't need the bot in voice already
+            return await self._music_join(guild, user_id, music)
 
         voice_client = guild.voice_client
         command = {
             "toggle": "music resume" if voice_client is not None and voice_client.is_paused() else "music pause",
             "skip": "music skip", "stop": "music stop", "shuffle": "music shuffle", "loop": "music loop",
             "volume": "music volume", "remove": "music remove", "move": "music move", "play": "music play",
-            "playlist": "music playlist play",
+            "playlist": "music playlist play", "seek": "music seek",
         }.get(action)
         if command is None:
             raise BridgeError(400, "Unknown action.")
@@ -758,6 +929,15 @@ class PanelBridge(commands.Cog):
             if isinstance(source, discord.PCMVolumeTransformer):
                 source.volume = state.volume
             detail = f"Volume {raw}%"
+        elif action == "seek":
+            raw = str(body.get("seconds", ""))
+            if not raw.isdigit():
+                raise BridgeError(400, "Seek needs a time in seconds.")
+            try:
+                track = music.seek(guild, int(raw))
+            except RuntimeError as exc:
+                raise BridgeError(409, str(exc)) from exc
+            detail = f"Jumped to {int(raw) // 60}:{int(raw) % 60:02d} in {track.title}"
         elif action in ("remove", "move"):
             index = position("position")
             items = list(state.queue)
@@ -1139,6 +1319,100 @@ class PanelBridge(commands.Cog):
             }
         )
 
+    def _shared_guilds(self, viewer_id: int) -> list[discord.Guild]:
+        """Servers this user is in that let their members find each other's
+        playlists (web_discovery_enabled)."""
+        return [guild for guild in self.bot.guilds
+                if guild.get_member(viewer_id) is not None and self._web_enabled(guild, "web_discovery_enabled")]
+
+    def _public_playlists(self, viewer_id: int) -> list[dict[str, Any]]:
+        """Every public playlist with songs that isn't the viewer's own, most
+        liked first. Public means public: these are the ones anyone with the
+        link could already open."""
+        found = [p for p in playlist_store.list_public_playlists(self.storage) if p["owner_id"] != viewer_id and p["songs"]]
+        found.sort(key=lambda p: (-len(p["likes"]), p["display_name"].lower()))
+        return found
+
+    async def h_playlists_search(self, request: web.Request) -> web.Response:
+        """Public playlists across the bot whose name, description, owner or
+        songs match every word of the query."""
+        user_id = self._user_id(request)
+        words = [word for word in str(request.query.get("q", "")).lower().split() if word][:8]
+        if not words:
+            return web.json_response({"playlists": []})
+        results = []
+        for playlist in self._public_playlists(user_id):
+            view = self._playlist_view(playlist, user_id, with_songs=False)
+            haystack = " ".join(
+                [playlist["display_name"], playlist["description"], view["owner_name"] or ""]
+                + [f"{song.get('title') or ''} {song.get('uploader') or ''}" for song in playlist["songs"]]
+            ).lower()
+            if all(word in haystack for word in words):
+                results.append(view)
+                if len(results) >= PLAYLIST_SEARCH_RESULTS:
+                    break
+        return web.json_response({"playlists": results})
+
+    def _profile_view(self, owner_id: int, shared: list[discord.Guild]) -> dict[str, Any]:
+        """Who a playlist owner is, as someone who shares `shared` with them
+        may see it. Only servers the viewer is in too are named."""
+        user = self.bot.get_user(owner_id)
+        member = next((m for m in (guild.get_member(owner_id) for guild in shared) if m is not None), None)
+        return {
+            "user_id": str(owner_id),
+            "name": getattr(user, "global_name", None) or getattr(user, "name", None) or (str(user) if user else None)
+            or getattr(member, "display_name", None),
+            "avatar": _asset_url(getattr(user or member, "display_avatar", None)),
+            "servers": [guild.name for guild in shared if guild.get_member(owner_id) is not None],
+        }
+
+    async def h_playlists_discover(self, request: web.Request) -> web.Response:
+        """Public playlists (with songs in them) by other people who share a
+        server with this user, most liked first, with their owners' profiles."""
+        user_id = self._user_id(request)
+        shared = self._shared_guilds(user_id)
+        profiles: dict[int, dict[str, Any] | None] = {}
+        found = []
+        for playlist in playlist_store.list_public_playlists(self.storage):
+            owner_id = playlist["owner_id"]
+            if owner_id == user_id or not playlist["songs"]:
+                continue
+            if owner_id not in profiles:
+                profile = self._profile_view(owner_id, shared)
+                profiles[owner_id] = profile if profile["servers"] else None
+            profile = profiles[owner_id]
+            if profile is None:
+                continue
+            profile["playlist_count"] = profile.get("playlist_count", 0) + 1
+            view = self._playlist_view(playlist, user_id, with_songs=False)
+            view["owner_name"] = profile["name"] or view["owner_name"]
+            found.append(view)
+        found.sort(key=lambda p: (-p["likes"], p["display_name"].lower()))
+        people = sorted((p for p in profiles.values() if p), key=lambda p: (-p["playlist_count"], (p["name"] or "").lower()))
+        popular = [self._playlist_view(p, user_id, with_songs=False) for p in self._public_playlists(user_id) if p["likes"]]
+        return web.json_response({"profiles": people, "playlists": found, "popular": popular[:POPULAR_PLAYLISTS]})
+
+    async def h_profile(self, request: web.Request) -> web.Response:
+        """One person's profile and public playlists, for themselves and for
+        people who share a server with them. Anyone else gets the same 404 as
+        for a user who doesn't exist."""
+        user_id = self._user_id(request)
+        owner_raw = request.match_info["owner_id"]
+        if not owner_raw.isdigit():
+            raise BridgeError(404, "Profile not found.")
+        owner_id = int(owner_raw)
+        profile = self._profile_view(owner_id, self._shared_guilds(user_id))
+        mine = owner_id == user_id
+        if not mine and not profile["servers"]:
+            raise BridgeError(404, "Profile not found.")
+        playlists = [
+            self._playlist_view(p, user_id, with_songs=False)
+            for p in playlist_store.list_playlists(self.storage, owner_id)
+            if p["status"] == "public" and (mine or p["songs"])
+        ]
+        profile.update(mine=mine, playlist_count=len(playlists))
+        return web.json_response({"profile": profile, "playlists": playlists})
+
     async def h_playlist_view(self, request: web.Request) -> web.Response:
         """One playlist as this user may see it: their own, or someone's public one."""
         user_id = self._user_id(request)
@@ -1151,6 +1425,23 @@ class PanelBridge(commands.Cog):
             # Missing and private look the same from outside.
             raise BridgeError(404, "Playlist not found.") from None
         return web.json_response({"playlist": self._playlist_view(playlist, user_id), "limits": {"songs": playlist_store.MAX_SONGS_PER_PLAYLIST}})
+
+    def _add_many(self, user_id: int, name: str, songs: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
+        """add_songs takes a few songs per call (the Discord command's limit);
+        feed it a longer list in pieces. Stops when the playlist is full."""
+        store, step = playlist_store, playlist_store.MAX_SONGS_ADDED_PER_CALL
+        result, total = store.get_playlist(self.storage, user_id, name), 0
+        for start in range(0, len(songs), step):
+            try:
+                result, added = store.add_songs(self.storage, user_id, name, songs[start:start + step])
+            except store.PlaylistError:
+                if total:
+                    break  # full part-way through: keep what went in
+                raise
+            total += added
+            if added < len(songs[start:start + step]):
+                break
+        return result, total
 
     async def h_playlist_action(self, request: web.Request) -> web.Response:
         """Every change a user can make to playlists. The owner is always the
@@ -1203,6 +1494,48 @@ class PanelBridge(commands.Cog):
                 raise BridgeError(409, str(exc)) from exc
             result, added = store.add_songs(path, user_id, name, [track.to_storage_dict()])
             detail = f"Added {track.title}" if added else "Nothing was added"
+        elif action == "import":
+            music = self.bot.get_cog("Music")
+            if music is None:
+                raise BridgeError(503, "Music is not available right now.")
+            existing = store.get_playlist(path, user_id, name)
+            if existing is None:
+                raise BridgeError(404, "Playlist not found.")
+            room = store.MAX_SONGS_PER_PLAYLIST - len(existing["songs"])
+            if room <= 0:
+                raise BridgeError(409, f"That playlist is already full ({store.MAX_SONGS_PER_PLAYLIST} songs max).")
+            try:
+                songs = await music.extract_playlist_songs(str(body.get("url", "")), room)
+            except RuntimeError as exc:
+                raise BridgeError(409, str(exc)) from exc
+            result, added = self._add_many(user_id, name, songs)
+            detail = f"Imported {added} song{'s' if added != 1 else ''}" + ("" if added == len(songs) else f" (the playlist is full at {store.MAX_SONGS_PER_PLAYLIST})")
+        elif action in ("save_song", "save_queue"):
+            # From the web player: copy what a server is playing into the
+            # user's own playlist. Seeing the queue is all it takes.
+            guild_raw = str(body.get("guild_id", ""))
+            guild = self.bot.get_guild(int(guild_raw)) if guild_raw.isdigit() else None
+            if guild is None or guild.get_member(user_id) is None:
+                raise BridgeError(404, "Server not found.")
+            if not self._web_enabled(guild, "web_player_enabled"):
+                raise BridgeError(403, WEB_PLAYER_OFF)
+            music = self.bot.get_cog("Music")
+            state = getattr(music, "guild_states", {}).get(guild.id) if music else None
+            playing = ([state.current] if state and state.current else []) + (list(state.queue) if state else [])
+            if action == "save_song":
+                raw = str(body.get("position", "0"))  # 0 is the current track, 1.. the queue
+                offset = 0 if state and state.current else 1
+                index = int(raw) - offset if raw.isdigit() else -1
+                if not 0 <= index < len(playing) or str(body.get("expect_title", playing[index].title)) != playing[index].title:
+                    raise BridgeError(409, "The queue changed. Try again.")
+                result, added = store.add_songs(path, user_id, name, [playing[index].to_storage_dict()])
+                detail = f"Saved {playing[index].title} to {result['display_name']}" if added else "Nothing was added"
+            else:
+                if not playing:
+                    raise BridgeError(409, "Nothing is playing or queued.")
+                store.create_playlist(path, user_id, name)
+                result, added = self._add_many(user_id, name, [track.to_storage_dict() for track in playing])
+                detail = f"Saved {added} song{'s' if added != 1 else ''} as {result['display_name']}"
         elif action in ("like", "unlike"):
             owner_raw = str(body.get("owner_id", ""))
             if not owner_raw.isdigit():
@@ -1212,6 +1545,75 @@ class PanelBridge(commands.Cog):
         else:
             raise BridgeError(400, "Unknown action.")
         return web.json_response({"ok": True, "detail": detail, "playlist": self._playlist_view(result, user_id, with_songs=False)})
+
+    # ---------- moderation (server admins, from the website) ----------
+
+    async def h_moderation(self, request: web.Request) -> web.Response:
+        """What only Discord knows about a server's moderation state: who is
+        timed out right now, and whether the bot could lift it. Warnings and
+        temp bans are in the bot's database, which the panel reads itself."""
+        guild = self._guild(request)
+        self._rr_admin(guild, self._user_id(request, request.query.get("user_id", "")))
+        muted = [
+            {"user_id": str(member.id), "name": member.display_name, "avatar": _asset_url(getattr(member, "display_avatar", None)),
+             "until": _iso(member.timed_out_until)}
+            for member in guild.members if member.is_timed_out()
+        ]
+        muted.sort(key=lambda m: m["until"] or "")
+        permissions = guild.me.guild_permissions if guild.me else None
+        return web.json_response({
+            "muted": muted,
+            "bot_can_unmute": bool(permissions and permissions.moderate_members),
+            "bot_can_unban": bool(permissions and permissions.ban_members),
+        })
+
+    async def h_moderation_action(self, request: web.Request) -> web.Response:
+        """unmute (lift a timeout) or clear_warnings (all of one member's), by a
+        server admin. Both are reported to the mod log like the commands."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action, target_raw = str(body.get("action", "")), str(body.get("target_id", ""))
+        if not target_raw.isdigit():
+            raise BridgeError(400, "A member ID is required.")
+        target_id = int(target_raw)
+        moderation = self.bot.get_cog("Moderation")
+
+        async def mod_log(event: str, title: str, target: Any) -> None:
+            if moderation is None or target is None:
+                return
+            try:
+                await moderation._log_mod_action(
+                    guild, event=event, title=title, color=self.bot.embeds.success_color,
+                    target=target, moderator=admin, reason="From the web panel",
+                )
+            except Exception:  # noqa: BLE001 - the action already happened; a failed log entry mustn't undo that
+                log.exception("Could not write a mod-log entry for a panel action")
+
+        if action == "unmute":
+            member = guild.get_member(target_id)
+            if member is None:
+                raise BridgeError(404, "That member is no longer in the server.")
+            if not member.is_timed_out():
+                return web.json_response({"ok": True, "detail": f"{member.display_name} isn't muted"})
+            try:
+                await member.timeout(None, reason=f"By {admin} ({admin.id}) from the web panel")
+            except discord.Forbidden:
+                raise BridgeError(409, "The bot doesn't have permission to unmute that member.") from None
+            except discord.HTTPException as exc:
+                raise BridgeError(409, f"Discord refused the unmute: {exc}") from exc
+            await mod_log("mute", "🔊 Member Unmuted", member)
+            detail = f"Unmuted {member.display_name}"
+        elif action == "clear_warnings":
+            removed = warning_store.clear_warnings(self.storage, guild.id, target_id)
+            if removed:
+                await mod_log("warn", "🧹 Warnings Cleared", guild.get_member(target_id) or self.bot.get_user(target_id))
+            detail = f"Cleared {removed} warning{'s' if removed != 1 else ''}"
+            return web.json_response({"ok": True, "detail": detail, "removed": removed})
+        else:
+            raise BridgeError(400, "Unknown action.")
+        log.info("Panel moderation action %s in guild %s by %s on %s", action, guild.id, admin.id, target_id)
+        return web.json_response({"ok": True, "detail": detail})
 
     # ---------- reaction roles (server admins, from the website) ----------
 

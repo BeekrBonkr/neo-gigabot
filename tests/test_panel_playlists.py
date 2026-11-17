@@ -175,3 +175,136 @@ def test_queueing_a_playlist_from_the_web_player(storage, monkeypatch):
 
     asyncio.run(run())
     assert [t.title for t in state.queue] == ["Song 3"]
+
+
+def test_public_playlists_are_discoverable_only_through_a_shared_server(storage):
+    FRIEND, LONER = 33, 44
+
+    def guild(name, *member_ids):
+        members = {uid: SimpleNamespace(id=uid, display_name=f"m{uid}") for uid in member_ids}
+        return SimpleNamespace(id=abs(hash(name)) % 10**6, name=name, get_member=members.get)
+
+    cog = _cog(storage)
+    cog.bot.guilds = [guild("Alpha", ME, FRIEND), guild("Beta", FRIEND, OTHER), guild("Gamma", LONER)]
+    for owner, name, status, songs in ((FRIEND, "open", "public", 2), (FRIEND, "empty", "public", 0), (FRIEND, "hidden", "private", 1),
+                                       (OTHER, "theirs", "public", 1), (LONER, "alone", "public", 1), (ME, "mine", "public", 1)):
+        store.create_playlist(storage, owner, name)
+        if songs:
+            store.add_songs(storage, owner, name, [_song(n) for n in range(songs)])
+        store.set_status(storage, owner, name, status)
+
+    async def get(client, path):
+        response = await client.get(path, headers=AUTH)
+        return response.status, await response.json()
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            _, found = await get(client, f"/v1/users/{ME}/playlists/discover")
+            # Not my own, not private, not empty, and not from people I share no server with.
+            assert [(p["owner_id"], p["name"]) for p in found["playlists"]] == [(str(FRIEND), "open")]
+            assert found["profiles"] == [{"user_id": str(FRIEND), "name": "m33", "avatar": None, "servers": ["Alpha"], "playlist_count": 1}]
+
+            status, profile = await get(client, f"/v1/users/{ME}/profiles/{FRIEND}")
+            assert status == 200 and [p["name"] for p in profile["playlists"]] == ["open"]
+            assert profile["profile"]["servers"] == ["Alpha"] and profile["profile"]["mine"] is False  # Beta is not named: I'm not in it
+
+            assert (await get(client, f"/v1/users/{ME}/profiles/{OTHER}"))[0] == 404  # in the bot's servers, but none of mine
+            assert (await get(client, f"/v1/users/{ME}/profiles/999"))[0] == 404
+            assert (await get(client, f"/v1/users/{ME}/profiles/abc"))[0] == 404
+            status, own = await get(client, f"/v1/users/{ME}/profiles/{ME}")
+            assert status == 200 and own["profile"]["mine"] is True and [p["name"] for p in own["playlists"]] == ["mine"]
+            # Someone in no server with anyone still sees their own profile, and nobody else's playlists.
+            assert (await get(client, f"/v1/users/{LONER}/playlists/discover"))[1] == {"profiles": [], "playlists": [], "popular": []}
+            # A server can take its members out of each other's discovery.
+            from utils.settings import update_guild_settings
+            update_guild_settings(storage, cog.bot.guilds[0].id, {"web_discovery_enabled": False})
+            assert (await get(client, f"/v1/users/{ME}/playlists/discover"))[1]["playlists"] == []
+            assert (await get(client, f"/v1/users/{ME}/profiles/{FRIEND}"))[0] == 404
+
+    asyncio.run(run())
+
+
+def test_search_and_most_liked_cover_public_playlists_across_the_bot(storage):
+    cog = _cog(storage)
+    for owner, name, status, songs in ((OTHER, "roadtrip", "public", [_song(1)]), (OTHER, "hidden", "private", [_song(1)]),
+                                       (33, "gym", "public", [_song(7)]), (33, "empty", "public", []), (ME, "mine", "public", [_song(1)])):
+        store.create_playlist(storage, owner, name)
+        if songs:
+            store.add_songs(storage, owner, name, songs)
+        store.set_status(storage, owner, name, status)
+    store.toggle_like(storage, 33, "gym", ME, desired=True)
+
+    async def names(client, query):
+        response = await client.get(f"/v1/users/{ME}/playlists/search", headers=AUTH, params={"q": query})
+        return [p["name"] for p in (await response.json())["playlists"]]
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            assert await names(client, "ROAD") == ["roadtrip"]          # by name, any case
+            assert await names(client, "song 7") == ["gym"]             # by a song in it
+            assert await names(client, "other#0") == ["roadtrip"]       # by owner
+            assert await names(client, "song") == ["gym", "roadtrip"]   # most liked first; never private, empty or my own
+            assert await names(client, "road gym") == [] and await names(client, "  ") == []
+            found = await (await client.get(f"/v1/users/{ME}/playlists/discover", headers=AUTH)).json()
+            assert [p["name"] for p in found["popular"]] == ["gym"]     # only playlists somebody liked
+
+    asyncio.run(run())
+
+
+def test_importing_a_playlist_link_fills_up_to_the_cap(storage):
+    cog = _cog(storage)
+    asked = []
+
+    async def extract_playlist_songs(url, limit):
+        asked.append((url, limit))
+        if "bad" in url:
+            raise RuntimeError("I couldn't find any songs at that link. Is it a public playlist?")
+        return [_song(n) for n in range(limit)]
+
+    cog.bot.get_cog("Music").extract_playlist_songs = extract_playlist_songs
+    store.create_playlist(storage, ME, "big")
+    store.add_songs(storage, ME, "big", [_song(n) for n in range(5)])
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            assert (await _act(client, ME, action="import", name="nope", url="https://youtube.com/playlist?list=x")).status == 404
+            failed = await _act(client, ME, action="import", name="big", url="https://youtube.com/bad")
+            assert failed.status == 409 and "public playlist" in (await failed.json())["error"]
+            done = await (await _act(client, ME, action="import", name="big", url="https://youtube.com/playlist?list=x")).json()
+            assert done["detail"] == "Imported 45 songs" and done["playlist"]["song_count"] == 50
+            assert asked[-1] == ("https://youtube.com/playlist?list=x", 45)  # only asks for what fits
+            assert (await _act(client, ME, action="import", name="big", url="https://youtube.com/playlist?list=x")).status == 409  # full
+
+    asyncio.run(run())
+
+
+def test_saving_from_the_player_needs_only_membership(storage):
+    from collections import deque
+
+    cog = _cog(storage)
+    track = lambda title: SimpleNamespace(title=title, to_storage_dict=lambda: _song(1) | {"title": title})  # noqa: E731
+    state = SimpleNamespace(current=track("now"), queue=deque([track("next"), track("later")]))
+    cog.bot.get_cog("Music").guild_states = {77: state}
+    guild = SimpleNamespace(id=77, get_member=lambda uid: object() if uid == ME else None)
+    cog.bot.get_guild = lambda gid: guild if gid == 77 else None
+    store.create_playlist(storage, ME, "keep")
+    store.create_playlist(storage, OTHER, "keep")
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            saved = await (await _act(client, ME, action="save_song", name="keep", guild_id="77", position="0", expect_title="now")).json()
+            assert saved["detail"] == "Saved now to keep"
+            assert (await _act(client, ME, action="save_song", name="keep", guild_id="77", position="2", expect_title="later")).status == 200
+            assert (await _act(client, ME, action="save_song", name="keep", guild_id="77", position="1", expect_title="stale")).status == 409
+            assert (await _act(client, ME, action="save_song", name="keep", guild_id="77", position="9")).status == 409
+            assert (await _act(client, OTHER, action="save_song", name="keep", guild_id="77", position="0")).status == 404  # not in that server
+            whole = await (await _act(client, ME, action="save_queue", name="tonight", guild_id="77")).json()
+            assert whole["detail"] == "Saved 3 songs as tonight"
+            assert (await _act(client, ME, action="save_queue", name="tonight", guild_id="77")).status == 400  # the name is taken
+            state.current, state.queue = None, deque()
+            assert (await _act(client, ME, action="save_queue", name="nothing", guild_id="77")).status == 409
+
+    asyncio.run(run())
+    assert [s["title"] for s in store.get_playlist(storage, ME, "keep")["songs"]] == ["now", "later"]
+    assert [s["title"] for s in store.get_playlist(storage, ME, "tonight")["songs"]] == ["now", "next", "later"]
+    assert store.get_playlist(storage, ME, "nothing") is None and store.get_playlist(storage, OTHER, "keep")["songs"] == []

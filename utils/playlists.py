@@ -414,6 +414,16 @@ def list_liked_playlists(storage_path: Path, liker_id: int) -> list[dict[str, An
     return liked
 
 
+def list_public_playlists(storage_path: Path) -> list[dict[str, Any]]:
+    """Every public playlist, across all owners."""
+    ensure_playlists_table(storage_path)
+    with connect(storage_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM playlists WHERE status = 'public' ORDER BY display_name COLLATE NOCASE"
+        ).fetchall()
+    return [_row_to_playlist(row) for row in rows]
+
+
 def import_playlist_raw(
     storage_path: Path,
     owner_id: int,

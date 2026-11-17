@@ -204,6 +204,7 @@ def _music_world(storage, *, dj_mode=False, blocked=()):
         id=77, name="Guild", icon=None, member_count=4, owner_id=9, me=None, unavailable=False, created_at=None,
         voice_client=voice, get_member=members.get,
     )
+    voice.guild = guild
     stopped = []
     music = SimpleNamespace(
         guild_states={77: state}, get_state=lambda gid: state, stop_playback_task=stopped.append,
@@ -227,6 +228,20 @@ def _music_world(storage, *, dj_mode=False, blocked=()):
         return None
 
     music.enqueue_tracks, music.extract_track, music.start_playback_if_needed = enqueue, extract, start
+
+    async def connect(_guild, target, text_channel_id=None):
+        if target.name == "Locked":
+            raise RuntimeError("I don't have permission to join that voice channel.")
+        voice.channel = target
+        _guild.voice_client = voice
+        music.joined.append(target.name)
+        return voice
+
+    async def idle(gid):
+        music.idle_scheduled.append(gid)
+
+    music.connect_to_channel, music.schedule_idle_disconnect, music.joined, music.idle_scheduled = connect, idle, [], []
+    guild.music, guild.members_by_id, guild.other_channel = music, members, other
     bot = SimpleNamespace(
         storage_path=storage, guilds=[guild], voice_clients=[voice],
         get_guild=lambda gid: guild if gid == 77 else None, get_cog=lambda name: music if name == "Music" else None,
@@ -253,6 +268,173 @@ def test_user_guilds_lists_only_shared_guilds_with_standing(storage):
             assert (await (await client.get("/v1/users/999/guilds", headers=AUTH)).json())["guilds"] == []
             member = await (await client.get("/v1/guilds/77/members/999", headers=AUTH)).json()
             assert member["member"] is False and member["admin"] is False
+
+    asyncio.run(run())
+
+
+def test_listening_is_only_for_users_in_the_bots_channel_while_a_track_is_loaded(storage):
+    make_client, state, voice = _music_world(storage, dj_mode=True)
+
+    async def listening(client, user_id):
+        return (await (await client.get(f"/v1/users/{user_id}/listening", headers=AUTH)).json())["listening"]
+
+    async def run():
+        async with make_client() as client:
+            # DJ mode stops user 1 from controlling the music, not from opening the player.
+            assert await listening(client, 1) == {"guild_id": "77", "guild_name": "Guild", "channel": "Lounge", "title": "now", "paused": False}
+            assert await listening(client, 2) is None    # in another voice channel
+            assert await listening(client, 4) is None    # not in voice
+            assert await listening(client, 999) is None  # not in the guild
+            voice.pause()
+            assert (await listening(client, 1))["paused"] is True
+            state.current = None
+            assert await listening(client, 1) is None    # bot is in the channel but nothing is loaded
+
+    asyncio.run(run())
+
+
+def test_web_join_brings_the_bot_in_but_never_out_of_a_channel_with_music(storage):
+    make_client, state, voice = _music_world(storage)
+    guild = voice.guild
+    music, members, other = guild.music, guild.members_by_id, guild.other_channel
+
+    async def view(client, user_id):
+        return await (await client.get(f"/v1/guilds/77/music?user_id={user_id}", headers=AUTH)).json()
+
+    async def run():
+        async with make_client() as client:
+            # Music is playing in Lounge: user 2 (in AFK) can't pull the bot over, and isn't offered it.
+            assert (await view(client, 2))["join_channel"] is None
+            refused = await _act(client, 2, "join")
+            assert refused.status == 403 and "already playing music in Lounge" in (await refused.json())["error"]
+            # Paused, or between tracks with songs still queued, counts as playing.
+            voice.pause()
+            assert (await _act(client, 2, "join")).status == 403
+            voice._playing, voice._paused, state.current = False, False, None
+            assert (await _act(client, 2, "join")).status == 403 and music.joined == []
+
+            # Already in the bot's channel: nothing to do. Not in voice at all: refused.
+            assert (await (await _act(client, 1, "join")).json())["detail"] == "Already in Lounge"
+            assert (await _act(client, 4, "join")).status == 403 and (await _act(client, 999, "join")).status == 403
+
+            # Idle with an empty queue: it may be moved, and leaves again if nothing gets queued.
+            state.queue.clear()
+            assert (await view(client, 2))["join_channel"] == "AFK"
+            listed = (await (await client.get("/v1/users/2/guilds", headers=AUTH)).json())["guilds"][0]
+            assert listed["join_channel"] == "AFK"
+            moved = await _act(client, 2, "join")
+            assert moved.status == 200 and (await moved.json())["detail"] == "Joined AFK"
+            assert music.joined == ["AFK"] and music.idle_scheduled == [77]
+
+            # Not connected anywhere: joins the user's channel; a failed connect is reported.
+            guild.voice_client = None
+            assert (await view(client, 1))["join_channel"] == "Lounge"
+            assert (await _act(client, 1, "join")).status == 200 and music.joined == ["AFK", "Lounge"]
+            guild.voice_client = None
+            other.name = "Locked"
+            failed = await _act(client, 2, "join")
+            assert failed.status == 409 and "permission" in (await failed.json())["error"]
+
+    asyncio.run(run())
+
+
+def test_web_join_follows_dj_mode_and_disabled_commands(storage):
+    make_client, _, voice = _music_world(storage, dj_mode=True, blocked=["music join"])
+    voice.guild.voice_client = None
+
+    async def run():
+        async with make_client() as client:
+            blocked = await _act(client, 3, "join")
+            assert blocked.status == 403 and "disabled" in (await blocked.json())["error"]
+
+    asyncio.run(run())
+
+    from utils.settings import update_guild_settings
+    update_guild_settings(storage, 77, {"blocked_commands": []})
+
+    async def run_dj():
+        async with make_client() as client:
+            assert (await _act(client, 1, "join")).status == 403   # no DJ role
+            assert (await _act(client, 3, "join")).status == 200   # has it
+
+    asyncio.run(run_dj())
+
+
+def test_server_switches_turn_off_the_web_player_joining_and_discovery(storage):
+    from utils.settings import update_guild_settings
+
+    make_client, state, voice = _music_world(storage)
+    cog_guild = voice.guild
+
+    async def run():
+        async with make_client() as client:
+            update_guild_settings(storage, 77, {"web_join_enabled": False})
+            state.queue.clear(); state.current = None; voice._playing = False
+            refused = await _act(client, 2, "join")
+            assert refused.status == 403 and "turned off" in (await refused.json())["error"]
+            assert (await _act(client, 1, "shuffle")).status == 200  # the player itself still works
+
+            update_guild_settings(storage, 77, {"web_player_enabled": False})
+            view = await (await client.get("/v1/guilds/77/music?user_id=1", headers=AUTH)).json()
+            assert view["disabled"] is True and view["session"] is None and "turned off" in view["reason"]
+            assert (await _act(client, 1, "shuffle")).status == 403
+            listed = (await (await client.get("/v1/users/1/guilds", headers=AUTH)).json())["guilds"][0]
+            assert listed["voice_active"] is False and listed["now_playing"] is None and listed["can_control"] is False
+            state.current = _track("now")
+            assert (await (await client.get("/v1/users/1/listening", headers=AUTH)).json())["listening"] is None
+
+    asyncio.run(run())
+    assert cog_guild.music.joined == []
+
+
+def test_seek_goes_through_the_same_gate_as_the_other_controls(storage):
+    make_client, state, voice = _music_world(storage)
+    sought = []
+
+    def seek(guild, seconds):
+        if seconds >= 100:
+            raise RuntimeError("Pick a time between 0:00 and 1:40.")
+        sought.append(seconds)
+        return state.current
+
+    voice.guild.music.seek = seek
+    voice.guild.music.playback_position = lambda guild: 12.34
+
+    async def run():
+        async with make_client() as client:
+            assert (await _act(client, 2, "seek", seconds="30")).status == 403        # not in the bot's channel
+            assert (await _act(client, 1, "seek", seconds="abc")).status == 400
+            assert (await _act(client, 1, "seek", seconds="500")).status == 409
+            done = await (await _act(client, 1, "seek", seconds="75")).json()
+            assert done["detail"] == "Jumped to 1:15 in now" and sought == [75]
+            assert done["session"]["position"] == 12.3 and done["session"]["autoplay"] is False
+
+    asyncio.run(run())
+
+
+def test_live_stream_sends_the_view_and_then_only_changes(storage, monkeypatch):
+    import cogs.panel_bridge as bridge_module
+
+    monkeypatch.setattr(bridge_module, "STREAM_TICK_SECONDS", 0.01)
+    make_client, state, voice = _music_world(storage)
+
+    async def next_event(response):
+        while True:
+            line = await asyncio.wait_for(response.content.readline(), timeout=2)
+            if line.startswith(b"data: "):
+                return __import__("json").loads(line[6:])
+
+    async def run():
+        async with make_client() as client:
+            assert (await client.get("/v1/guilds/77/music/events?user_id=999", headers=AUTH)).status == 403
+            response = await client.get("/v1/guilds/77/music/events?user_id=1", headers=AUTH)
+            assert response.status == 200 and response.headers["Content-Type"] == "text/event-stream"
+            first = await next_event(response)
+            assert first["can_control"] is True and first["session"]["current"]["title"] == "now"
+            state.queue.popleft()                       # something changes...
+            second = await next_event(response)         # ...and it is pushed without being asked for
+            assert second["session"]["queue_length"] == 2
+            response.close()
 
     asyncio.run(run())
 
@@ -361,3 +543,45 @@ def test_command_catalogue_has_categories_parameters_and_permissions(storage):
 
 
 async def _menu_callback(interaction, message: "discord.Message") -> None: ...
+
+
+def test_moderation_tab_lists_timeouts_and_lifts_them_for_admins_only(storage):
+    from utils import warnings as warning_store
+
+    make_client, _, voice = _music_world(storage)
+    guild = voice.guild
+    lifted = []
+
+    def person(uid, muted):
+        async def timeout(until, reason=None):
+            lifted.append((uid, until))
+            member.muted = False
+
+        member = SimpleNamespace(id=uid, display_name=f"m{uid}", display_avatar=None, muted=muted, timeout=timeout, mention=f"<@{uid}>",
+                                 timed_out_until=None, guild_permissions=SimpleNamespace(administrator=uid == 4))
+        member.is_timed_out = lambda: member.muted
+        return member
+
+    people = {uid: person(uid, uid == 2) for uid in (1, 2, 4)}
+    guild.get_member, guild.members = people.get, list(people.values())
+    guild.me = SimpleNamespace(guild_permissions=SimpleNamespace(moderate_members=True, ban_members=False), joined_at=None)
+    for _ in range(3):
+        warning_store.add_warning(storage, 77, 2, 4, "spam")
+
+    def act(client, actor, action, target):
+        return client.post("/v1/guilds/77/moderation/action", headers=AUTH, json={"user_id": str(actor), "action": action, "target_id": str(target)})
+
+    async def run():
+        async with make_client() as client:
+            assert (await client.get("/v1/guilds/77/moderation?user_id=1", headers=AUTH)).status == 403  # not an admin
+            overview = await (await client.get("/v1/guilds/77/moderation?user_id=4", headers=AUTH)).json()
+            assert [m["user_id"] for m in overview["muted"]] == ["2"] and overview["bot_can_unmute"] and not overview["bot_can_unban"]
+            assert (await act(client, 1, "unmute", 2)).status == 403 and lifted == []
+            assert (await (await act(client, 4, "unmute", 2)).json())["detail"] == "Unmuted m2" and lifted == [(2, None)]
+            assert (await (await act(client, 4, "unmute", 2)).json())["detail"] == "m2 isn't muted"
+            assert (await act(client, 4, "unmute", 999)).status == 404
+            assert (await (await act(client, 4, "clear_warnings", 2)).json())["removed"] == 3
+            assert (await act(client, 4, "explode", 2)).status == 400
+
+    asyncio.run(run())
+    assert warning_store.list_warnings(storage, 77, 2) == []
