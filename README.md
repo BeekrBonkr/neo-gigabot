@@ -42,6 +42,8 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
 - **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet and bonk (on an image or a member's avatar),
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
+- **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted.
+  The artwork is drawn in code, so there are no template images to ship
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,

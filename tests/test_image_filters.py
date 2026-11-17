@@ -55,7 +55,7 @@ def payload_size(node: dict) -> int:
     return total + sum(payload_size(option) for option in node.get("options") or [])
 
 
-IMAGE_COGS = ["cogs.images", "cogs.image_filters", "cogs.image_animate"]
+IMAGE_COGS = ["cogs.images", "cogs.image_filters", "cogs.image_animate", "cogs.image_memes"]
 
 
 def test_image_command_groups_fit_discords_limits():
@@ -65,7 +65,7 @@ def test_image_command_groups_fit_discords_limits():
         for extension in IMAGE_COGS:
             await bot.load_extension(extension)
         groups = [command for command in bot.tree.get_commands() if isinstance(command, discord.app_commands.Group)]
-        assert {"image", "filter", "animate"} <= {group.name for group in groups}
+        assert {"image", "filter", "animate", "memegen"} <= {group.name for group in groups}
         for group in groups:
             data = group.to_dict(bot.tree)
             assert payload_size(data) <= 8000, group.name  # Discord's cap on one command's names and descriptions
