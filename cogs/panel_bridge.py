@@ -159,6 +159,11 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
             if "settings" in names:
                 raise SettingsValidationError("/settings can't be blocked.")
             cleaned[key] = names
+        elif key == "appeals_form":
+            try:
+                cleaned[key] = appeal_store.clean_form(value)
+            except appeal_store.AppealError as exc:
+                raise SettingsValidationError(f"Appeal form: {exc}") from exc
         elif key == "mod_log_events":
             if not isinstance(value, list) or any(v not in MOD_LOG_EVENT_KINDS for v in value):
                 raise SettingsValidationError(f"mod_log_events must be a subset of {', '.join(MOD_LOG_EVENT_KINDS)}.")
@@ -1890,41 +1895,69 @@ class PanelBridge(commands.Cog):
             raise BridgeError(409, "The bot can't read this server's ban list right now.") from exc
         return guild, settings
 
+    def _appeal_preview(self, request: web.Request, user_id: int) -> tuple[discord.Guild, dict[str, Any]]:
+        """The server and its settings for an admin trying the form out. Works
+        whether or not appeals are switched on yet."""
+        guild = self._guild(request)
+        self._rr_admin(guild, user_id)
+        return guild, get_guild_settings(self.storage, guild.id)
+
     async def h_appeal_form(self, request: web.Request) -> web.Response:
         user_id = self._user_id(request, request.query.get("user_id", ""))
-        guild, settings = await self._appeal_context(request, user_id)
-        latest = appeal_store.latest_appeal(self.storage, guild.id, user_id)
-        allowed, why = appeal_store.can_appeal(latest)
+        preview = request.query.get("preview") == "1"
+        if preview:
+            guild, settings = self._appeal_preview(request, user_id)
+            latest, allowed, why = None, True, ""
+        else:
+            guild, settings = await self._appeal_context(request, user_id)
+            latest = appeal_store.latest_appeal(self.storage, guild.id, user_id)
+            allowed, why = appeal_store.can_appeal(latest, wait_days=appeal_store.reappeal_days(settings))
         return web.json_response({
             "guild": {"id": str(guild.id), "name": guild.name, "icon": _asset_url(guild.icon)},
             "questions": appeal_store.questions_for(settings),
+            "intro": str(settings.get("appeals_intro") or ""), "preview": preview,
             "can_appeal": allowed, "reason": why,
             "latest": {"status": latest["status"], "created_at": latest["created_at"], "decision_note": latest["decision_note"]} if latest else None,
-            "limits": {"answer": appeal_store.MAX_ANSWER_LENGTH},
+            "limits": {"answer": appeal_store.MAX_ANSWER_LENGTH, "short": appeal_store.MAX_SHORT_ANSWER_LENGTH},
         })
 
     async def h_appeal_submit(self, request: web.Request) -> web.Response:
         body = await self._json(request)
         user_id = self._user_id(request, str(body.get("user_id", "")))
-        guild, settings = await self._appeal_context(request, user_id)
+        test = bool(body.get("test"))
+        if test:
+            guild, settings = self._appeal_preview(request, user_id)
+        else:
+            guild, settings = await self._appeal_context(request, user_id)
         answers = body.get("answers")
         if not isinstance(answers, list):
             raise BridgeError(400, "Answers are required.")
         try:
-            appeal_id = appeal_store.submit(self.storage, guild.id, user_id, str(body.get("user_name", "")),
-                                            appeal_store.questions_for(settings), [str(a) for a in answers])
+            appeal_id = appeal_store.submit(
+                self.storage, guild.id, user_id, str(body.get("user_name", "")), appeal_store.questions_for(settings),
+                [[str(v) for v in a] if isinstance(a, list) else str(a) for a in answers],
+                wait_days=appeal_store.reappeal_days(settings), test=test,
+            )
         except appeal_store.AppealError as exc:
             raise BridgeError(409, str(exc)) from exc
-        # Let the moderators know there is something to read.
-        channel_id = get_mod_log_channel_id(self.storage, guild.id)
+        # Let the moderators know there is something to read: in the channel
+        # chosen for appeals, else the mod log.
+        raw = str(settings.get("appeals_channel_id") or "")
+        channel_id = int(raw) if raw.isdigit() else get_mod_log_channel_id(self.storage, guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
+        notified = False
         if channel is not None:
             where = site_link(self.bot, "Review it on the website", f"/app/{guild.id}/moderation#appeals") or "Review it on the website's Moderation tab"
+            title = "🧪 Test Ban Appeal" if test else "📨 New Ban Appeal"
+            text = (f"<@{user_id}> sent a test appeal to try the form out. Nobody was banned or unbanned. {where}." if test
+                    else f"<@{user_id}> (`{user_id}`) appealed their ban. {where}.")
             try:
-                await channel.send(embed=self.bot.embeds.info_embed("📨 New Ban Appeal", f"<@{user_id}> (`{user_id}`) appealed their ban. {where}."))
+                await channel.send(embed=self.bot.embeds.info_embed(title, text))
+                notified = True
             except discord.HTTPException:
                 pass
-        return web.json_response({"ok": True, "appeal_id": appeal_id})
+        return web.json_response({"ok": True, "appeal_id": appeal_id, "notified": notified,
+                                  "channel": getattr(channel, "name", None) if channel is not None else None})
 
     async def _decide_appeal(self, guild: discord.Guild, admin: discord.Member, approved: bool, appeal_raw: str, note: str, mod_log) -> web.Response:
         if not appeal_raw.isdigit():
@@ -1986,6 +2019,12 @@ class PanelBridge(commands.Cog):
 
         if action in ("approve_appeal", "deny_appeal"):
             return await self._decide_appeal(guild, admin, action == "approve_appeal", str(body.get("appeal_id", "")), str(body.get("note", "")), mod_log)
+        if action == "remove_appeal":
+            appeal_raw = str(body.get("appeal_id", ""))
+            removed = appeal_store.remove_test(self.storage, guild.id, int(appeal_raw)) if appeal_raw.isdigit() else None
+            if removed is None:
+                raise BridgeError(404, "Only test appeals can be removed, and that one no longer exists.")
+            return web.json_response({"ok": True, "detail": "Removed the test appeal", "before": removed})
         if action == "remove_note":
             note_raw = str(body.get("note_id", ""))
             removed = case_store.remove_note(self.storage, guild.id, int(note_raw)) if note_raw.isdigit() else None

@@ -61,7 +61,10 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   accounts it has caught; chosen users and roles can be exempted
 - **Case history and notes**: every action is recorded (`/modhistory`), with private moderator
   notes (`/note add|remove`)
-- **Ban appeals**: the ban DM links to an appeal form on the website; admins approve or deny there
+- **Ban appeals**: the ban DM links to an appeal form on the website; admins approve or deny there.
+  The form is built on the website (written answers, multiple choice, checkboxes, required
+  questions), with an intro, a choice of notification channel, a wait time after a denial, and
+  test appeals for trying it out
 - `/softban` and `/slowmode`
 - **Sticky roles**: restores a returning member's roles (never roles with elevated permissions)
 - **Mod log**: kick/ban/mute/warn actions posted to a channel, filterable per action type,

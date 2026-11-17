@@ -76,7 +76,11 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "honeypot_exempt_users": [],
     # Ban appeals: banned users can answer these questions on the website.
     "appeals_enabled": False,
-    "appeals_questions": "",
+    "appeals_questions": "",  # the older one-question-per-line form; appeals_form wins when set
+    "appeals_form": [],
+    "appeals_intro": "",
+    "appeals_reappeal_days": 7,
+    "appeals_channel_id": "",
     # How long the website's searchable copy of the activity log is kept. 0 keeps no copy.
     "logging_keep_days": 30,
     # Where /suggest posts. Empty turns suggestions off.
@@ -161,7 +165,7 @@ SETTING_COLORS: set[str] = {"welcome_embed_color"}
 SETTING_URLS: set[str] = {"welcome_embed_image_url"}
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
 SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels", "honeypot_exempt_roles", "honeypot_exempt_users"}
-SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id"}
+SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id", "appeals_channel_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),
     "automod_spam_limit": (3, 30),
@@ -171,6 +175,7 @@ SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "antiraid_min_account_age_days": (0, 365),
     "verify_min_account_age_days": (0, 365),
     "logging_keep_days": (0, 90),
+    "appeals_reappeal_days": (0, 365),
     "tempvoice_user_limit": (0, 99),
 }
 # Text settings that may be longer than the usual 1000 characters.
