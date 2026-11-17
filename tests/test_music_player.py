@@ -114,9 +114,22 @@ class Harness:
         self.returncodes = deque(returncodes)
         self.create_source_calls: list[str | None] = []
 
-        async def _create_source(track: Track, volume: float) -> FakeSource:
+        self.start_offsets: list[float] = []
+        self.autoplay = False
+        self.related: list[Track] = []
+
+        async def _create_source(track: Track, volume: float, *, start_at: float = 0.0) -> FakeSource:
             self.create_source_calls.append(track.stream_url)
+            self.start_offsets.append(start_at)
             return FakeSource(self.returncodes.popleft() if self.returncodes else 0)
+
+        async def _related(track: Track, exclude: set[str], guild_id=None) -> Track | None:
+            self.related_excludes = set(exclude)
+            return self.related.pop(0) if self.related else None
+
+        self.voice.channel = SimpleNamespace(members=[SimpleNamespace(bot=False)])
+        self.cog.get_music_settings = lambda gid: {"autoplay": self.autoplay}  # type: ignore[method-assign]
+        self.cog.find_related_track = _related  # type: ignore[method-assign]
 
         async def _idle(_guild_id: int) -> None:
             pass
@@ -248,3 +261,82 @@ def test_queue_command_passes_missing_not_none_for_empty_view() -> None:
 
     captured = asyncio.run(go())
     assert captured["view"] is discord.utils.MISSING
+
+
+def test_seek_replays_the_same_track_from_the_new_position_without_reannouncing() -> None:
+    def setup(h: Harness) -> None:
+        original_play = h.voice.play
+
+        def play(source, *, after) -> None:
+            if not h.voice.played:
+                h.state.seek_to = 42.0  # a seek lands while the first play is running
+            original_play(source, after=after)
+
+        h.voice.play = play  # type: ignore[method-assign]
+
+    h = _run([None, 0, 0], [_track("a"), _track("b")], setup)
+    assert [round(o) for o in h.start_offsets] == [0, 42, 0]
+    assert h.embeds.sent == ["Now Playing", "Now Playing"] and h.embeds.errors == []  # the seek is neither announced nor a failure
+
+
+def test_seek_validates_the_position_and_stops_the_current_source() -> None:
+    from cogs.music import parse_timestamp
+
+    assert [parse_timestamp(v) for v in ("90", "1:30", "1:02:03", "1:75", "abc", "", "1:2:3:4")] == [90, 90, 3723, None, None, None, None]
+
+    async def go() -> None:
+        h = Harness(asyncio.get_running_loop(), [])
+        h.voice.is_playing, h.voice.is_paused = (lambda: True), (lambda: False)
+        guild = SimpleNamespace(id=GUILD_ID, voice_client=h.voice)
+        with pytest.raises(RuntimeError, match="Nothing is playing"):
+            h.cog.seek(guild, 5)
+        h.state.current = Track(title="x", webpage_url="https://youtu.be/x", duration=100)
+        for bad in (-1, 100, 500):
+            with pytest.raises(RuntimeError, match="between"):
+                h.cog.seek(guild, bad)
+        h.cog.seek(guild, 30)
+        assert h.state.seek_to == 30.0 and h.voice.stop_calls == 1
+        h.state.current = Track(title="live", webpage_url="https://youtu.be/y")
+        with pytest.raises(RuntimeError, match="no known length"):
+            h.cog.seek(guild, 5)
+
+    asyncio.run(go())
+
+
+def test_autoplay_continues_with_a_related_track_only_when_enabled() -> None:
+    off = _run([0], [_track("a")], lambda h: h.related.append(_track("never")))
+    assert len(off.voice.played) == 1
+
+    def setup(h: Harness) -> None:
+        h.autoplay = True
+        h.related.extend([_track("b"), _track("c")])
+
+    on = _run([0, 0, 0], [_track("a")], setup)
+    assert len(on.voice.played) == 3  # a, then b and c from autoplay, then nothing related is left
+    assert on.related_excludes == {"yt:a", "yt:b", "yt:c"}  # what already played is never offered again
+
+
+def test_autoplay_stops_when_nobody_is_listening_and_after_a_stop() -> None:
+    def empty_channel(h: Harness) -> None:
+        h.autoplay = True
+        h.related.append(_track("b"))
+        h.voice.channel.members = [SimpleNamespace(bot=True)]
+
+    assert len(_run([0], [_track("a")], empty_channel).voice.played) == 1
+
+    state = GuildMusicState(guild_id=GUILD_ID)
+    state.last_track = _track("a")
+    state.clear_queue()
+    assert state.last_track is None and state.seek_to is None
+
+
+def test_playlist_entries_become_songs_and_unsafe_links_are_dropped() -> None:
+    from cogs.music import flat_entry_to_song, track_key
+
+    youtube = flat_entry_to_song({"id": "abc", "title": "T", "url": "https://www.youtube.com/watch?v=abc", "duration": 61.0, "channel": "C"})
+    assert youtube == {"title": "T", "webpage_url": "https://www.youtube.com/watch?v=abc", "uploader": "C", "duration": 61, "thumbnail": None}
+    soundcloud = flat_entry_to_song({"id": "1", "title": None, "url": "https://soundcloud.com/some-artist/why-not"})
+    assert soundcloud["title"] == "Why Not" and soundcloud["uploader"] == "some-artist"
+    assert flat_entry_to_song({"url": "https://evil.example/x", "title": "x"}) is None
+    assert flat_entry_to_song({"url": "file:///etc/passwd"}) is None
+    assert track_key("https://youtu.be/abc?t=3") == track_key("https://music.youtube.com/watch?v=abc") == "yt:abc"

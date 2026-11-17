@@ -20,12 +20,14 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 
 ### 🎵 Music — `/music …`
 - Playback from YouTube / SoundCloud / Bandcamp / Vimeo (URL-allowlisted) or search:
-  `play`, `search`, `join`, `skip`, `pause`, `resume`, `stop`, `leave`, `volume`, `nowplaying`
+  `play`, `search`, `join`, `skip`, `seek`, `pause`, `resume`, `stop`, `leave`, `volume`, `nowplaying`
 - Queue management: `queue`, `remove`, `move`, `shuffle`, `loop` (track / queue / off), `resetq`
 - An interactive **remote** (`/music remote`) with buttons for pause/skip/volume — every press
   re-checks that the presser is actually in the voice channel
 - **Playlists** (`/music playlist …`): create, add/remove songs, rename, public/private,
   like/unlike, browse other users' profiles, and `savenow` to capture the playing track
+- Optional **autoplay** (`/music autoplay`): when the queue runs out, similar tracks keep playing
+  until `/music stop` or everyone leaves
 - Per-server DJ mode (role-gated playback control), DJ-admin override role, default volume,
   and queue/track-length caps — all from the dashboard
 - Commands that alter live playback require you to be in the bot's voice channel
