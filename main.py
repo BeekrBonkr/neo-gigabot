@@ -27,6 +27,7 @@ COGS = [
     "cogs.moderation",
     "cogs.cases",
     "cogs.automod",
+    "cogs.antiraid",
     "cogs.music",
     "cogs.settings",
     "cogs.welcome",
