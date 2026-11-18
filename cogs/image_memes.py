@@ -216,6 +216,19 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     async def achievement(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 60]) -> None:
         await self._from_text(interaction, "achievement", "Achievement Unlocked", mm.achievement, text)
 
+    @app_commands.command(name="rip", description="A headstone for some text, or for a member.")
+    @app_commands.describe(text="What the headstone says. Defaults to the member's name.", user="Carve this member's avatar into the stone.")
+    @app_commands.checks.cooldown(1, 3.0)
+    async def rip(
+        self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 60] | None = None, user: discord.User | None = None,
+    ) -> None:
+        if user is not None:
+            await self._poster(interaction, "rip", "R.I.P.", lambda picture, words: mm.rip(words, picture), user=user, texts=(text or user.display_name,))
+        elif text:
+            await self._from_text(interaction, "rip", "R.I.P.", mm.rip, text)
+        else:
+            await self.bot.image_tools.send_error(interaction, "Nothing To Bury", "Give some text, a member, or both.")
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

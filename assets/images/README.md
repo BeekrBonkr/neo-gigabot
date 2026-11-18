@@ -12,3 +12,4 @@ Overlays and meme templates the image commands open at run time.
 | `whodidthis.png` | `/memegen whodidthis` | The WHO DID THIS frame from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
 | `wheeze.png` | `/memegen wheeze` | The Wheeze comic, from imgflip (imgflip.com/memetemplate/85219185/Wheeze) |
 | `achievement.png` | `/memegen achievement` | An Xbox achievement popup, from imgflip (achievement-unlocked-template), with the white around it removed |
+| `rip.jpg` | `/memegen rip` | The blank headstone from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/rip.png`) |

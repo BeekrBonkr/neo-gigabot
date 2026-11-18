@@ -314,3 +314,25 @@ def achievement(text: "richtext.RichText | str") -> Image.Image:
     popup = _template("achievement.png")
     _write(popup, ACHIEVEMENT_TEXT, text, "arial.ttf", fill=(214, 214, 214, 255), max_size=40, align="left")
     return popup
+
+
+# ---------- rip ----------
+
+RIP_STONE = (121, 187, 485, 693)  # the smooth face of the headstone
+RIP_INK = (72, 70, 70, 255)
+
+
+def rip(text: "richtext.RichText | str", picture: Image.Image | None = None) -> Image.Image:
+    """A headstone carved with R.I.P., a name, and a picture if there is one."""
+    scene = _template("rip.jpg")
+    left, top, right, bottom = RIP_STONE
+    _write(scene, (left + 20, top + 16, right - 20, top + 110), "R.I.P.", "impact.ttf", fill=RIP_INK, max_size=90)
+    words_top = top + 130
+    if picture is not None:
+        side = 230
+        portrait = ImageOps.grayscale(_flat(_cover(picture, (side, side)), (200, 200, 200, 255))).convert("RGBA")
+        portrait.putalpha(200)  # the stone shows through a little
+        scene.alpha_composite(portrait, ((left + right - side) // 2, words_top))
+        words_top += side + 16
+    _write(scene, (left + 20, words_top, right - 20, bottom - 24), text, "arial.ttf", fill=RIP_INK, max_size=64)
+    return scene

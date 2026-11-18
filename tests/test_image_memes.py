@@ -95,3 +95,11 @@ def test_achievement_writes_on_the_popup_and_keeps_its_corners_clear():
     blank, named = mm._template("achievement.png"), mm.achievement("Did a thing")
     assert named.size == blank.size and named.getpixel((0, 0))[3] == 0
     assert named.tobytes() != blank.tobytes() and mm.achievement("x" * 60).size == blank.size
+
+
+def test_rip_carves_words_and_an_optional_picture():
+    words, with_picture = mm.rip("Somebody"), mm.rip("Somebody", picture())
+    assert words.size == with_picture.size == (600, 900)
+    assert words.tobytes() != mm._template("rip.jpg").tobytes() and words.tobytes() != with_picture.tobytes()
+    red, green, blue, _ = with_picture.getpixel(((mm.RIP_STONE[0] + mm.RIP_STONE[2]) // 2, mm.RIP_STONE[1] + 200))
+    assert max(red, green, blue) - min(red, green, blue) < 12  # the picture is carved in gray
