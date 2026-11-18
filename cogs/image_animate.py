@@ -89,7 +89,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
     @app_commands.describe(user=USER_HELP, speed=SPEED_HELP, **SOURCE_HELP)
     @app_commands.checks.cooldown(1, 5.0)
     async def pet(
-        self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 40,
+        self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 60,
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
         await self._animate(interaction, "pet", "Pet", lambda loaded: an.pet(loaded, speed), attachment, message_link, user=user, still_only=True)

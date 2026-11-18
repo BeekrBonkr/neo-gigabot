@@ -5,6 +5,8 @@ for GIFs people already have. Functions take a decoded `Frames` and return
 from __future__ import annotations
 
 import math
+from functools import lru_cache
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -87,45 +89,35 @@ def zoom(loaded: Frames, speed_ms: int = 50, amount: int = 40) -> tuple[list[Ima
 
 # ---------- pet ----------
 
-PET_SIZE = 192
-PET_FRAMES = 10
+# The hand is the sprite sheet from the original petpet generator
+# (benisland.neocities.org/petpet): five 112px frames side by side. The numbers
+# below are that generator's defaults, so the result matches the usual petpet GIF.
+PET_SPRITE = Path(__file__).resolve().parents[1] / "assets" / "images" / "petpet.png"
+PET_CELL = 112
+PET_SCALE = 2  # drawn at twice the original size so avatars stay sharp
+PET_SIZE = PET_CELL * PET_SCALE
+PET_FRAMES = 5
+# Where the picture sits in each frame, in the original's pixels: (left, top, width, height).
+PET_BOXES = ((14, 20, 98, 98), (12, 33, 102, 84), (8, 40, 111, 78), (10, 33, 102, 84), (12, 20, 98, 98))
+PET_HAND_DROP = (0, 4, 9, 4, 0)  # how far the hand comes down in each frame
 
 
-def _hand_sprite(size: int) -> Image.Image:
-    """A cartoon hand, palm down, drawn large and shrunk for smooth edges."""
-    scale = 4
-    width, height = size * scale, int(size * 0.5) * scale
-    sprite = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(sprite)
-    outline, skin, line = (38, 38, 46, 255), (255, 255, 255, 255), max(4, width // 60)
-    # sleeve, coming in from the top right
-    draw.polygon([(width * 0.70, height * 0.02), (width * 0.98, height * 0.02), (width * 0.98, height * 0.50), (width * 0.74, height * 0.42)],
-                 fill=(88, 101, 242, 255), outline=outline, width=line)
-    # palm and fingers as one rounded mitt
-    draw.rounded_rectangle((width * 0.08, height * 0.22, width * 0.84, height * 0.86), radius=height * 0.30, fill=skin, outline=outline, width=line)
-    # thumb
-    draw.ellipse((width * 0.52, height * 0.60, width * 0.80, height * 0.98), fill=skin, outline=outline, width=line)
-    draw.rectangle((width * 0.55, height * 0.52, width * 0.76, height * 0.72), fill=skin)
-    # finger creases
-    for x in (0.25, 0.40):
-        draw.line([(width * x, height * 0.50), (width * (x - 0.03), height * 0.84)], fill=outline, width=line)
-    return sprite.resize((size, int(size * 0.5)), Image.LANCZOS)
+@lru_cache(maxsize=1)
+def _pet_hands() -> list[Image.Image]:
+    sheet = Image.open(PET_SPRITE).convert("RGBA")
+    return [sheet.crop((index * PET_CELL, 0, (index + 1) * PET_CELL, PET_CELL)).resize((PET_SIZE, PET_SIZE), Image.LANCZOS)
+            for index in range(PET_FRAMES)]
 
 
-def pet(loaded: Frames, speed_ms: int = 40) -> tuple[list[Image.Image], list[int]]:
-    """A hand pats the picture, which squashes under each pat."""
+def pet(loaded: Frames, speed_ms: int = 60) -> tuple[list[Image.Image], list[int]]:
+    """The petpet GIF: a hand pats the picture, which squashes under each pat."""
     base = loaded.frames[0]
-    hand = _hand_sprite(int(PET_SIZE * 0.78))
     frames = []
-    for index in range(PET_FRAMES):
-        squeeze = 0.5 - 0.5 * math.cos(2 * math.pi * index / PET_FRAMES)  # 0 up, 1 pressed down
-        width = int(PET_SIZE * (0.76 + 0.14 * squeeze))
-        height = int(PET_SIZE * (0.78 - 0.20 * squeeze))
+    for (left, top, width, height), drop, hand in zip(PET_BOXES, PET_HAND_DROP, _pet_hands()):
         canvas = Image.new("RGBA", (PET_SIZE, PET_SIZE), (0, 0, 0, 0))
-        squashed = base.resize((width, height), Image.LANCZOS)
-        left, top = (PET_SIZE - width) // 2 + int(PET_SIZE * 0.05), PET_SIZE - height
-        canvas.alpha_composite(squashed, (left, top))
-        canvas.alpha_composite(hand, (0, max(0, top - int(hand.height * 0.62))))
+        squashed = base.resize((width * PET_SCALE, height * PET_SCALE), Image.LANCZOS)
+        canvas.alpha_composite(squashed, (left * PET_SCALE, top * PET_SCALE))
+        canvas.alpha_composite(hand, (0, drop * PET_SCALE))
         frames.append(canvas)
     return frames, [speed_ms] * PET_FRAMES
 
