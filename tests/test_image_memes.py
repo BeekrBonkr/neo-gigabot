@@ -132,3 +132,12 @@ def test_notification_lays_a_banner_over_the_top():
     assert min(scene.getpixel((320, 30))[:3]) > 200  # the pale banner
     assert scene.getpixel((40, 600))[:3] == (40, 60, 200)
     assert mm.notification(picture((400, 40)), "hi", "x").size == (mm.NOTIFICATION_WIDTH, 300)
+
+
+def test_einstein_chalks_the_text_on_the_board():
+    blank, written = mm._template("einstein.jpg"), mm.einstein("e = mc2")
+    assert written.size == blank.size
+    left, top, right, bottom = mm.EINSTEIN_BOARD
+    outside = (0, bottom + 20, blank.width, blank.height)
+    assert written.crop((left, top, right, bottom)).tobytes() != blank.crop((left, top, right, bottom)).tobytes()
+    assert written.crop(outside).tobytes() == blank.crop(outside).tobytes()

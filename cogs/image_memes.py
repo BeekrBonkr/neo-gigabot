@@ -287,6 +287,12 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
             user=user, texts=(text, sender or interaction.user.display_name),
         )
 
+    @app_commands.command(name="einstein", description="Einstein writes your text on his blackboard.")
+    @app_commands.describe(text="What he writes. Short works best.")
+    @app_commands.checks.cooldown(1, 3.0)
+    async def einstein(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 60]) -> None:
+        await self._from_text(interaction, "einstein", "Einstein", mm.einstein, text)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

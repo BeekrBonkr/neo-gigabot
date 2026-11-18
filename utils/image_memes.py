@@ -411,3 +411,17 @@ def notification(picture: Image.Image, text: "richtext.RichText | str", sender: 
     richtext.fit_line(sender, "arial.ttf", 24, box[2] - 56 - 34).draw(scene, 36, 78, fill=(12, 12, 14, 255), align="left")
     _write(scene, (36, 108, box[2] - 22, 148), text, "DejaVuSans-Bold.ttf", fill=(40, 40, 44, 255), max_size=21, align="left", from_top=True)
     return scene
+
+
+# ---------- einstein ----------
+
+EINSTEIN_BOARD = (510, 40, 976, 270)  # the clear part of the blackboard
+
+
+def einstein(text: "richtext.RichText | str") -> Image.Image:
+    """Einstein at the blackboard, having just chalked up the text."""
+    scene = _template("einstein.jpg")
+    chalk = Image.new("RGBA", scene.size, (0, 0, 0, 0))
+    _write(chalk, EINSTEIN_BOARD, text, "arial.ttf", fill=(236, 236, 230, 235), max_size=120)
+    scene.alpha_composite(chalk.filter(ImageFilter.GaussianBlur(1.1)))  # chalk has soft edges
+    return scene

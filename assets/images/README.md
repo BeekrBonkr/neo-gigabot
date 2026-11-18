@@ -17,3 +17,4 @@ Overlays and meme templates the image commands open at run time.
 | `rtx_on.png` | `/memegen rtx` | The RTX ON badge, from the same template |
 | `news.png` | `/memegen news` | A breaking news overlay, from imgflip (Breaking-News-template) |
 | `presidential.png` | `/memegen presidential` | The Presidential Alert from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/alert.png`) |
+| `einstein.jpg` | `/memegen einstein` | Einstein at the blackboard, from imgflip (Einstein-at-the-Chalkboard), originally the hetemeel.com generator |
