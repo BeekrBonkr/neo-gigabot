@@ -20,6 +20,9 @@ psutil>=6.0.0
 # numpy, used directly by the seam-carving implementation.
 opencv-python-headless>=4.9.0,<5.0
 numpy>=1.26.0
+# Reads which characters each bundled font can draw, so text on images can fall
+# back to another font (or the emoji font) instead of showing empty boxes.
+fonttools>=4.50
 
 # Dev-only: runs the tests/ suite (python -m pytest tests/). Not needed to run the bot.
 pytest>=8.0

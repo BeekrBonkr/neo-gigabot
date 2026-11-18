@@ -10,6 +10,7 @@ from discord.ext import commands
 from utils.website import site_link
 from utils.discord_links import fetch_message_from_link
 from utils.settings import parse_hex_color
+from utils.modules import module_enabled
 from utils.reactionroles import (
     ReactionRoleError,
     add_mapping,
@@ -396,7 +397,7 @@ class ReactionRoles(
             return
 
         role_id = get_role_for_reaction(self.bot.storage_path, payload.message_id, str(payload.emoji))
-        if role_id is None:
+        if role_id is None or not module_enabled(self.bot.storage_path, payload.guild_id, "reactionroles"):
             return
 
         guild = self.bot.get_guild(payload.guild_id)
@@ -417,7 +418,7 @@ class ReactionRoles(
             return
 
         role_id = get_role_for_reaction(self.bot.storage_path, payload.message_id, str(payload.emoji))
-        if role_id is None:
+        if role_id is None or not module_enabled(self.bot.storage_path, payload.guild_id, "reactionroles"):
             return
 
         guild = self.bot.get_guild(payload.guild_id)

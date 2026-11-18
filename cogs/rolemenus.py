@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import rolemenus as store
+from utils.modules import module_enabled
 
 LOGGER = logging.getLogger(__name__)
 BUTTON_PREFIX, SELECT_ID = "rolemenu:btn:", "rolemenu:select"
@@ -212,6 +213,9 @@ class RoleMenus(commands.Cog):
 
     async def handle_press(self, interaction: discord.Interaction, custom_id: str) -> None:
         member, guild = interaction.user, interaction.guild
+        if not module_enabled(self.bot.storage_path, guild.id, "rolemenus"):
+            await interaction.response.send_message("Role menus are turned off in this server right now.", ephemeral=True)
+            return
         menu = store.get_by_message(self.bot.storage_path, interaction.message.id)
         if menu is None or not isinstance(member, discord.Member):
             await interaction.response.send_message("This role menu is no longer active.", ephemeral=True)

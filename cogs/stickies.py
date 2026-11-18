@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import stickies as store
+from utils.modules import module_enabled
 
 LOGGER = logging.getLogger(__name__)
 NO_MENTIONS = discord.AllowedMentions.none()
@@ -50,6 +51,8 @@ class Stickies(commands.Cog):
             return
         if self.bot.user is not None and message.author.id == self.bot.user.id:
             return  # the sticky itself, and the bot's own replies, don't count
+        if not module_enabled(self.bot.storage_path, message.guild.id, "stickies"):
+            return
         try:
             sticky = store.get(self.bot.storage_path, message.channel.id)
             if sticky and sticky["active"] and self.pacer.should_post(message.channel.id, bool(sticky["slow"])):

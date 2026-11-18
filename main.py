@@ -15,14 +15,20 @@ from utils.command_log import record_command
 from utils.config import load_config
 from utils.embeds import EmbedManager
 from utils.imaging import ImageToolkit
-from utils.settings import get_guild_settings, migrate_blocked_command_names
+from utils.modules import disabled_module_for
+from utils.settings import blocking_entry, get_guild_settings, migrate_blocked_command_names
 from utils.storage import ensure_storage_layout
+from utils.website import site_link
 
 COGS = [
     "cogs.help",
     "cogs.info",
     "cogs.fun",
     "cogs.images",
+    "cogs.image_filters",
+    "cogs.image_animate",
+    "cogs.image_memes",
+    "cogs.image_edit",
     "cogs.logging",
     "cogs.moderation",
     "cogs.cases",
@@ -141,12 +147,23 @@ class GigaBot(commands.Bot):
             return True
 
         settings = get_guild_settings(self.storage_path, interaction.guild.id)
-        blocked = {str(name).lower() for name in (settings.get("blocked_commands") or [])}
-        if command.qualified_name.lower() in blocked:
+        if blocking_entry(command.qualified_name, settings.get("blocked_commands")) is not None:
             await self.embeds.error_interaction(
                 interaction,
                 "Command Disabled",
                 f"`/{command.qualified_name}` is disabled in this server.",
+                ephemeral=True,
+            )
+            return False
+
+        module = disabled_module_for(command.qualified_name, settings)
+        if module is not None:
+            where = site_link(self, "the website", f"/app/{interaction.guild.id}/settings")
+            await self.embeds.error_interaction(
+                interaction,
+                "Turned Off",
+                f"**{module}** is turned off in this server. An admin can turn it back on"
+                + (f" on {where}." if where else " from the bot's website."),
                 ephemeral=True,
             )
             return False
@@ -164,9 +181,9 @@ class GigaBot(commands.Bot):
 
         # Blocks are stored by qualified name; the caller-supplied name is the
         # leaf ("jpegify"), so prefer the interaction's own command identity.
-        blocked = {str(name).lower() for name in (settings.get("blocked_commands") or [])}
+        blocked = settings.get("blocked_commands")
         qualified = interaction.command.qualified_name.lower() if interaction.command else command_name.lower()
-        if qualified in blocked or command_name.lower() in blocked:
+        if blocking_entry(qualified, blocked) is not None or blocking_entry(command_name, blocked) is not None:
             await self.embeds.error_interaction(
                 interaction,
                 "Command Blocked",

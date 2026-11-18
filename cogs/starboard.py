@@ -5,6 +5,7 @@ import logging
 import discord
 from discord.ext import commands
 
+from utils.modules import module_enabled
 from utils.settings import (
     get_starboard_channel_id,
     get_starboard_emoji,
@@ -43,7 +44,7 @@ class Starboard(commands.Cog):
             delete_starboard_post(self.bot.storage_path, payload.guild_id, payload.message_id)
 
     async def _handle_star_change(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.guild_id is None:
+        if payload.guild_id is None or not module_enabled(self.bot.storage_path, payload.guild_id, "starboard"):
             return
         star_emoji = get_starboard_emoji(self.bot.storage_path, payload.guild_id)
         if str(payload.emoji) != star_emoji:

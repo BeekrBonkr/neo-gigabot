@@ -14,6 +14,9 @@ class Config:
     log_level: str = "INFO"
     openweathermap_api_key: str = ""
     giphy_api_key: str = ""
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    reddit_user_agent: str = ""
     support_server_invite: str = ""
     website_url: str = ""
     legacy_data_path: str = ""
@@ -25,6 +28,10 @@ class Config:
     @property
     def giphy_enabled(self) -> bool:
         return bool(self.giphy_api_key.strip())
+
+    @property
+    def reddit_api_enabled(self) -> bool:
+        return bool(self.reddit_client_id.strip() and self.reddit_client_secret.strip())
 
 
 
@@ -54,6 +61,9 @@ def load_config() -> Config:
         log_level=log_level,
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
         giphy_api_key=os.getenv("GIPHY_API_KEY", ""),
+        reddit_client_id=os.getenv("REDDIT_CLIENT_ID", ""),
+        reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET", ""),
+        reddit_user_agent=os.getenv("REDDIT_USER_AGENT", ""),
         support_server_invite=os.getenv("SUPPORT_SERVER_INVITE", ""),
         website_url=_http_url(os.getenv("WEBSITE_URL", "")),
         legacy_data_path=os.getenv("LEGACY_DATA_PATH", ""),

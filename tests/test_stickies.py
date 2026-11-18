@@ -56,7 +56,7 @@ def test_reposting_deletes_the_old_copy_and_ignores_the_bots_own_messages(storag
     channel = Channel()
     cog = Stickies(SimpleNamespace(storage_path=storage, user=SimpleNamespace(id=42), embeds=None))
     store.set_sticky(storage, 1, 7, "read the rules", 9)
-    message = lambda author, cid=7: SimpleNamespace(guild=object(), channel=channel if cid == 7 else SimpleNamespace(id=cid), author=SimpleNamespace(id=author))  # noqa: E731
+    message = lambda author, cid=7: SimpleNamespace(guild=SimpleNamespace(id=1), channel=channel if cid == 7 else SimpleNamespace(id=cid), author=SimpleNamespace(id=author))  # noqa: E731
     asyncio.run(cog.on_message(message(5)))
     assert sent == [store.HEADER + "read the rules"] and deleted == [] and store.get(storage, 7)["last_message_id"] == 1001
     for _ in range(4):

@@ -1,0 +1,574 @@
+"""Meme formats for the /memegen commands. Most artwork is drawn in code; the
+formats built on a well-known picture open it from assets/images. The frame
+functions take one RGBA frame; the poster builders return a finished image."""
+
+from __future__ import annotations
+
+import math
+from functools import lru_cache
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+
+from utils.image_filters import sepia
+from utils.imaging import load_font
+from utils import richtext
+
+INK = (30, 24, 20, 255)
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "assets" / "images"
+
+
+@lru_cache(maxsize=None)
+def _load_template(name: str) -> Image.Image:
+    return Image.open(TEMPLATES_DIR / name).convert("RGBA")
+
+
+def _template(name: str) -> Image.Image:
+    """A fresh copy of a template picture from assets/images."""
+    return _load_template(name).copy()
+
+
+def _cover(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """The picture scaled and center-cropped to fill `size` exactly."""
+    return ImageOps.fit(image, size, Image.LANCZOS, centering=(0.5, 0.5))
+
+
+def _contain(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    scale = min(size[0] / image.width, size[1] / image.height)
+    return image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))), Image.LANCZOS)
+
+
+def _centered_text(image: Image.Image, box: tuple[int, int, int, int], text: "richtext.RichText | str", font_name: str, *, fill,
+                   max_size: int = 200, stroke_width: int = 0, stroke_fill=(0, 0, 0, 255), spacing: int = 6) -> None:
+    """Fit text to a box on the image and draw it centered there."""
+    richtext.draw_in_box(image, box, text, font_name, fill=fill, max_size=max_size, stroke=stroke_width, stroke_fill=stroke_fill, gap=spacing)
+
+
+# ---------- speech bubble ----------
+
+def speech_bubble(frame: Image.Image, tail: str = "left") -> Image.Image:
+    """Cut a speech bubble out of the top of the picture, so whatever is
+    behind it in chat shows through. `tail` is where the point aims."""
+    scale = 3
+    width, height = frame.width * scale, frame.height * scale
+    band = height * 0.20
+    keep = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(keep)
+    draw.ellipse((-width * 0.18, -band, width * 1.18, band), fill=0)
+    tip_x = {"left": 0.30, "center": 0.50, "right": 0.70}.get(tail, 0.30)
+    root_x = {"left": 0.55, "center": 0.50, "right": 0.45}.get(tail, 0.55)
+    draw.polygon([(width * (root_x - 0.07), band * 0.90), (width * (root_x + 0.07), band * 0.90), (width * tip_x, band * 1.85)], fill=0)
+    keep = keep.resize(frame.size, Image.LANCZOS)
+    result = frame.copy()
+    result.putalpha(Image.fromarray(np.minimum(np.asarray(frame.getchannel("A")), np.asarray(keep)), "L"))
+    return result
+
+
+# ---------- jail ----------
+
+def jail(frame: Image.Image) -> Image.Image:
+    """Dim the picture and put cell bars in front of it."""
+    width, height = frame.size
+    rgb = ImageEnhance.Brightness(ImageEnhance.Color(frame.convert("RGB")).enhance(0.55)).enhance(0.8)
+    result = rgb.convert("RGBA")
+    result.putalpha(frame.getchannel("A"))
+    bars = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(bars)
+    count = 7
+    thickness = max(4, width // 28)
+    for index in range(count):
+        center = int(width * (index + 0.5) / count)
+        left = center - thickness // 2
+        draw.rectangle((left, 0, left + thickness, height), fill=(52, 54, 60, 255))
+        draw.rectangle((left + thickness // 5, 0, left + thickness // 5 + max(1, thickness // 4), height), fill=(128, 132, 142, 255))
+        draw.rectangle((left + thickness - max(1, thickness // 5), 0, left + thickness, height), fill=(24, 25, 28, 255))
+    rail = max(4, height // 22)
+    for top in (int(height * 0.06), int(height * 0.94) - rail):
+        draw.rectangle((0, top, width, top + rail), fill=(52, 54, 60, 255))
+        draw.rectangle((0, top + rail // 5, width, top + rail // 5 + max(1, rail // 4)), fill=(128, 132, 142, 255))
+    result.alpha_composite(bars)
+    return result
+
+
+# ---------- wasted ----------
+
+def wasted(frame: Image.Image) -> Image.Image:
+    """Drain the color and stamp WASTED across a dark band."""
+    width, height = frame.size
+    rgb = ImageEnhance.Brightness(ImageEnhance.Color(frame.convert("RGB")).enhance(0.12)).enhance(0.85)
+    result = rgb.convert("RGBA")
+    result.putalpha(frame.getchannel("A"))
+    band_height = max(20, int(height * 0.24))
+    top = (height - band_height) // 2
+    overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle((0, top, width, top + band_height), fill=(0, 0, 0, 150))
+    _centered_text(overlay, (int(width * 0.08), top + band_height // 8, int(width * 0.92), top + band_height - band_height // 8), "WASTED",
+                   "impact.ttf", fill=(200, 32, 44, 255), max_size=400, stroke_width=max(1, band_height // 28), stroke_fill=(20, 0, 0, 255))
+    result.alpha_composite(overlay)
+    return result
+
+
+# ---------- wanted poster ----------
+
+WANTED_SIZE = (600, 820)
+
+
+def _parchment(size: tuple[int, int]) -> Image.Image:
+    width, height = size
+    rng = np.random.default_rng(7)  # the same paper every time
+    grain = rng.normal(0, 7, (height, width, 1))
+    blotches = np.asarray(Image.fromarray(rng.integers(0, 255, (height // 40, width // 40), dtype=np.uint8), "L")
+                          .resize(size, Image.BICUBIC), dtype=np.float32)[..., None] - 127
+    ys, xs = np.mgrid[0:height, 0:width]
+    edge = np.minimum(np.minimum(xs, width - 1 - xs), np.minimum(ys, height - 1 - ys))[..., None]
+    burn = np.clip(1.0 - edge / 70.0, 0, 1) ** 2 * 60  # darker toward the edges
+    paper = np.array([226, 200, 152], dtype=np.float32) + grain + blotches * 0.12 - burn
+    return Image.fromarray(np.clip(paper, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+
+
+def wanted(picture: Image.Image, name: "richtext.RichText | str" = "", reward: "richtext.RichText | str" = "$5,000") -> Image.Image:
+    """An old-west wanted poster around the picture."""
+    name, reward = richtext.as_rich(name).strip(), richtext.as_rich(reward).strip()
+    width, height = WANTED_SIZE
+    poster = _parchment(WANTED_SIZE)
+    draw = ImageDraw.Draw(poster)
+    draw.rectangle((18, 18, width - 19, height - 19), outline=INK, width=4)
+    draw.rectangle((28, 28, width - 29, height - 29), outline=INK, width=1)
+    _centered_text(poster, (50, 40, width - 50, 170), "WANTED", "impact.ttf", fill=INK, max_size=170)
+    _centered_text(poster, (60, 172, width - 60, 214), "DEAD OR ALIVE", "impact.ttf", fill=INK, max_size=44)
+    photo_box = (110, 232, width - 110, 612)
+    photo = sepia(_cover(picture, (photo_box[2] - photo_box[0], photo_box[3] - photo_box[1])))
+    photo = ImageEnhance.Contrast(photo.convert("RGB")).enhance(1.15).convert("RGBA")
+    poster.paste(photo, photo_box[:2])
+    draw.rectangle((photo_box[0] - 5, photo_box[1] - 5, photo_box[2] + 4, photo_box[3] + 4), outline=INK, width=5)
+    text_top = 628
+    if name:
+        _centered_text(poster, (50, text_top, width - 50, text_top + 70), name.upper(), "impact.ttf", fill=INK, max_size=64)
+        text_top += 76
+    _centered_text(poster, (50, text_top, width - 50, height - 44), ("REWARD " + reward).upper(), "impact.ttf", fill=(120, 24, 20, 255), max_size=78)
+    return poster
+
+
+# ---------- drake ----------
+
+DRAKE_PANEL = 400
+
+
+def _content_panel(text: "richtext.RichText | str", picture: Image.Image | None) -> Image.Image:
+    panel = Image.new("RGBA", (DRAKE_PANEL, DRAKE_PANEL), (255, 255, 255, 255))
+    if picture is not None:
+        panel.alpha_composite(_cover(picture, (DRAKE_PANEL, DRAKE_PANEL)))
+    elif richtext.as_rich(text):
+        _centered_text(panel, (24, 24, DRAKE_PANEL - 24, DRAKE_PANEL - 24), richtext.as_rich(text).strip(), "arial.ttf", fill=(20, 20, 20, 255), max_size=64)
+    return panel
+
+
+def drake(reject_text: "richtext.RichText | str" = "", approve_text: "richtext.RichText | str" = "", reject_picture: Image.Image | None = None,
+          approve_picture: Image.Image | None = None) -> Image.Image:
+    """Two rows: the thing turned down, then the thing preferred. Each right-hand
+    panel shows its picture if one was given, otherwise its text."""
+    canvas = Image.new("RGBA", (DRAKE_PANEL * 2, DRAKE_PANEL * 2), (255, 255, 255, 255))
+    canvas.paste(_template("drake.jpg"), (0, 0))  # the left column: turning away on top, approving below
+    canvas.paste(_content_panel(reject_text, reject_picture), (DRAKE_PANEL, 0))
+    canvas.paste(_content_panel(approve_text, approve_picture), (DRAKE_PANEL, DRAKE_PANEL))
+    return canvas
+
+
+# ---------- change my mind ----------
+
+CMM_SIZE = (800, 636)
+CMM_SHEET = (720, 250)  # the statement is drawn flat at this size, then laid onto the sign
+# The corners of the blank part of the sign in the photo, above the printed
+# CHANGE MY MIND: top left, top right, bottom right, bottom left.
+CMM_SIGN = ((290, 364), (617, 240), (646, 357), (334, 471))
+
+
+def change_my_mind(text: "richtext.RichText | str") -> Image.Image:
+    """The change-my-mind photo with the statement on the sign, tilted to
+    follow the paper."""
+    scene = _template("changemymind.jpg")
+    sheet = Image.new("RGBA", CMM_SHEET, (255, 255, 255, 0))
+    _centered_text(sheet, (0, 0, *CMM_SHEET), richtext.as_rich(text).strip(), "arial.ttf", fill=(24, 24, 28, 255), max_size=110)
+    width, height = CMM_SHEET
+    flat = np.float32([(0, 0), (width, 0), (width, height), (0, height)])
+    warp = cv2.getPerspectiveTransform(flat, np.float32(CMM_SIGN))
+    laid = cv2.warpPerspective(np.asarray(sheet), warp, CMM_SIZE, flags=cv2.INTER_AREA, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255, 0))
+    scene.alpha_composite(Image.fromarray(laid, "RGBA"))
+    return scene
+
+
+# ---------- pictures placed into templates ----------
+
+def _flat(picture: Image.Image, color=(255, 255, 255, 255)) -> Image.Image:
+    """The picture with anything see-through filled in."""
+    backdrop = Image.new("RGBA", picture.size, color)
+    backdrop.alpha_composite(picture)
+    return backdrop
+
+
+def _box_quad(left: int, top: int, right: int, bottom: int) -> tuple:
+    return ((left, top), (right, top), (right, bottom), (left, bottom))
+
+
+def _lay_onto(scene: Image.Image, picture: Image.Image, quad, *, under: bool = False) -> None:
+    """Fit the picture into the scene so its corners land on `quad` (top left,
+    top right, bottom right, bottom left). `under` slides it beneath the scene,
+    for templates with a see-through hole where the picture goes."""
+    width = max(1, round(max(math.dist(quad[0], quad[1]), math.dist(quad[3], quad[2]))))
+    height = max(1, round(max(math.dist(quad[0], quad[3]), math.dist(quad[1], quad[2]))))
+    flat = np.float32([(0, 0), (width, 0), (width, height), (0, height)])
+    warp = cv2.getPerspectiveTransform(flat, np.float32(quad))
+    laid = cv2.warpPerspective(np.asarray(_cover(picture, (width, height))), warp, scene.size, flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    laid = Image.fromarray(laid, "RGBA")
+    if under:
+        laid.alpha_composite(scene)
+        scene.paste(laid)
+    else:
+        scene.alpha_composite(laid)
+
+
+def _write(image: Image.Image, box: tuple[int, int, int, int], text: "richtext.RichText | str", font_name: str, *, fill,
+           max_size: int, align: str = "center", from_top: bool = False) -> None:
+    """Fit text to a box and draw it there, centered or against one side."""
+    left, top, right, bottom = box
+    arranged = richtext.fit(richtext.as_rich(text).strip(), font_name, right - left, bottom - top, max_size=max_size)
+    drop = 0 if from_top else max(0, (bottom - top - arranged.height) // 2)
+    arranged.draw(image, left, top + drop, right - left, fill=fill, align=align)
+
+
+# ---------- respects ----------
+
+RESPECTS_PORTRAIT = ((477, 113), (573, 116), (588, 257), (499, 267))  # the framed photo beside the coffin
+
+
+def respects(picture: Image.Image) -> Image.Image:
+    """The funeral where you press F to pay respects, with the picture in the frame."""
+    scene = _template("respects.jpg")
+    haze = Image.new("RGBA", picture.size, (112, 108, 96, 255))  # the scene is foggy, so the photo is dulled to sit in it
+    _lay_onto(scene, Image.blend(_flat(picture), haze, 0.3), RESPECTS_PORTRAIT)
+    return scene
+
+
+# ---------- who did this ----------
+
+WHO_DID_THIS_BOX = (0, 159, 717, 563)
+
+
+def who_did_this(picture: Image.Image) -> Image.Image:
+    """The picture between WHO DID THIS and a row of crying-laughing faces."""
+    scene = _template("whodidthis.png")
+    _lay_onto(scene, _flat(picture), _box_quad(*WHO_DID_THIS_BOX))
+    return scene
+
+
+# ---------- wheeze ----------
+
+WHEEZE_WORDS = ((40, 54, 215, 156), (215, 68, 250, 156))  # the lettering inside the first speech bubble
+WHEEZE_PICTURE = (46, 56, 244, 154)
+
+
+def wheeze(picture: Image.Image) -> Image.Image:
+    """The two-panel comic: the picture is what gets said, and the listener wheezes."""
+    scene = _template("wheeze.png")
+    for box in WHEEZE_WORDS:  # wipe the words the template comes with
+        scene.paste((255, 255, 255, 255), box)
+    left, top, right, bottom = WHEEZE_PICTURE
+    fitted = _contain(picture, (right - left, bottom - top))
+    scene.alpha_composite(fitted, ((left + right - fitted.width) // 2, (top + bottom - fitted.height) // 2))
+    return scene
+
+
+# ---------- customers usually keep this item ----------
+
+KEEP_ITEM_WIDTH = 640
+
+
+def keep_item(picture: Image.Image) -> Image.Image:
+    """The picture as a shop listing, with the returns note under it:
+    customers usually keep this item. Drawn here, as it is a piece of a web page."""
+    width = KEEP_ITEM_WIDTH
+    card = Image.new("RGBA", (width, 640), (255, 255, 255, 255))
+    fitted = _contain(picture, (width - 80, 400))
+    card.alpha_composite(fitted, ((width - fitted.width) // 2, 40 + (400 - fitted.height) // 2))
+    draw = ImageDraw.Draw(card)
+    note = (40, 476, width - 40, 600)
+    draw.rounded_rectangle(note, radius=12, fill=(240, 248, 246, 255), outline=(196, 220, 214, 255), width=2)
+    draw.ellipse((62, 500, 106, 544), fill=(0, 124, 108, 255))
+    draw.line([(73, 523), (81, 532), (96, 513)], fill=(255, 255, 255, 255), width=5, joint="curve")
+    _write(card, (124, 492, note[2] - 20, 536), "Customers usually keep this item", "arial.ttf", fill=(15, 17, 17, 255), max_size=28, align="left")
+    _write(card, (124, 538, note[2] - 20, 590), "This product has fewer returns than average compared to similar products.", "DejaVuSans-Bold.ttf",
+           fill=(86, 89, 89, 255), max_size=17, align="left", from_top=True)
+    return card
+
+
+# ---------- achievement ----------
+
+ACHIEVEMENT_TEXT = (193, 80, 690, 136)  # the empty line under "Achievement unlocked"
+
+
+def achievement(text: "richtext.RichText | str") -> Image.Image:
+    """The Xbox achievement popup, with the text as the achievement's name."""
+    popup = _template("achievement.png")
+    _write(popup, ACHIEVEMENT_TEXT, text, "arial.ttf", fill=(214, 214, 214, 255), max_size=40, align="left")
+    return popup
+
+
+# ---------- rip ----------
+
+RIP_STONE = (121, 187, 485, 693)  # the smooth face of the headstone
+RIP_INK = (72, 70, 70, 255)
+
+
+def rip(text: "richtext.RichText | str", picture: Image.Image | None = None) -> Image.Image:
+    """A headstone carved with R.I.P., a name, and a picture if there is one."""
+    scene = _template("rip.jpg")
+    left, top, right, bottom = RIP_STONE
+    _write(scene, (left + 20, top + 16, right - 20, top + 110), "R.I.P.", "impact.ttf", fill=RIP_INK, max_size=90)
+    words_top = top + 130
+    if picture is not None:
+        side = 230
+        portrait = ImageOps.grayscale(_flat(_cover(picture, (side, side)), (200, 200, 200, 255))).convert("RGBA")
+        portrait.putalpha(200)  # the stone shows through a little
+        scene.alpha_composite(portrait, ((left + right - side) // 2, words_top))
+        words_top += side + 16
+    _write(scene, (left + 20, words_top, right - 20, bottom - 24), text, "arial.ttf", fill=RIP_INK, max_size=64)
+    return scene
+
+
+# ---------- rtx ----------
+
+RTX_PANEL = 480
+RTX_GAP = 6
+RTX_BADGE_WIDTH = 170
+
+
+def rtx(off: Image.Image, on: Image.Image) -> Image.Image:
+    """Two pictures side by side, badged RTX OFF and RTX ON."""
+    canvas = Image.new("RGBA", (RTX_PANEL * 2 + RTX_GAP, RTX_PANEL), (255, 255, 255, 255))
+    for index, (picture, badge_name) in enumerate(((off, "rtx_off.png"), (on, "rtx_on.png"))):
+        left = index * (RTX_PANEL + RTX_GAP)
+        canvas.alpha_composite(_cover(_flat(picture), (RTX_PANEL, RTX_PANEL)), (left, 0))
+        badge = _template(badge_name)
+        badge = badge.resize((RTX_BADGE_WIDTH, round(badge.height * RTX_BADGE_WIDTH / badge.width)), Image.LANCZOS)
+        canvas.alpha_composite(badge, (left, RTX_PANEL - badge.height - 48))
+    return canvas
+
+
+# ---------- breaking news ----------
+
+NEWS_SIZE = (1280, 720)
+NEWS_HEADLINE = (26, 538, 1254, 644)  # the pale bar under BREAKING NEWS
+
+
+def news(picture: Image.Image, headline: "richtext.RichText | str") -> Image.Image:
+    """The picture as a live news broadcast, with the headline under BREAKING NEWS."""
+    scene = Image.new("RGBA", NEWS_SIZE, (0, 0, 0, 255))
+    scene.alpha_composite(_cover(picture, NEWS_SIZE))
+    scene.alpha_composite(_template("news.png"))
+    _write(scene, NEWS_HEADLINE, richtext.as_rich(headline).upper(), "impact.ttf", fill=(22, 22, 28, 255), max_size=84, align="left")
+    return scene
+
+
+# ---------- presidential alert ----------
+
+PRESIDENTIAL_TEXT = (48, 190, 598, 300)
+
+
+def presidential(text: "richtext.RichText | str") -> Image.Image:
+    """A phone's Presidential Alert with the text as its message."""
+    alert = _template("presidential.png")
+    _write(alert, PRESIDENTIAL_TEXT, text, "DejaVuSans-Bold.ttf", fill=(40, 40, 40, 255), max_size=30, align="left", from_top=True)
+    return alert
+
+
+# ---------- notification ----------
+
+NOTIFICATION_WIDTH = 640
+
+
+def notification(picture: Image.Image, text: "richtext.RichText | str", sender: "richtext.RichText | str") -> Image.Image:
+    """A phone's message banner over the top of the picture. Drawn here: a
+    banner is a rounded box and two lines of text."""
+    width = NOTIFICATION_WIDTH
+    height = min(960, max(300, round(picture.height * width / picture.width)))
+    scene = _cover(_flat(picture, (0, 0, 0, 255)), (width, height))
+    box = (16, 16, width - 16, 156)
+    shape = Image.new("L", scene.size, 0)
+    ImageDraw.Draw(shape).rounded_rectangle(box, radius=30, fill=255)
+    frosted = scene.filter(ImageFilter.GaussianBlur(14))
+    frosted.alpha_composite(Image.new("RGBA", scene.size, (246, 246, 248, 205)))
+    scene.paste(frosted, (0, 0), shape)
+    draw = ImageDraw.Draw(scene)
+    draw.rounded_rectangle((34, 32, 70, 68), radius=9, fill=(52, 199, 89, 255))  # the messages icon
+    draw.ellipse((42, 40, 62, 57), fill=(255, 255, 255, 255))
+    draw.polygon([(45, 53), (43, 61), (52, 56)], fill=(255, 255, 255, 255))
+    draw.text((82, 50), "MESSAGES", font=load_font("DejaVuSans-Bold.ttf", 17), fill=(96, 96, 102, 255), anchor="lm")
+    draw.text((box[2] - 22, 50), "now", font=load_font("DejaVuSans-Bold.ttf", 17), fill=(120, 120, 126, 255), anchor="rm")
+    richtext.fit_line(sender, "arial.ttf", 24, box[2] - 56 - 34).draw(scene, 36, 78, fill=(12, 12, 14, 255), align="left")
+    _write(scene, (36, 108, box[2] - 22, 148), text, "DejaVuSans-Bold.ttf", fill=(40, 40, 44, 255), max_size=21, align="left", from_top=True)
+    return scene
+
+
+# ---------- einstein ----------
+
+EINSTEIN_BOARD = (510, 40, 976, 270)  # the clear part of the blackboard
+
+
+def einstein(text: "richtext.RichText | str") -> Image.Image:
+    """Einstein at the blackboard, having just chalked up the text."""
+    scene = _template("einstein.jpg")
+    chalk = Image.new("RGBA", scene.size, (0, 0, 0, 0))
+    _write(chalk, EINSTEIN_BOARD, text, "arial.ttf", fill=(236, 236, 230, 235), max_size=120)
+    scene.alpha_composite(chalk.filter(ImageFilter.GaussianBlur(1.1)))  # chalk has soft edges
+    return scene
+
+
+# ---------- sonic says ----------
+
+SONIC_TEXT = (188, 160, 584, 372)
+
+
+def sonic(text: "richtext.RichText | str") -> Image.Image:
+    """The Sonic Says card, with the text as his advice."""
+    scene = _template("sonic.jpg")
+    _write(scene, SONIC_TEXT, text, "arial.ttf", fill=(255, 255, 255, 255), max_size=64)
+    return scene
+
+
+# ---------- watchmojo ----------
+
+WATCHMOJO_VIDEO = (0, 0, 1080, 613)
+WATCHMOJO_TITLE = (36, 620, 1000, 678)
+
+
+def watchmojo(picture: Image.Image, title: "richtext.RichText | str") -> Image.Image:
+    """The picture as a WatchMojo video on a phone, with the title under it."""
+    scene = _template("watchmojo.jpg")
+    _lay_onto(scene, _flat(picture, (0, 0, 0, 255)), _box_quad(*WATCHMOJO_VIDEO))
+    _write(scene, WATCHMOJO_TITLE, title, "arial.ttf", fill=(20, 20, 20, 255), max_size=36, align="left")
+    return scene
+
+
+# ---------- watermarks ----------
+
+WATERMARKS = ("hypercam", "bandicam", "ifunny")
+
+
+def watermark(frame: Image.Image, style: str) -> Image.Image:
+    """Stamp a frame the way a screen recorder or a meme site would."""
+    result = frame.copy()
+    mark = _template(f"{style}.png")
+
+    def scaled(width: int) -> Image.Image:
+        width = max(8, width)
+        return mark.resize((width, max(1, round(mark.height * width / mark.width))), Image.LANCZOS)
+
+    if style == "hypercam":  # a white label in the top left corner
+        result.paste(scaled(round(frame.width * 0.45)), (0, 0))
+    elif style == "bandicam":  # the address across the top, in the middle
+        stamp = scaled(round(frame.width * 0.36))
+        result.alpha_composite(stamp, ((frame.width - stamp.width) // 2, max(0, round(frame.height * 0.012))))
+    else:  # ifunny: a strip over the bottom edge
+        strip = scaled(frame.width)
+        result.paste(strip, (0, frame.height - strip.height))
+    return result
+
+
+# ---------- panels that react to the picture ----------
+
+PANEL_WIDTH = 640
+
+
+def _stack(*parts: Image.Image) -> Image.Image:
+    """The parts one above the other, each scaled to the same width."""
+    scaled = [part.resize((PANEL_WIDTH, max(1, round(part.height * PANEL_WIDTH / part.width))), Image.LANCZOS) for part in parts]
+    canvas = Image.new("RGBA", (PANEL_WIDTH, sum(part.height for part in scaled)), (255, 255, 255, 255))
+    top = 0
+    for part in scaled:
+        canvas.alpha_composite(part, (0, top))
+        top += part.height
+    return canvas
+
+
+def kirby(picture: Image.Image) -> Image.Image:
+    """The picture, and under it Kirby calling the police."""
+    return _stack(picture, _template("kirby.jpg"))
+
+
+def excuse(picture: Image.Image) -> Image.Image:
+    """The picture, and under it the "excuse me what" reaction."""
+    return _stack(picture, _template("excuse.jpg"))
+
+
+PERFECTION_MEANING = "the condition, state, or quality of being free or as free as possible from all flaws or defects."
+
+
+def perfection(picture: Image.Image) -> Image.Image:
+    """The dictionary entry for perfection, with the picture under it as the
+    example. The entry is text, so it is written here rather than loaded."""
+    entry = Image.new("RGBA", (PANEL_WIDTH, 232), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(entry)
+    draw.text((30, 22), "per·fec·tion", font=load_font("DejaVuSans-Bold.ttf", 44), fill=(32, 33, 36, 255))
+    draw.text((30, 84), "/pərˈfekSH(ə)n/", font=load_font("DejaVuSans-Bold.ttf", 20), fill=(112, 117, 122, 255))
+    draw.text((30, 118), "noun", font=load_font("DejaVuSans-Bold.ttf", 20), fill=(112, 117, 122, 255))
+    _write(entry, (30, 152, PANEL_WIDTH - 30, 222), PERFECTION_MEANING, "arial.ttf", fill=(32, 33, 36, 255), max_size=22, align="left", from_top=True)
+    return _stack(entry, picture)
+
+
+# ---------- scenes ----------
+
+MUSEUM_CANVAS = (367, 72, 594, 348)
+BILLBOARD_FACE = ((150, 149), (772, 154), (784, 338), (148, 338))
+OLD_TV_SCREEN = (94, 87, 545, 427)
+BILL_PORTRAIT = (276, 60, 537, 431)
+BOB_ROSS_CANVAS = ((22, 71), (455, 88), (455, 407), (22, 389))
+
+
+def _museum(picture: Image.Image) -> Image.Image:
+    scene = _template("museum.png")
+    _lay_onto(scene, _flat(picture), _box_quad(*MUSEUM_CANVAS), under=True)
+    return scene
+
+
+def _billboard(picture: Image.Image) -> Image.Image:
+    scene = _template("billboard.jpg")
+    _lay_onto(scene, _flat(picture), BILLBOARD_FACE)
+    return scene
+
+
+def _old_tv(picture: Image.Image) -> Image.Image:
+    scene = _template("oldtv.png")
+    _lay_onto(scene, _flat(picture, (0, 0, 0, 255)), _box_quad(*OLD_TV_SCREEN), under=True)
+    return scene
+
+
+def _bill(picture: Image.Image) -> Image.Image:
+    """The portrait on the note, printed in the note's own ink."""
+    scene = _template("bill.jpg")
+    left, top, right, bottom = BILL_PORTRAIT
+    size = (right - left, bottom - top)
+    gray = ImageOps.autocontrast(ImageOps.grayscale(_cover(_flat(picture), size)), cutoff=2)
+    printed = ImageOps.colorize(gray, (36, 50, 48), (224, 226, 206)).convert("RGBA")
+    oval = Image.new("L", size, 0)
+    ImageDraw.Draw(oval).ellipse((8, 8, size[0] - 9, size[1] - 9), fill=255)
+    scene.paste(printed, (left, top), oval.filter(ImageFilter.GaussianBlur(5)))
+    return scene
+
+
+def _bob_ross(picture: Image.Image) -> Image.Image:
+    scene = _template("bobross.png")
+    _lay_onto(scene, _flat(picture), BOB_ROSS_CANVAS, under=True)
+    return scene
+
+
+SCENES = {"museum": _museum, "billboard": _billboard, "oldtv": _old_tv, "bill": _bill, "bobross": _bob_ross}
+
+
+def scene(picture: Image.Image, name: str) -> Image.Image:
+    """Put the picture somewhere: a museum wall, a billboard, an old TV, a
+    hundred dollar bill, or Bob Ross's easel."""
+    return SCENES[name](picture)

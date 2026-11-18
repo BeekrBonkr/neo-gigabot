@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.modules import enabled_in
 from utils.settings import get_guild_settings, update_guild_settings
 from utils.website import site_link
 
@@ -69,6 +70,9 @@ class Verification(commands.Cog):
         if guild is None or not isinstance(member, discord.Member):
             return
         settings = get_guild_settings(self.bot.storage_path, guild.id)
+        if settings.get("verify_role_id") and not enabled_in(settings, "verification"):
+            await interaction.response.send_message("Verification is turned off in this server right now.", ephemeral=True)
+            return
         role, problem = self._role(guild, settings)
         problem = problem or verification_problem(settings, member.created_at) or ""
         if problem:

@@ -72,44 +72,131 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     # Honeypot: a channel nobody should post in. Whoever does is removed.
     "honeypot_channel_id": "",
     "honeypot_action": "ban",
+    "honeypot_exempt_roles": [],
+    "honeypot_exempt_users": [],
     # Ban appeals: banned users can answer these questions on the website.
     "appeals_enabled": False,
-    "appeals_questions": "",
+    "appeals_questions": "",  # the older one-question-per-line form; appeals_form wins when set
+    "appeals_form": [],
+    "appeals_intro": "",
+    "appeals_reappeal_days": 7,
+    "appeals_channel_id": "",
     # How long the website's searchable copy of the activity log is kept. 0 keeps no copy.
     "logging_keep_days": 30,
     # Where /suggest posts. Empty turns suggestions off.
     "suggestions_channel_id": "",
-    # Richer welcomes: how the join greeting is posted, and an optional DM.
-    "welcome_style": "text",
+    # Richer welcomes: which forms the join greeting takes (any of text,
+    # embed, image; all that are listed are posted), and an optional DM.
+    "welcome_styles": ["text"],
     "welcome_embed_title": "Welcome to {server}!",
     "welcome_embed_color": "",
     "welcome_embed_image_url": "",
     "welcome_embed_footer": "",
     "welcome_dm_message": "",
+    # The generated welcome image: a gradient or an uploaded picture behind
+    # the avatar, and the two lines of text around the member's name.
+    "welcome_card_background": "gradient",
+    "welcome_card_gradient": "horizontal",
+    "welcome_card_color_start": "",
+    "welcome_card_color_end": "",
+    "welcome_card_text_color": "",
+    "welcome_card_dim": 45,
+    "welcome_card_title": "WELCOME",
+    "welcome_card_subtitle": "Member #{count} of {server}",
     # Temporary voice channels: joining the hub channel creates one.
     "tempvoice_hub_channel_id": "",
     "tempvoice_name": "{name}'s channel",
     "tempvoice_user_limit": 0,
+    # Module switches (utils/modules.py). Features that work from commands are
+    # on by default; features that need setting up start off.
+    "welcome_enabled": False,
+    "leave_enabled": False,
+    "member_roles_enabled": False,
+    "moderation_enabled": True,
+    "automod_enabled": False,
+    "raid_protection_enabled": False,
+    "verify_enabled": False,
+    "honeypot_enabled": False,
+    "suggestions_enabled": False,
+    "tempvoice_enabled": False,
+    "starboard_enabled": False,
+    "music_enabled": True,
+    "tags_enabled": True,
+    "stickies_enabled": True,
+    "rolemenus_enabled": True,
+    "reactionroles_enabled": True,
+    "schedules_enabled": True,
+    "snipe_enabled": True,
 }
+
+# Modules that are a single command: module switch -> that command.
+COMMAND_MODULE_FLAGS: dict[str, str] = {"snipe": "snipe_enabled"}
+
+# Module switches that start off, and the settings that mean the module is in
+# use. Two jobs: a server saved before the switches existed keeps what it had
+# configured (derive_module_flags), and setting a module up from Discord turns
+# it on (update_guild_settings).
+MODULE_TRIGGERS: dict[str, tuple[str, ...]] = {
+    "welcome_enabled": ("welcome_channel_ids", "welcome_dm_message"),
+    "leave_enabled": ("leave_channel_ids",),
+    "member_roles_enabled": ("autoroles", "sticky_roles"),
+    "automod_enabled": ("automod_invites_action", "automod_words_action", "automod_mentions_action", "automod_spam_action"),
+    "raid_protection_enabled": ("antiraid_enabled", "antiraid_min_account_age_days"),
+    "verify_enabled": ("verify_role_id",),
+    "honeypot_enabled": ("honeypot_channel_id",),
+    "suggestions_enabled": ("suggestions_channel_id",),
+    "tempvoice_enabled": ("tempvoice_hub_channel_id",),
+    "starboard_enabled": ("starboard_channel_id",),
+}
+
+
+def _in_use(value: Any) -> bool:
+    return value not in ("", "off", 0, False, None) and value != []
+
+
+def derive_module_flags(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill in module switches missing from stored settings: on when the
+    module was already configured, so upgrading never turns a feature off."""
+    missing = [flag for flag in MODULE_TRIGGERS if flag not in data]
+    if not missing and "welcome_style" not in data:
+        return data
+    derived = dict(data)
+    for flag in missing:
+        derived[flag] = any(_in_use(data.get(key)) for key in MODULE_TRIGGERS[flag])
+    if "leave_enabled" in missing:
+        # Leave messages used to ride on the welcome switch and fall back to
+        # the welcome channels, so a server that had them keeps them.
+        has_channel = _in_use(data.get("leave_channel_ids")) or _in_use(data.get("welcome_channel_ids"))
+        derived["leave_enabled"] = bool(derived.get("welcome_enabled")) and has_channel and _in_use(data.get("leave_message", "set"))
+    if "welcome_style" in data:
+        # One style became a list of them.
+        style = derived.pop("welcome_style")
+        if "welcome_styles" not in data and style in WELCOME_STYLES:
+            derived["welcome_styles"] = [style]
+    return derived
 
 # How the newer settings are validated when they arrive from the web panel
 # (cogs/panel_bridge.py validate_settings). Declared here, next to the
 # defaults, so adding a setting is one edit in one file.
 AUTOMOD_ACTIONS = ("off", "delete", "warn", "mute")
+WELCOME_STYLES = ("text", "embed", "image")
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "automod_invites_action": AUTOMOD_ACTIONS,
     "automod_words_action": AUTOMOD_ACTIONS,
     "automod_mentions_action": AUTOMOD_ACTIONS,
     "automod_spam_action": AUTOMOD_ACTIONS,
     "honeypot_action": ("ban", "softban", "kick"),
-    "welcome_style": ("text", "embed", "image"),
+    "welcome_card_background": ("gradient", "image"),
+    "welcome_card_gradient": ("horizontal", "vertical", "diagonal", "radial", "solid"),
 }
+# Lists that hold any of a fixed set of values, kept in this order.
+SETTING_MULTI_CHOICES: dict[str, tuple[str, ...]] = {"welcome_styles": WELCOME_STYLES}
 # Hex colors ("" for none) and https links ("" for none).
-SETTING_COLORS: set[str] = {"welcome_embed_color"}
+SETTING_COLORS: set[str] = {"welcome_embed_color", "welcome_card_color_start", "welcome_card_color_end", "welcome_card_text_color"}
 SETTING_URLS: set[str] = {"welcome_embed_image_url"}
 SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
-SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
-SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id"}
+SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels", "honeypot_exempt_roles", "honeypot_exempt_users"}
+SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id", "appeals_channel_id"}
 SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "automod_mention_limit": (2, 50),
     "automod_spam_limit": (3, 30),
@@ -119,10 +206,12 @@ SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
     "antiraid_min_account_age_days": (0, 365),
     "verify_min_account_age_days": (0, 365),
     "logging_keep_days": (0, 90),
+    "appeals_reappeal_days": (0, 365),
     "tempvoice_user_limit": (0, 99),
+    "welcome_card_dim": (0, 90),
 }
 # Text settings that may be longer than the usual 1000 characters.
-SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000}
+SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000, "welcome_card_title": 40, "welcome_card_subtitle": 80}
 
 WARN_ACTION_CHOICES = ("none", "mute", "kick", "ban")
 MOD_LOG_EVENT_KINDS = ("warn", "mute", "kick", "ban")
@@ -329,13 +418,33 @@ def get_guild_settings(storage_path: Path, guild_id: int | str) -> dict[str, Any
         _upsert_guild_settings(storage_path, guild_id, defaults)
         return deepcopy(defaults)
 
-    synced = sync_with_default(loaded, defaults)
+    synced = sync_with_default(derive_module_flags(loaded), defaults)
     if synced != loaded:
         _upsert_guild_settings(storage_path, guild_id, synced)
     else:
         _GUILD_CACHE[(str(storage_path), int(guild_id))] = deepcopy(synced)
 
     return synced
+
+
+def sync_command_modules(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Keep a module that is one command (COMMAND_MODULE_FLAGS) and that
+    command's entry in the disabled list saying the same thing: disabling the
+    command turns the module off, and turning the module on re-enables it."""
+    result = dict(after)
+    for command, flag in COMMAND_MODULE_FLAGS.items():
+        was_blocked = blocking_entry(command, before.get("blocked_commands")) is not None
+        now_blocked = blocking_entry(command, result.get("blocked_commands")) is not None
+        was_on, now_on = bool(before.get(flag, True)), bool(result.get(flag, True))
+        if now_blocked and not was_blocked:
+            result[flag] = False
+        elif now_on and not was_on:
+            result["blocked_commands"] = [name for name in (result.get("blocked_commands") or []) if str(name).lower() != command]
+            if blocking_entry(command, result["blocked_commands"]) is not None:
+                result[flag] = False  # still off through a wider entry; the switch must not claim otherwise
+        elif was_blocked and not now_blocked:
+            result[flag] = True
+    return result
 
 
 def save_guild_settings(storage_path: Path, guild_id: int | str, data: dict[str, Any]) -> None:
@@ -351,6 +460,11 @@ def update_guild_settings(
 ) -> dict[str, Any]:
     current = get_guild_settings(storage_path, guild_id)
     updated = apply_patch(current, patch)
+    # Setting a module up (choosing its channel, say) turns it on.
+    for flag, triggers in MODULE_TRIGGERS.items():
+        if flag not in patch and any(_in_use(patch.get(key)) for key in triggers if key in patch):
+            updated[flag] = True
+    updated = sync_command_modules(current, updated)
     save_guild_settings(storage_path, guild_id, updated)
     return get_guild_settings(storage_path, guild_id)
 
@@ -366,7 +480,7 @@ def sync_all_guild_settings(storage_path: Path) -> int:
     for row in rows:
         guild_id = int(row["guild_id"])
         loaded = _deserialize(row["data"])
-        synced = sync_with_default(loaded, defaults)
+        synced = sync_with_default(derive_module_flags(loaded), defaults)
         if synced != loaded:
             _upsert_guild_settings(storage_path, guild_id, synced)
             updated_count += 1
@@ -415,10 +529,25 @@ def migrate_blocked_command_names(storage_path: Path, leaf_to_qualified: dict[st
 # ==============================
 # convenience helpers used by other cogs
 # ==============================
+def blocking_entry(qualified_name: str, blocked: Any) -> str | None:
+    """The blocked_commands entry that turns this command off, or None. An
+    entry is a command's qualified name, or the name of a group, which turns
+    off everything inside it ("music" covers "music play" and "music playlist
+    add", including subcommands added later)."""
+    names = {str(name).lower() for name in (blocked or [])}
+    if not names:
+        return None
+    words = qualified_name.lower().split()
+    for length in range(len(words), 0, -1):
+        candidate = " ".join(words[:length])
+        if candidate in names:
+            return candidate
+    return None
+
+
 def command_is_blocked(storage_path: Path, guild_id: int | str, command_name: str) -> bool:
     settings = get_guild_settings(storage_path, guild_id)
-    blocked = settings.get("blocked_commands", []) or []
-    return command_name.lower() in {str(name).lower() for name in blocked}
+    return blocking_entry(command_name, settings.get("blocked_commands")) is not None
 
 
 def is_bot_channel(storage_path: Path, guild_id: int | str, channel_id: int) -> bool:

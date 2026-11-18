@@ -12,6 +12,10 @@ from utils.website import site_link, site_url
 HELP_COLOR = discord.Color.blurple()
 HELP_VIEW_TIMEOUT_SECONDS = 180.0
 MENTION_HELP_COOLDOWN_SECONDS = 5.0
+# A category is split into pages so no embed gets near Discord's 4096 character
+# description limit (over it, the whole message is refused).
+HELP_PAGE_LINES = 15
+HELP_PAGE_CHARS = 2000
 
 # Curated category -> command name list. This controls grouping, emoji, and display
 # order; the actual descriptions shown are always pulled live from each command's
@@ -31,7 +35,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
             "simon", "hotpotato",
         ],
     ),
-    ("images", "🖼️", "Images & Memes", ["image"]),
+    ("images", "🖼️", "Images & Memes", ["image", "filter", "animate", "memegen", "edit"]),
     ("music", "🎵", "Music", ["music"]),
     (
         "moderation",
@@ -61,11 +65,7 @@ class HelpCategorySelect(discord.ui.Select["HelpView"]):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         assert self.view is not None
-        key = self.values[0]
-        embed = self.cog.build_category_embed(key)
-        view = HelpView(cog=self.cog, author_id=self.view.author_id, selected=key)
-        await interaction.response.edit_message(embed=embed, view=view)
-        view.message = self.view.message
+        await self.view.show(interaction, self.values[0], 0)
 
 
 class HelpHomeButton(discord.ui.Button["HelpView"]):
@@ -75,10 +75,18 @@ class HelpHomeButton(discord.ui.Button["HelpView"]):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         assert self.view is not None
-        embed = self.cog.build_home_embed()
-        view = HelpView(cog=self.cog, author_id=self.view.author_id)
-        await interaction.response.edit_message(embed=embed, view=view)
-        view.message = self.view.message
+        await self.view.show(interaction, None, 0)
+
+
+class HelpPageButton(discord.ui.Button["HelpView"]):
+    def __init__(self, cog: "Help", *, label: str, page: int, disabled: bool) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.primary, disabled=disabled)
+        self.cog = cog
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        assert self.view is not None
+        await self.view.show(interaction, self.view.selected, self.page)
 
 
 class HelpView(discord.ui.View):
@@ -88,15 +96,29 @@ class HelpView(discord.ui.View):
         cog: "Help",
         author_id: int,
         selected: str | None = None,
+        page: int = 0,
         timeout: float = HELP_VIEW_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(timeout=timeout)
         self.cog = cog
         self.author_id = author_id
+        self.selected = selected
         self.message: discord.Message | None = None
         self.add_item(HelpCategorySelect(cog))
         if selected is not None:
+            pages = len(cog.category_pages(selected))
+            if pages > 1:
+                self.add_item(HelpPageButton(cog, label="◀ Previous", page=page - 1, disabled=page <= 0))
+                self.add_item(HelpPageButton(cog, label="Next ▶", page=page + 1, disabled=page >= pages - 1))
             self.add_item(HelpHomeButton(cog))
+
+    async def show(self, interaction: discord.Interaction, key: str | None, page: int) -> None:
+        """Swap the message over to a category page (or home when key is None)."""
+        embed = self.cog.build_home_embed() if key is None else self.cog.build_category_embed(key, page)
+        view = HelpView(cog=self.cog, author_id=self.author_id, selected=key, page=page)
+        await interaction.response.edit_message(embed=embed, view=view)
+        view.message = self.message
+        self.stop()  # the old view must not time out and disable the new one's buttons
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -154,8 +176,8 @@ class Help(commands.Cog):
             footer="Only you can see this menu.",
         )
 
-    def build_category_embed(self, key: str) -> discord.Embed:
-        emoji, label, names = self._category_lookup()[key]
+    def _category_lines(self, key: str) -> list[str]:
+        _emoji, _label, names = self._category_lookup()[key]
         lines: list[str] = []
         for name in names:
             node = self.bot.tree.get_command(name)
@@ -167,8 +189,28 @@ class Help(commands.Cog):
                         lines.append(f"**/{sub.qualified_name}** - {sub.description or 'No description.'}")
             else:
                 lines.append(f"**/{name}** - {node.description or 'No description.'}")
-        description = "\n".join(lines) if lines else "Nothing here yet."
-        return self.bot.embeds.create(title=f"{emoji} {label}", description=description, color=HELP_COLOR)
+        return lines
+
+    def category_pages(self, key: str) -> list[str]:
+        """The category's command list, cut into embed-sized pages."""
+        pages: list[list[str]] = [[]]
+        for line in self._category_lines(key):
+            current = pages[-1]
+            if current and (len(current) >= HELP_PAGE_LINES or sum(map(len, current)) + len(current) + len(line) > HELP_PAGE_CHARS):
+                pages.append(current := [])
+            current.append(line)
+        return ["\n".join(page) for page in pages]
+
+    def build_category_embed(self, key: str, page: int = 0) -> discord.Embed:
+        emoji, label, _names = self._category_lookup()[key]
+        pages = self.category_pages(key)
+        page = max(0, min(page, len(pages) - 1))
+        return self.bot.embeds.create(
+            title=f"{emoji} {label}",
+            description=pages[page] or "Nothing here yet.",
+            color=HELP_COLOR,
+            footer=f"Page {page + 1} of {len(pages)}" if len(pages) > 1 else None,
+        )
 
     @app_commands.command(name="help", description="Show a categorized list of everything I can do.")
     async def help_command(self, interaction: discord.Interaction) -> None:

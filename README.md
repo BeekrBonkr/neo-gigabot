@@ -32,12 +32,26 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   and queue/track-length caps — all from the dashboard
 - Commands that alter live playback require you to be in the bot's voice channel
 
-### 🖼️ Images — `/image …`
+### 🖼️ Images — `/image …`, `/filter …`, `/animate …`, `/memegen …`, `/edit …`
 - Grouped into `effects`, `transform`, `text`, `template`, and `misc`:
   deepfry, swirl, shake, jpegify, pixelate, blur, rotate/flip/flop/crop/stretch,
   caption/toptext/bottomtext, motivational posters, quote images, format conversion, and more
-- **Face detection** (OpenCV DNN): `facebox`, `blurfaces`, `facecrop`, `faceswap`, `googlyeyes`
+- **Face detection** (OpenCV DNN): `facebox`, `blurfaces`, `facecrop`, `faceswap`, `googlyeyes`, `joy`, `clown`, `forehead`
 - **Content-aware scale** (seam carving), GIF-aware — effects apply to every frame
+- **Color filters** (`/filter …`): invert, grayscale, sepia, hue, adjust (brightness, contrast, saturation),
+  posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
+- **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet, bonk and triggered (on an image or a member's avatar),
+  plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
+- **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted, respects,
+  whodidthis, wheeze, keepitem, achievement, rip, rtx, news, presidential, notification, einstein, sonic,
+  watchmojo, watermark, kirby, excuse, perfection, scene.
+  Formats built on a well-known picture use the real template, kept in `assets/images/`
+- **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
+  resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)
+- **Text that survives real input**: every command that writes on an image draws emoji in color (flags,
+  skin tones and joined emoji included), custom server emoji, accents, Cyrillic, Greek, Arabic, Hebrew,
+  Chinese, Japanese, Korean, Thai and Hindi, turns fancy Unicode letters into the command's own font, and
+  shows mentions as names. Fallback fonts live in `assets/fonts/`
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,
@@ -56,10 +70,15 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   account age for new members
 - **Verification gate** (`/verification …`): a Verify button that grants a role, with an optional
   minimum account age
-- **Honeypot channel** (`/honeypot …`): anyone who posts in it is banned, softbanned or kicked
+- **Honeypot channel** (`/honeypot create|set|off`): anyone who posts in it is banned, softbanned
+  or kicked. The bot can create the channel itself and keeps a notice in it that counts how many
+  accounts it has caught; chosen users and roles can be exempted
 - **Case history and notes**: every action is recorded (`/modhistory`), with private moderator
   notes (`/note add|remove`)
-- **Ban appeals**: the ban DM links to an appeal form on the website; admins approve or deny there
+- **Ban appeals**: the ban DM links to an appeal form on the website; admins approve or deny there.
+  The form is built on the website (written answers, multiple choice, checkboxes, required
+  questions), with an intro, a choice of notification channel, a wait time after a denial, and
+  test appeals for trying it out
 - `/softban` and `/slowmode`
 - **Sticky roles**: restores a returning member's roles (never roles with elevated permissions)
 - **Mod log**: kick/ban/mute/warn actions posted to a channel, filterable per action type,
@@ -146,6 +165,8 @@ chmod 600 .env
 | `LOG_LEVEL` | | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`) |
 | `OPENWEATHERMAP_API_KEY` | | Enables `/weather` ([free key](https://openweathermap.org/api)) |
 | `GIPHY_API_KEY` | | Enables `/gif`, `/cute`, `/beans` ([free key](https://developers.giphy.com/)) |
+| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` | | Let `/meme`, `/reddit` and `/cursed` read Reddit through its API. Without them the bot uses Reddit's public pages, which Reddit refuses from many servers. Create a "script" app at [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) |
+| `REDDIT_USER_AGENT` | | How the bot names itself to Reddit, such as `discord:my-bot:v1 (by /u/yourname)` |
 | `SUPPORT_SERVER_INVITE` | | Shown in `/about` |
 | `WEBSITE_URL` | | Address of the bot's website (the public site of neogigabot-panel, if you run it). When set, `/about`, `/help`, `/settings`, the music and playlist embeds and the first-join greeting link to it |
 | `LEGACY_DATA_PATH` | | Old gigabot install root, for `/owner migrate` |
@@ -213,7 +234,6 @@ over opening it with the sqlite3 CLI while the bot is running.
 settings, playlists, and reaction-role mappings. It defaults to **dry-run** — re-run with
 `dry_run: False` to apply. Point it at the old install with `LEGACY_DATA_PATH`, the
 `source_path` option, or keep the old install as a sibling `gigabot/` directory.
-`PORTING_CHECKLIST.md` tracks command-level parity with the old bot.
 
 ---
 
@@ -226,9 +246,6 @@ settings, playlists, and reaction-role mappings. It defaults to **dry-run** — 
 The `utils/` modules (settings sync, playlists, warnings, tempbans, reaction roles,
 durations, link parsing, command-log parsing, migration mapping) are pure functions over a
 `storage_path` and carry the test coverage. Cogs hold the Discord-facing glue.
-
-Repo docs: `PORTING_CHECKLIST.md` (parity tracking), `CODE_SWEEP.md` and `CODE_AUDIT.md`
-(past reviews and their resolutions), `ACTION_ITEMS.md`.
 
 ---
 

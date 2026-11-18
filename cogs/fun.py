@@ -15,6 +15,9 @@ import pyfiglet
 from discord import app_commands
 from discord.ext import commands
 
+from utils.modules import enabled_in
+from utils.settings import blocking_entry, get_guild_settings
+
 LOGGER = logging.getLogger(__name__)
 
 EIGHT_BALL_RESPONSES: Final[list[str]] = [
@@ -477,6 +480,7 @@ class Fun(commands.Cog):
         self.bot = bot
         self._snipes: dict[int, dict[str, Any]] = {}
         self._hotpotato_games: dict[int, HotPotatoGame] = {}
+        self._reddit_token: tuple[str, float] | None = None  # (access token, time it stops being usable)
 
     async def cog_unload(self) -> None:
         self._hotpotato_games.clear()
@@ -495,11 +499,11 @@ class Fun(commands.Cog):
         status, payload = await self._fetch_json_with_status(url)
         return payload if status == 200 else None
 
-    async def _fetch_json_with_status(self, url: str) -> tuple[int, dict | list | None]:
+    async def _fetch_json_with_status(self, url: str, *, headers: dict[str, str] | None = None) -> tuple[int, dict | list | None]:
         """Like _fetch_json, but also returns the HTTP status so callers can
         distinguish e.g. "not found" from "service misconfigured"."""
         try:
-            async with self.bot.http_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            async with self.bot.http_session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 try:
                     payload = await response.json(content_type=None)
                 except (aiohttp.ContentTypeError, ValueError):
@@ -508,19 +512,67 @@ class Fun(commands.Cog):
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return 0, None
 
-    async def _fetch_reddit_submission(self, subreddit_name: str) -> dict[str, Any] | None:
-        """Fetch a random non-stickied hot post via Reddit's public JSON endpoint.
+    def _reddit_user_agent(self) -> str:
+        return self.bot.config.reddit_user_agent.strip() or "discord:neo-gigabot:v1 (read-only listings)"
 
-        No credentials or Reddit API client needed - /r/<sub>/hot.json is public
-        for read-only listing, which is all these commands do. Returns the post's
-        `data` dict, or None when the subreddit has no usable posts."""
-        url = f"https://www.reddit.com/r/{quote(subreddit_name)}/hot.json?limit=100&raw_json=1"
+    async def _reddit_access_token(self, *, fresh: bool = False) -> str | None:
+        """An app-only Reddit API token from REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET,
+        reused until shortly before it expires. None when it can't be had."""
+        config = self.bot.config
+        if not config.reddit_api_enabled:
+            return None
+        if not fresh and self._reddit_token and self._reddit_token[1] > time.time():
+            return self._reddit_token[0]
         try:
-            status, data = await self._fetch_json_with_status(url)
+            async with self.bot.http_session.post(
+                "https://www.reddit.com/api/v1/access_token",
+                data={"grant_type": "client_credentials"},
+                auth=aiohttp.BasicAuth(config.reddit_client_id.strip(), config.reddit_client_secret.strip()),
+                headers={"User-Agent": self._reddit_user_agent()},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as response:
+                payload = await response.json(content_type=None) if response.status == 200 else None
+                if not isinstance(payload, dict) or not payload.get("access_token"):
+                    LOGGER.warning("Reddit refused the API credentials (HTTP %s). Check REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET.", response.status)
+                    return None
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            LOGGER.warning("Could not get a Reddit API token: %s", exc)
+            return None
+        self._reddit_token = (str(payload["access_token"]), time.time() + max(60, int(payload.get("expires_in") or 3600) - 120))
+        return self._reddit_token[0]
+
+    async def _fetch_reddit_listing(self, subreddit_name: str) -> tuple[int, dict | list | None]:
+        """The subreddit's hot posts: through the Reddit API when credentials are
+        set, otherwise (or if that fails) through the public JSON endpoint, which
+        Reddit refuses from many server addresses."""
+        name = quote(subreddit_name)
+        for attempt in range(2):
+            token = await self._reddit_access_token(fresh=attempt == 1)
+            if token is None:
+                break
+            status, data = await self._fetch_json_with_status(
+                f"https://oauth.reddit.com/r/{name}/hot?limit=100&raw_json=1",
+                headers={"Authorization": f"Bearer {token}", "User-Agent": self._reddit_user_agent()},
+            )
+            if status != 401:  # 401 means the token expired early: get a new one and try once more
+                return status, data
+        return await self._fetch_json_with_status(
+            f"https://www.reddit.com/r/{name}/hot.json?limit=100&raw_json=1", headers={"User-Agent": self._reddit_user_agent()}
+        )
+
+    async def _fetch_reddit_submission(self, subreddit_name: str) -> dict[str, Any] | None:
+        """Fetch a random non-stickied hot post. Returns the post's `data` dict,
+        or None when the subreddit has no usable posts."""
+        try:
+            status, data = await self._fetch_reddit_listing(subreddit_name)
         except Exception as exc:
             LOGGER.warning("Reddit fetch failed for r/%s: %s", subreddit_name, exc)
             raise
 
+        if status == 403 and not self.bot.config.reddit_api_enabled:
+            # Without API credentials a 403 is usually Reddit blocking this server, not a private subreddit.
+            LOGGER.warning("Reddit refused the public endpoint for r/%s. Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET.", subreddit_name)
+            raise RuntimeError("Reddit isn't letting the bot in right now. Try again later.")
         if status in (403, 404):
             raise RuntimeError("That subreddit doesn't exist or is private.")
         if status != 200 or not isinstance(data, dict):
@@ -1188,6 +1240,12 @@ class Fun(commands.Cog):
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
+            return
+        # A server that turned sniping off (the module, or the command) gets
+        # nothing kept, and whatever was held for the channel is dropped.
+        settings = get_guild_settings(self.bot.storage_path, message.guild.id)
+        if not enabled_in(settings, "snipe") or blocking_entry("snipe", settings.get("blocked_commands")) is not None:
+            self._snipes.pop(message.channel.id, None)
             return
 
         content = (message.content or "")[:SNIPE_MAX_CONTENT_LENGTH]

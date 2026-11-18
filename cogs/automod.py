@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from utils import automod as rules
 from utils.durations import parse_duration
+from utils.modules import enabled_in
 from utils.settings import get_guild_settings
 from utils.warnings import add_warning, count_warnings
 
@@ -43,7 +44,7 @@ class Automod(commands.Cog):
         if message.guild is None:
             return None
         settings = get_guild_settings(self.bot.storage_path, message.guild.id)
-        if not rules.any_rule_enabled(settings) or self._exempt(message, settings):
+        if not enabled_in(settings, "automod") or not rules.any_rule_enabled(settings) or self._exempt(message, settings):
             return None
         mention_count = len(message.raw_mentions) + len(message.raw_role_mentions) + (1 if message.mention_everyone else 0)
         rule = rules.content_violation(message.content, mention_count, settings)

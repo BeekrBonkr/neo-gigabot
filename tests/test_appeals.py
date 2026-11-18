@@ -17,9 +17,59 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 def test_questions_are_the_servers_own_or_the_default_set():
-    assert store.questions_for({}) == list(store.DEFAULT_QUESTIONS)
-    assert store.questions_for({"appeals_questions": " What happened? \n\n  Will it happen again?\n"}) == ["What happened?", "Will it happen again?"]
-    assert len(store.questions_for({"appeals_questions": "\n".join(f"q{n}" for n in range(20))})) == store.MAX_QUESTIONS
+    texts = lambda settings: [q["text"] for q in store.questions_for(settings)]  # noqa: E731
+    assert texts({}) == list(store.DEFAULT_QUESTIONS)
+    assert texts({"appeals_questions": " What happened? \n\n  Will it happen again?\n"}) == ["What happened?", "Will it happen again?"]
+    assert len(texts({"appeals_questions": "\n".join(f"q{n}" for n in range(20))})) == store.MAX_QUESTIONS
+    assert [q["required"] for q in store.questions_for({})] == [True, False, False]
+    # A built form wins over the older text setting.
+    form = [{"text": "Which rule?", "type": "choice", "options": ["Spam", "Other"], "required": True}]
+    assert store.questions_for({"appeals_form": form, "appeals_questions": "ignored"}) == form
+
+
+def test_built_forms_are_checked():
+    good = store.clean_form([
+        {"text": " Why? ", "type": "paragraph"},
+        {"text": "Which rule?", "type": "choice", "options": ["Spam", " Spam ", "Other", ""], "required": 1},
+        {"text": "Tick all that apply", "type": "checkboxes", "options": ["a", "b", "c"]},
+        {"text": "Your old name", "type": "short", "options": ["dropped"]},
+    ])
+    assert good[0] == {"text": "Why?", "type": "paragraph", "options": [], "required": False}
+    assert good[1]["options"] == ["Spam", "Other"] and good[1]["required"] is True and good[3]["options"] == []
+    for bad in ("nope", [{"text": ""}], [{"text": "x", "type": "slider"}], [{"text": "x", "type": "choice", "options": ["only one"]}],
+                [{"text": "x"}] * (store.MAX_QUESTIONS + 1), [{"text": "x" * 151}], ["text"]):
+        with pytest.raises(store.AppealError):
+            store.clean_form(bad)
+
+
+def test_answers_fit_their_question_and_required_ones_are_enforced(storage):
+    questions = store.clean_form([
+        {"text": "Why?", "type": "paragraph", "required": True},
+        {"text": "Which rule?", "type": "choice", "options": ["Spam", "Other"]},
+        {"text": "Tick", "type": "checkboxes", "options": ["a", "b", "c"]},
+        {"text": "Name", "type": "short"},
+    ])
+    with pytest.raises(store.AppealError, match="Why"):
+        store.submit(storage, 1, 5, "u", questions, ["", "Spam"])
+    store.submit(storage, 1, 5, "u", questions, ["sorry", "Made up", ["c", "a", "zzz"], "n" * 500])
+    assert [a["answer"] for a in store.latest_appeal(storage, 1, 5)["answers"]] == ["sorry", "", "a, c", "n" * store.MAX_SHORT_ANSWER_LENGTH]
+
+
+def test_test_appeals_never_count_and_only_they_can_be_removed(storage):
+    real = store.submit(storage, 1, 5, "u", ["Why?"], ["sorry"])
+    test = store.submit(storage, 1, 5, "u", ["Why?"], ["trying it out"], test=True)   # no "one at a time" for tests
+    assert store.latest_appeal(storage, 1, 5)["id"] == real
+    assert store.decide(storage, 1, test, True, 9) is None                            # a test can't be approved
+    assert store.remove_test(storage, 1, real) is None and store.remove_test(storage, 2, test) is None
+    assert store.remove_test(storage, 1, test)["answers"][0]["answer"] == "trying it out"
+
+
+def test_the_wait_after_a_denial_is_the_servers_choice():
+    denied = {"status": "denied", "decided_at": "2026-03-01 12:00:00", "created_at": "2026-03-01 11:00:00"}
+    now = datetime(2026, 3, 3, tzinfo=timezone.utc)
+    assert store.can_appeal(denied, now)[0] is False and store.can_appeal(denied, now, wait_days=1) == (True, "")
+    assert store.can_appeal(denied, now, wait_days=0) == (True, "")
+    assert store.reappeal_days({"appeals_reappeal_days": 30}) == 30 and store.reappeal_days({}) == store.REAPPEAL_DAYS
 
 
 def test_one_open_appeal_at_a_time_and_a_wait_after_a_denial(storage):
@@ -79,7 +129,8 @@ def test_only_banned_users_of_a_server_taking_appeals_see_the_form(storage):
             assert (await client.get("/v1/guilds/77/appeal?user_id=5", headers=AUTH)).status == 404   # appeals are off
             update_guild_settings(storage, 77, {"appeals_enabled": True, "appeals_questions": "What happened?"})
             form = await (await client.get("/v1/guilds/77/appeal?user_id=5", headers=AUTH)).json()
-            assert form["guild"]["name"] == "Guild" and form["questions"] == ["What happened?"] and form["can_appeal"] is True
+            assert form["guild"]["name"] == "Guild" and [q["text"] for q in form["questions"]] == ["What happened?"] and form["can_appeal"] is True
+            assert form["preview"] is False and form["intro"] == ""
             assert (await client.get("/v1/guilds/77/appeal?user_id=6", headers=AUTH)).status == 404   # not banned: same answer as "no such server"
             assert (await client.get("/v1/guilds/88/appeal?user_id=5", headers=AUTH)).status == 404
 
@@ -111,6 +162,38 @@ def test_submit_notifies_mods_and_approval_unbans(storage):
 
     asyncio.run(run())
     assert store.latest_appeal(storage, 77, 5)["status"] == "denied"
+
+
+def test_admins_can_preview_the_form_and_send_a_test(storage):
+    cog, unbanned, _, posts = _world(storage)
+    update_guild_settings(storage, 77, {"appeals_channel_id": "99", "appeals_intro": "Be honest.", "mod_log_channel_id": "12"})
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            # Appeals are still off and the admin isn't banned: the preview works anyway, for admins only.
+            form = await (await client.get("/v1/guilds/77/appeal?user_id=4&preview=1", headers=AUTH)).json()
+            assert form["preview"] is True and form["intro"] == "Be honest." and form["can_appeal"] is True
+            assert (await client.get("/v1/guilds/77/appeal?user_id=5&preview=1", headers=AUTH)).status == 403
+            assert (await client.post("/v1/guilds/77/appeal", headers=AUTH, json={"user_id": "5", "test": True, "answers": ["x"]})).status == 403
+            sent = await (await client.post("/v1/guilds/77/appeal", headers=AUTH, json={"user_id": "4", "test": True, "answers": ["trying"]})).json()
+            assert sent["notified"] is True and posts[0][0] == "🧪 Test Ban Appeal"
+            gone = await client.post("/v1/guilds/77/moderation/action", headers=AUTH, json={"user_id": "4", "action": "remove_appeal", "appeal_id": str(sent["appeal_id"])})
+            assert gone.status == 200 and (await gone.json())["detail"] == "Removed the test appeal"
+            again = await client.post("/v1/guilds/77/moderation/action", headers=AUTH, json={"user_id": "4", "action": "remove_appeal", "appeal_id": str(sent["appeal_id"])})
+            assert again.status == 404
+
+    asyncio.run(run())
+    assert unbanned == []
+
+
+def test_the_appeal_form_setting_is_validated(storage):
+    from cogs.panel_bridge import SettingsValidationError, validate_settings
+    from utils.settings import DEFAULT_GUILD_SETTINGS
+
+    good = dict(DEFAULT_GUILD_SETTINGS, appeals_form=[{"text": "Why?", "type": "choice", "options": ["a", "b"]}])
+    assert validate_settings(good, DEFAULT_GUILD_SETTINGS)["appeals_form"][0]["required"] is False
+    with pytest.raises(SettingsValidationError, match="Appeal form"):
+        validate_settings(dict(DEFAULT_GUILD_SETTINGS, appeals_form=[{"text": "Why?", "type": "choice"}]), DEFAULT_GUILD_SETTINGS)
 
 
 def test_ban_dm_links_the_form_only_when_appeals_are_on(storage):
