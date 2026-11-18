@@ -502,3 +502,18 @@ def kirby(picture: Image.Image) -> Image.Image:
 def excuse(picture: Image.Image) -> Image.Image:
     """The picture, and under it the "excuse me what" reaction."""
     return _stack(picture, _template("excuse.jpg"))
+
+
+PERFECTION_MEANING = "the condition, state, or quality of being free or as free as possible from all flaws or defects."
+
+
+def perfection(picture: Image.Image) -> Image.Image:
+    """The dictionary entry for perfection, with the picture under it as the
+    example. The entry is text, so it is written here rather than loaded."""
+    entry = Image.new("RGBA", (PANEL_WIDTH, 232), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(entry)
+    draw.text((30, 22), "per·fec·tion", font=load_font("DejaVuSans-Bold.ttf", 44), fill=(32, 33, 36, 255))
+    draw.text((30, 84), "/pərˈfekSH(ə)n/", font=load_font("DejaVuSans-Bold.ttf", 20), fill=(112, 117, 122, 255))
+    draw.text((30, 118), "noun", font=load_font("DejaVuSans-Bold.ttf", 20), fill=(112, 117, 122, 255))
+    _write(entry, (30, 152, PANEL_WIDTH - 30, 222), PERFECTION_MEANING, "arial.ttf", fill=(32, 33, 36, 255), max_size=22, align="left", from_top=True)
+    return _stack(entry, picture)

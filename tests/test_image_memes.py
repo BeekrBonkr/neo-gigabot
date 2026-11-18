@@ -173,3 +173,9 @@ def test_kirby_goes_under_the_picture():
 def test_excuse_goes_under_the_picture():
     result = mm.excuse(picture((320, 160)))
     assert result.width == mm.PANEL_WIDTH and result.height > 320 and result.getpixel((600, 100))[:3] == (200, 60, 40)
+
+
+def test_perfection_puts_the_definition_above_the_picture():
+    result = mm.perfection(picture((320, 160)))
+    assert result.size == (mm.PANEL_WIDTH, 232 + 320)
+    assert result.getpixel((600, 10))[:3] == (255, 255, 255) and result.getpixel((600, 400))[:3] == (200, 60, 40)
