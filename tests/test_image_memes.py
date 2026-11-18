@@ -82,3 +82,10 @@ def test_wheeze_swaps_the_bubble_words_for_the_picture():
     assert scene.size == mm._template("wheeze.png").size
     assert scene.getpixel(((left + right) // 2 + 20, (top + bottom) // 2))[:3] == (200, 60, 40)
     assert scene.getpixel((left + 2, bottom - 2))[:3] == (255, 255, 255)  # the old words are wiped, not just covered
+
+
+def test_keep_item_shows_the_picture_above_the_note():
+    card = mm.keep_item(picture((300, 100)))
+    assert card.size == (mm.KEEP_ITEM_WIDTH, 640)
+    assert card.getpixel((mm.KEEP_ITEM_WIDTH // 2 + 60, 240))[:3] == (200, 60, 40)
+    assert card.getpixel((84, 522))[:3] != (255, 255, 255)  # the check mark's disc

@@ -189,6 +189,15 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     ) -> None:
         await self._poster(interaction, "wheeze", "Wheeze", mm.wheeze, attachment, message_link, user=user)
 
+    @app_commands.command(name="keepitem", description="List an image for sale: customers usually keep this item.")
+    @app_commands.describe(user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def keepitem(
+        self, interaction: discord.Interaction, user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(interaction, "keepitem", "Keep This Item", mm.keep_item, attachment, message_link, user=user)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

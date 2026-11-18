@@ -279,3 +279,26 @@ def wheeze(picture: Image.Image) -> Image.Image:
     fitted = _contain(picture, (right - left, bottom - top))
     scene.alpha_composite(fitted, ((left + right - fitted.width) // 2, (top + bottom - fitted.height) // 2))
     return scene
+
+
+# ---------- customers usually keep this item ----------
+
+KEEP_ITEM_WIDTH = 640
+
+
+def keep_item(picture: Image.Image) -> Image.Image:
+    """The picture as a shop listing, with the returns note under it:
+    customers usually keep this item. Drawn here, as it is a piece of a web page."""
+    width = KEEP_ITEM_WIDTH
+    card = Image.new("RGBA", (width, 640), (255, 255, 255, 255))
+    fitted = _contain(picture, (width - 80, 400))
+    card.alpha_composite(fitted, ((width - fitted.width) // 2, 40 + (400 - fitted.height) // 2))
+    draw = ImageDraw.Draw(card)
+    note = (40, 476, width - 40, 600)
+    draw.rounded_rectangle(note, radius=12, fill=(240, 248, 246, 255), outline=(196, 220, 214, 255), width=2)
+    draw.ellipse((62, 500, 106, 544), fill=(0, 124, 108, 255))
+    draw.line([(73, 523), (81, 532), (96, 513)], fill=(255, 255, 255, 255), width=5, joint="curve")
+    _write(card, (124, 492, note[2] - 20, 536), "Customers usually keep this item", "arial.ttf", fill=(15, 17, 17, 255), max_size=28, align="left")
+    _write(card, (124, 538, note[2] - 20, 590), "This product has fewer returns than average compared to similar products.", "DejaVuSans-Bold.ttf",
+           fill=(86, 89, 89, 255), max_size=17, align="left", from_top=True)
+    return card
