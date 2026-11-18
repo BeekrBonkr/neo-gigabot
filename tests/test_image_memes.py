@@ -74,3 +74,11 @@ def test_who_did_this_fills_the_gap_between_the_title_and_the_faces():
     assert scene.size == (717, 717)
     assert scene.getpixel((left + 40, (top + bottom) // 2))[:3] == (40, 60, 200) and scene.getpixel((right - 40, (top + bottom) // 2))[:3] == (200, 60, 40)
     assert scene.getpixel((360, 20)) == mm._template("whodidthis.png").getpixel((360, 20))
+
+
+def test_wheeze_swaps_the_bubble_words_for_the_picture():
+    scene = mm.wheeze(picture())
+    left, top, right, bottom = mm.WHEEZE_PICTURE
+    assert scene.size == mm._template("wheeze.png").size
+    assert scene.getpixel(((left + right) // 2 + 20, (top + bottom) // 2))[:3] == (200, 60, 40)
+    assert scene.getpixel((left + 2, bottom - 2))[:3] == (255, 255, 255)  # the old words are wiped, not just covered

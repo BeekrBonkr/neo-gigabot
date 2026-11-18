@@ -262,3 +262,20 @@ def who_did_this(picture: Image.Image) -> Image.Image:
     scene = _template("whodidthis.png")
     _lay_onto(scene, _flat(picture), _box_quad(*WHO_DID_THIS_BOX))
     return scene
+
+
+# ---------- wheeze ----------
+
+WHEEZE_WORDS = ((40, 54, 215, 156), (215, 68, 250, 156))  # the lettering inside the first speech bubble
+WHEEZE_PICTURE = (46, 56, 244, 154)
+
+
+def wheeze(picture: Image.Image) -> Image.Image:
+    """The two-panel comic: the picture is what gets said, and the listener wheezes."""
+    scene = _template("wheeze.png")
+    for box in WHEEZE_WORDS:  # wipe the words the template comes with
+        scene.paste((255, 255, 255, 255), box)
+    left, top, right, bottom = WHEEZE_PICTURE
+    fitted = _contain(picture, (right - left, bottom - top))
+    scene.alpha_composite(fitted, ((left + right - fitted.width) // 2, (top + bottom - fitted.height) // 2))
+    return scene
