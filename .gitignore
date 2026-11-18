@@ -19,3 +19,9 @@ storage/settings/*.yml
 # Written by the web panel when it edits .env (contain secrets)
 .env.panel-backup
 .env.panel-tmp
+
+# Working notes kept on the machine, not in the repository
+ACTION_ITEMS.md
+CODE_AUDIT.md
+CODE_SWEEP.md
+PORTING_CHECKLIST.md

@@ -234,7 +234,6 @@ over opening it with the sqlite3 CLI while the bot is running.
 settings, playlists, and reaction-role mappings. It defaults to **dry-run** — re-run with
 `dry_run: False` to apply. Point it at the old install with `LEGACY_DATA_PATH`, the
 `source_path` option, or keep the old install as a sibling `gigabot/` directory.
-`PORTING_CHECKLIST.md` tracks command-level parity with the old bot.
 
 ---
 
@@ -247,9 +246,6 @@ settings, playlists, and reaction-role mappings. It defaults to **dry-run** — 
 The `utils/` modules (settings sync, playlists, warnings, tempbans, reaction roles,
 durations, link parsing, command-log parsing, migration mapping) are pure functions over a
 `storage_path` and carry the test coverage. Cogs hold the Discord-facing glue.
-
-Repo docs: `PORTING_CHECKLIST.md` (parity tracking), `CODE_SWEEP.md` and `CODE_AUDIT.md`
-(past reviews and their resolutions), `ACTION_ITEMS.md`.
 
 ---
 
