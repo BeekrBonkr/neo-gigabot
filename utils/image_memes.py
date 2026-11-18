@@ -10,9 +10,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from utils.image_filters import sepia
+from utils.imaging import load_font
 from utils import richtext
 
 INK = (30, 24, 20, 255)
@@ -382,3 +383,31 @@ def presidential(text: "richtext.RichText | str") -> Image.Image:
     alert = _template("presidential.png")
     _write(alert, PRESIDENTIAL_TEXT, text, "DejaVuSans-Bold.ttf", fill=(40, 40, 40, 255), max_size=30, align="left", from_top=True)
     return alert
+
+
+# ---------- notification ----------
+
+NOTIFICATION_WIDTH = 640
+
+
+def notification(picture: Image.Image, text: "richtext.RichText | str", sender: "richtext.RichText | str") -> Image.Image:
+    """A phone's message banner over the top of the picture. Drawn here: a
+    banner is a rounded box and two lines of text."""
+    width = NOTIFICATION_WIDTH
+    height = min(960, max(300, round(picture.height * width / picture.width)))
+    scene = _cover(_flat(picture, (0, 0, 0, 255)), (width, height))
+    box = (16, 16, width - 16, 156)
+    shape = Image.new("L", scene.size, 0)
+    ImageDraw.Draw(shape).rounded_rectangle(box, radius=30, fill=255)
+    frosted = scene.filter(ImageFilter.GaussianBlur(14))
+    frosted.alpha_composite(Image.new("RGBA", scene.size, (246, 246, 248, 205)))
+    scene.paste(frosted, (0, 0), shape)
+    draw = ImageDraw.Draw(scene)
+    draw.rounded_rectangle((34, 32, 70, 68), radius=9, fill=(52, 199, 89, 255))  # the messages icon
+    draw.ellipse((42, 40, 62, 57), fill=(255, 255, 255, 255))
+    draw.polygon([(45, 53), (43, 61), (52, 56)], fill=(255, 255, 255, 255))
+    draw.text((82, 50), "MESSAGES", font=load_font("DejaVuSans-Bold.ttf", 17), fill=(96, 96, 102, 255), anchor="lm")
+    draw.text((box[2] - 22, 50), "now", font=load_font("DejaVuSans-Bold.ttf", 17), fill=(120, 120, 126, 255), anchor="rm")
+    richtext.fit_line(sender, "arial.ttf", 24, box[2] - 56 - 34).draw(scene, 36, 78, fill=(12, 12, 14, 255), align="left")
+    _write(scene, (36, 108, box[2] - 22, 148), text, "DejaVuSans-Bold.ttf", fill=(40, 40, 44, 255), max_size=21, align="left", from_top=True)
+    return scene

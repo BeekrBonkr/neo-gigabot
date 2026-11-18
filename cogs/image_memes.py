@@ -274,6 +274,19 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     async def presidential(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 160]) -> None:
         await self._from_text(interaction, "presidential", "Presidential Alert", mm.presidential, text)
 
+    @app_commands.command(name="notification", description="Drop a phone message banner over the top of an image.")
+    @app_commands.describe(text="The message.", sender="Who it is from. Defaults to you.", user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def notification(
+        self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 120],
+        sender: app_commands.Range[str, 1, 40] | None = None, user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(
+            interaction, "notification", "Notification", mm.notification, attachment, message_link,
+            user=user, texts=(text, sender or interaction.user.display_name),
+        )
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

@@ -124,3 +124,11 @@ def test_news_covers_the_frame_and_writes_the_headline():
 def test_presidential_alert_fits_long_text():
     blank = mm._template("presidential.png")
     assert mm.presidential("x " * 80).size == blank.size and mm.presidential("hello").tobytes() != blank.tobytes()
+
+
+def test_notification_lays_a_banner_over_the_top():
+    scene = mm.notification(picture((120, 400)), "hello there", "Somebody")
+    assert scene.size == (mm.NOTIFICATION_WIDTH, 960)  # tall pictures are cropped, not squeezed
+    assert min(scene.getpixel((320, 30))[:3]) > 200  # the pale banner
+    assert scene.getpixel((40, 600))[:3] == (40, 60, 200)
+    assert mm.notification(picture((400, 40)), "hi", "x").size == (mm.NOTIFICATION_WIDTH, 300)
