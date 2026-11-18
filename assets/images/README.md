@@ -25,3 +25,8 @@ Overlays and meme templates the image commands open at run time.
 | `ifunny.png` | `/memegen watermark` | The iFunny strip, from imgflip (iFunny-Watermark) |
 | `kirby.jpg` | `/memegen kirby` | Kirby's Calling the Police, from imgflip (KIRBYS-CALLING-THE-POLICE) |
 | `excuse.jpg` | `/memegen excuse` | The "excuse me what" panel from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
+| `museum.png` | `/memegen scene` | A gold frame on a gallery wall, from imgflip (Blank-Painting) |
+| `billboard.jpg` | `/memegen scene` | A blank billboard, from imgflip (billboard-blank) |
+| `oldtv.png` | `/memegen scene` | An old TV set, from imgflip (Old-tv), with the screen cut out |
+| `bill.jpg` | `/memegen scene` | A hundred dollar bill, from imgflip (100-bill-dollar) |
+| `bobross.png` | `/memegen scene` | Bob Ross at his easel, from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/bob-ross.png`) |

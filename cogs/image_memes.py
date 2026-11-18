@@ -21,6 +21,13 @@ WATERMARKS = [
     app_commands.Choice(name="Bandicam", value="bandicam"),
     app_commands.Choice(name="iFunny", value="ifunny"),
 ]
+SCENES = [
+    app_commands.Choice(name="Museum", value="museum"),
+    app_commands.Choice(name="Billboard", value="billboard"),
+    app_commands.Choice(name="Old TV", value="oldtv"),
+    app_commands.Choice(name="$100 Bill", value="bill"),
+    app_commands.Choice(name="Bob Ross", value="bobross"),
+]
 POSTER_MAX_EDGE = 1024
 USER_HELP = "Use this member's avatar instead of an image."
 
@@ -349,6 +356,18 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
         await self._poster(interaction, "perfection", "Perfection", mm.perfection, attachment, message_link, user=user)
+
+    @app_commands.command(name="scene", description="Put an image in a museum, on a billboard, an old TV, a $100 bill or Bob Ross's easel.")
+    @app_commands.describe(scene="Where the image goes.", user=USER_HELP, **SOURCE_HELP)
+    @app_commands.choices(scene=SCENES)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def scene(
+        self, interaction: discord.Interaction, scene: app_commands.Choice[str], user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(
+            interaction, "scene", scene.name, lambda picture: mm.scene(picture, scene.value), attachment, message_link, user=user,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

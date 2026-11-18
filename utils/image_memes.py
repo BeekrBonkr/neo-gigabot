@@ -517,3 +517,58 @@ def perfection(picture: Image.Image) -> Image.Image:
     draw.text((30, 118), "noun", font=load_font("DejaVuSans-Bold.ttf", 20), fill=(112, 117, 122, 255))
     _write(entry, (30, 152, PANEL_WIDTH - 30, 222), PERFECTION_MEANING, "arial.ttf", fill=(32, 33, 36, 255), max_size=22, align="left", from_top=True)
     return _stack(entry, picture)
+
+
+# ---------- scenes ----------
+
+MUSEUM_CANVAS = (367, 72, 594, 348)
+BILLBOARD_FACE = ((150, 149), (772, 154), (784, 338), (148, 338))
+OLD_TV_SCREEN = (94, 87, 545, 427)
+BILL_PORTRAIT = (276, 60, 537, 431)
+BOB_ROSS_CANVAS = ((22, 71), (455, 88), (455, 407), (22, 389))
+
+
+def _museum(picture: Image.Image) -> Image.Image:
+    scene = _template("museum.png")
+    _lay_onto(scene, _flat(picture), _box_quad(*MUSEUM_CANVAS), under=True)
+    return scene
+
+
+def _billboard(picture: Image.Image) -> Image.Image:
+    scene = _template("billboard.jpg")
+    _lay_onto(scene, _flat(picture), BILLBOARD_FACE)
+    return scene
+
+
+def _old_tv(picture: Image.Image) -> Image.Image:
+    scene = _template("oldtv.png")
+    _lay_onto(scene, _flat(picture, (0, 0, 0, 255)), _box_quad(*OLD_TV_SCREEN), under=True)
+    return scene
+
+
+def _bill(picture: Image.Image) -> Image.Image:
+    """The portrait on the note, printed in the note's own ink."""
+    scene = _template("bill.jpg")
+    left, top, right, bottom = BILL_PORTRAIT
+    size = (right - left, bottom - top)
+    gray = ImageOps.autocontrast(ImageOps.grayscale(_cover(_flat(picture), size)), cutoff=2)
+    printed = ImageOps.colorize(gray, (36, 50, 48), (224, 226, 206)).convert("RGBA")
+    oval = Image.new("L", size, 0)
+    ImageDraw.Draw(oval).ellipse((8, 8, size[0] - 9, size[1] - 9), fill=255)
+    scene.paste(printed, (left, top), oval.filter(ImageFilter.GaussianBlur(5)))
+    return scene
+
+
+def _bob_ross(picture: Image.Image) -> Image.Image:
+    scene = _template("bobross.png")
+    _lay_onto(scene, _flat(picture), BOB_ROSS_CANVAS, under=True)
+    return scene
+
+
+SCENES = {"museum": _museum, "billboard": _billboard, "oldtv": _old_tv, "bill": _bill, "bobross": _bob_ross}
+
+
+def scene(picture: Image.Image, name: str) -> Image.Image:
+    """Put the picture somewhere: a museum wall, a billboard, an old TV, a
+    hundred dollar bill, or Bob Ross's easel."""
+    return SCENES[name](picture)

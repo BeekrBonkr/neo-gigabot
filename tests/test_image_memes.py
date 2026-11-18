@@ -179,3 +179,12 @@ def test_perfection_puts_the_definition_above_the_picture():
     result = mm.perfection(picture((320, 160)))
     assert result.size == (mm.PANEL_WIDTH, 232 + 320)
     assert result.getpixel((600, 10))[:3] == (255, 255, 255) and result.getpixel((600, 400))[:3] == (200, 60, 40)
+
+
+def test_every_scene_keeps_its_size_and_shows_the_picture():
+    for name in mm.SCENES:
+        blank = mm.scene(Image.new("RGBA", (64, 64), (0, 0, 0, 0)), name)
+        shown = mm.scene(Image.new("RGBA", (300, 200), (255, 0, 255, 255)), name)
+        assert shown.size == blank.size and shown.tobytes() != blank.tobytes()
+    tv = mm.scene(picture(), "oldtv")
+    assert tv.getpixel((0, 0))[3] == 0 and tv.getpixel((320, 250))[3] == 255  # see-through around the set, the picture on its screen

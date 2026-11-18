@@ -727,7 +727,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 "Meme Templates",
                 "`/memegen respects/whodidthis/wheeze/keepitem/achievement/rip/rtx/news"
                 "/presidential/notification/einstein/sonic/watchmojo/watermark/kirby/excuse"
-                "/perfection`"
+                "/perfection/scene`"
             ),
             self.bot.embeds.field("Layout & Utility", "`/edit mirror/tile/collage/border/circle/resize/palette/removebg`"),
         ]
