@@ -111,3 +111,11 @@ def test_rtx_puts_the_pictures_side_by_side():
     assert result.size == (mm.RTX_PANEL * 2 + mm.RTX_GAP, mm.RTX_PANEL)
     assert result.getpixel((240, 40))[:3] == (10, 200, 10) and result.getpixel((mm.RTX_PANEL + mm.RTX_GAP + 240, 40))[:3] == (10, 10, 200)
     assert result.getpixel((30, mm.RTX_PANEL - 80))[:3] != (10, 200, 10)  # a badge sits on the lower left
+
+
+def test_news_covers_the_frame_and_writes_the_headline():
+    quiet, loud = mm.news(picture(), ""), mm.news(picture(), "something happened")
+    assert quiet.size == loud.size == mm.NEWS_SIZE
+    assert quiet.getpixel((300, 200))[:3] == (40, 60, 200)  # the picture shows above the banner
+    left, top, right, bottom = mm.NEWS_HEADLINE
+    assert quiet.crop((left, top, right, bottom)).tobytes() != loud.crop((left, top, right, bottom)).tobytes()

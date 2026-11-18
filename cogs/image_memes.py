@@ -259,6 +259,15 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
 
         await self.bot.image_tools.run_image_command(interaction, "rtx", "RTX", work, source=_no_image, before=prepare)
 
+    @app_commands.command(name="news", description="Turn an image into a breaking news broadcast.")
+    @app_commands.describe(headline="The headline under BREAKING NEWS.", user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def news(
+        self, interaction: discord.Interaction, headline: app_commands.Range[str, 1, 80], user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(interaction, "news", "Breaking News", mm.news, attachment, message_link, user=user, texts=(headline,))
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

@@ -355,3 +355,18 @@ def rtx(off: Image.Image, on: Image.Image) -> Image.Image:
         badge = badge.resize((RTX_BADGE_WIDTH, round(badge.height * RTX_BADGE_WIDTH / badge.width)), Image.LANCZOS)
         canvas.alpha_composite(badge, (left, RTX_PANEL - badge.height - 48))
     return canvas
+
+
+# ---------- breaking news ----------
+
+NEWS_SIZE = (1280, 720)
+NEWS_HEADLINE = (26, 538, 1254, 644)  # the pale bar under BREAKING NEWS
+
+
+def news(picture: Image.Image, headline: "richtext.RichText | str") -> Image.Image:
+    """The picture as a live news broadcast, with the headline under BREAKING NEWS."""
+    scene = Image.new("RGBA", NEWS_SIZE, (0, 0, 0, 255))
+    scene.alpha_composite(_cover(picture, NEWS_SIZE))
+    scene.alpha_composite(_template("news.png"))
+    _write(scene, NEWS_HEADLINE, richtext.as_rich(headline).upper(), "impact.ttf", fill=(22, 22, 28, 255), max_size=84, align="left")
+    return scene
