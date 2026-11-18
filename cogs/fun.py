@@ -15,6 +15,9 @@ import pyfiglet
 from discord import app_commands
 from discord.ext import commands
 
+from utils.modules import enabled_in
+from utils.settings import blocking_entry, get_guild_settings
+
 LOGGER = logging.getLogger(__name__)
 
 EIGHT_BALL_RESPONSES: Final[list[str]] = [
@@ -1237,6 +1240,12 @@ class Fun(commands.Cog):
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
+            return
+        # A server that turned sniping off (the module, or the command) gets
+        # nothing kept, and whatever was held for the channel is dropped.
+        settings = get_guild_settings(self.bot.storage_path, message.guild.id)
+        if not enabled_in(settings, "snipe") or blocking_entry("snipe", settings.get("blocked_commands")) is not None:
+            self._snipes.pop(message.channel.id, None)
             return
 
         content = (message.content or "")[:SNIPE_MAX_CONTENT_LENGTH]

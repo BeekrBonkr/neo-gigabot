@@ -10,6 +10,7 @@ from utils.durations import parse_duration
 from utils.website import site_link
 from utils.settings import (
     MOD_LOG_EVENT_KINDS,
+    blocking_entry,
     create_guild_settings,
     get_guild_settings,
     guild_settings_exists,
@@ -362,7 +363,7 @@ class SettingsDashboardView(discord.ui.View):
         self.add_item(page_select)
 
         _, chunk = pages[self.command_page]
-        blocked = {str(name).lower() for name in (settings.get("blocked_commands") or [])}
+        blocked = settings.get("blocked_commands") or []
         # Blocks are stored and matched by qualified name ("playlist add"),
         # never the leaf name - leaf names collide across groups (disabling
         # "playlist add" used to also disable "reactionrole add").
@@ -375,7 +376,7 @@ class SettingsDashboardView(discord.ui.View):
                     label=f"/{command.qualified_name}"[:100],
                     value=command.qualified_name[:100],
                     description=(command.description or "")[:100] or None,
-                    default=command.qualified_name.lower() in blocked,
+                    default=blocking_entry(command.qualified_name, blocked) is not None,
                 )
                 for command in chunk
             ],
@@ -386,7 +387,13 @@ class SettingsDashboardView(discord.ui.View):
             # Rebuild the list from scratch for this page only, keeping blocks
             # that belong to other pages (or legacy names) untouched.
             page_names = {command.qualified_name.lower() for command in chunk}
-            kept = [str(name).lower() for name in (current.get("blocked_commands") or []) if str(name).lower() not in page_names]
+            existing = [str(name).lower() for name in (current.get("blocked_commands") or [])]
+            # A whole group disabled from the website is one entry. Spell it out
+            # as its commands first, so deselecting one of them here works.
+            every = [command.qualified_name.lower() for _label, page in pages for command in page]
+            spelled = {name for name in every if blocking_entry(name, existing) is not None}
+            spelled |= {name for name in existing if not any(known == name or known.startswith(name + " ") for known in every)}  # names this build doesn't know
+            kept = [name for name in spelled if name not in page_names]
             kept.extend(value.lower() for value in command_select.values)
             update_guild_settings(self.bot.storage_path, self.guild_id, {"blocked_commands": sorted(set(kept))})
             await self.refresh(interaction)

@@ -629,3 +629,109 @@ def test_member_search_is_for_admins_and_ranks_exact_matches_first(storage):
             assert (await search(client, 4, "  "))[1] == {"members": [], "more": False}
 
     asyncio.run(run())
+
+
+# ---------- commands tab, snipe module and welcome image for the website ----------
+
+def test_command_list_names_each_commands_module(storage):
+    @app_commands.command(name="snipe", description="Show the last deleted message.")
+    async def snipe(interaction: discord.Interaction) -> None: ...
+
+    @app_commands.command(name="kick", description="Kick a member.")
+    async def kick(interaction: discord.Interaction) -> None: ...
+
+    @app_commands.command(name="ping", description="Check latency.")
+    async def ping(interaction: discord.Interaction) -> None: ...
+
+    tree = SimpleNamespace(walk_commands=lambda: [snipe, kick, ping], get_commands=lambda type=None: [])
+    cog = PanelBridge(SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, tree=tree))
+    cog._token = TOKEN
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            return await (await client.get("/v1/commands", headers=AUTH)).json()
+
+    by_name = {c["name"]: c for c in asyncio.run(run())["commands"]}
+    assert by_name["snipe"]["module"] == "snipe" and by_name["snipe"]["module_flag"] == "snipe_enabled" and by_name["snipe"]["module_solo"] is True
+    assert by_name["kick"]["module"] == "moderation" and by_name["kick"]["module_solo"] is False
+    assert by_name["ping"]["module"] is None
+
+
+def test_saving_settings_keeps_snipe_and_its_module_in_step(storage):
+    async def run():
+        async with _client(storage) as client:
+            async def put(**changes):
+                current = (await (await client.get("/v1/guilds/42/settings", headers=AUTH)).json())["settings"]
+                response = await client.put("/v1/guilds/42/settings", headers=AUTH, json={"settings": {**current, **changes}})
+                assert response.status == 200
+                return (await response.json())["settings"]
+
+            off = await put(blocked_commands=["snipe", "fun"])
+            assert off["snipe_enabled"] is False
+            on = await put(snipe_enabled=True)
+            assert on["snipe_enabled"] is True and on["blocked_commands"] == ["fun"]
+            assert (await put(welcome_card_background="image"))["welcome_card_background"] == "gradient"  # nothing uploaded yet
+
+    asyncio.run(run())
+
+
+def test_welcome_background_upload_and_preview_are_for_admins(storage):
+    import base64
+    import io
+
+    from PIL import Image
+
+    from cogs.welcome import Welcome
+    from utils import welcome_card
+
+    async def read():
+        out = io.BytesIO()
+        Image.new("RGB", (64, 64), (200, 30, 30)).save(out, format="PNG")
+        return out.getvalue()
+
+    avatar = SimpleNamespace(url="https://cdn.discordapp.com/a.png", read=read)
+    avatar.replace = lambda **kw: avatar
+
+    def person(uid):
+        return SimpleNamespace(id=uid, display_name=f"m{uid}", display_avatar=avatar, guild=guild, mention=f"<@{uid}>",
+                               guild_permissions=SimpleNamespace(administrator=uid == 4), __str__=lambda: f"m{uid}")
+
+    guild = SimpleNamespace(id=77, name="The Den", member_count=12, owner_id=9)
+    people = {uid: person(uid) for uid in (1, 4)}
+    guild.get_member = people.get
+    bot = SimpleNamespace(storage_path=storage, guilds=[guild], voice_clients=[], get_guild=lambda gid: guild if gid == 77 else None)
+    bot.get_cog = lambda name: Welcome(bot) if name == "Welcome" else None
+    cog = PanelBridge(bot)
+    cog._token = TOKEN
+    upload = io.BytesIO()
+    Image.new("RGB", (1600, 900), (10, 120, 240)).save(upload, format="PNG")
+    picture = base64.b64encode(upload.getvalue()).decode()
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            async def post(path, **body):
+                response = await client.post(f"/v1/guilds/77/welcome/{path}", headers=AUTH, json=body)
+                return response.status, await response.json()
+
+            assert (await post("background", user_id="1", action="upload", image=picture))[0] == 403
+            assert (await post("background", user_id="4", action="upload", image="!!!"))[0] == 400
+            assert (await post("background", user_id="4", action="upload", image=base64.b64encode(b"nope").decode()))[0] == 400
+            assert welcome_card.read_background(storage, 77) is None
+            status, body = await post("background", user_id="4", action="upload", image=picture)
+            assert status == 200 and body["settings"]["welcome_card_background"] == "image" and body["before"]["welcome_card_background"] == "gradient"
+            assert Image.open(io.BytesIO(welcome_card.read_background(storage, 77))).size == welcome_card.CARD_SIZE
+
+            assert (await post("card", user_id="1"))[0] == 403
+            status, body = await post("card", user_id="4")
+            card = Image.open(io.BytesIO(base64.b64decode(body["image"]))).convert("RGB")
+            assert status == 200 and card.size == welcome_card.CARD_SIZE and card.getpixel((990, 5))[2] > card.getpixel((990, 5))[0]  # the blue upload shows
+            # Unsaved card settings can be tried out, and nonsense is refused.
+            status, body = await post("card", user_id="4", settings={"welcome_card_background": "gradient", "welcome_card_gradient": "solid", "welcome_card_color_start": "#ff0000"})
+            assert Image.open(io.BytesIO(base64.b64decode(body["image"]))).convert("RGB").getpixel((990, 5)) == (255, 0, 0)
+            assert (await post("card", user_id="4", settings={"welcome_card_gradient": "spiral"}))[0] == 400
+            assert get_guild_settings(storage, 77)["welcome_card_gradient"] == "horizontal"  # trying out saves nothing
+
+            status, body = await post("background", user_id="4", action="remove")
+            assert status == 200 and body["settings"]["welcome_card_background"] == "gradient" and body["has_background"] is False
+
+    asyncio.run(run())

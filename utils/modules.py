@@ -13,7 +13,8 @@ from utils.settings import get_guild_settings
 
 # module -> (flag setting, display name, top-level commands that belong to it)
 MODULES: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    "welcome": ("welcome_enabled", "Welcome and leave", ()),
+    "welcome": ("welcome_enabled", "Welcome", ()),
+    "leave": ("leave_enabled", "Leave messages", ()),
     "member_roles": ("member_roles_enabled", "Member roles", ()),
     "moderation": ("moderation_enabled", "Moderation", (
         "kick", "ban", "tempban", "unban", "softban", "slowmode", "mute", "unmute", "warn", "warnings",
@@ -35,8 +36,14 @@ MODULES: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "rolemenus": ("rolemenus_enabled", "Role menus", ("rolemenu",)),
     "reactionroles": ("reactionroles_enabled", "Reaction roles", ("reactionrole",)),
     "schedules": ("schedules_enabled", "Scheduled actions", ("schedule",)),
+    "snipe": ("snipe_enabled", "Snipe", ("snipe",)),
 }
 _COMMAND_MODULE = {command: module for module, (_, _, commands) in MODULES.items() for command in commands}
+
+
+def module_of(qualified_name: str) -> str | None:
+    """The module a command belongs to, if any."""
+    return _COMMAND_MODULE.get(qualified_name.split(" ", 1)[0].lower())
 
 
 def enabled_in(settings: dict[str, Any], module: str) -> bool:

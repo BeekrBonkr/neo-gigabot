@@ -48,6 +48,8 @@ from utils import sticky_roles as sticky_role_store
 from utils import tags as tag_store
 from utils import tempbans as tempban_store
 from utils import warnings as warning_store
+from utils import welcome_card
+from utils.modules import MODULES, enabled_in, module_of
 from utils.db import connect
 from utils.discord_links import parse_message_link
 from utils.durations import parse_duration
@@ -63,6 +65,10 @@ from utils.settings import (
     SETTING_IDS,
     SETTING_INT_RANGES,
     SETTING_TEXT_LIMITS,
+    SETTING_MULTI_CHOICES,
+    blocking_entry,
+    sync_command_modules,
+    update_guild_settings,
     MOD_LOG_EVENT_KINDS,
     WARN_ACTION_CHOICES,
     clear_settings_caches,
@@ -172,6 +178,11 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
             if value not in WARN_ACTION_CHOICES:
                 raise SettingsValidationError(f"warn_action must be one of {', '.join(WARN_ACTION_CHOICES)}.")
             cleaned[key] = value
+        elif key in SETTING_MULTI_CHOICES:
+            allowed = SETTING_MULTI_CHOICES[key]
+            if not isinstance(value, list) or any(v not in allowed for v in value):
+                raise SettingsValidationError(f"{key} must be a list holding any of {', '.join(allowed)}.")
+            cleaned[key] = [choice for choice in allowed if choice in value]
         elif key in SETTING_CHOICES:
             if value not in SETTING_CHOICES[key]:
                 raise SettingsValidationError(f"{key} must be one of {', '.join(SETTING_CHOICES[key])}.")
@@ -334,6 +345,8 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/guilds/{guild_id}/stickies", self.h_stickies_action)
         r.add_post("/v1/guilds/{guild_id}/rolemenus", self.h_rolemenus_action)
         r.add_post("/v1/guilds/{guild_id}/honeypot", self.h_honeypot_action)
+        r.add_post("/v1/guilds/{guild_id}/welcome/card", self.h_welcome_card)
+        r.add_post("/v1/guilds/{guild_id}/welcome/background", self.h_welcome_background)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
@@ -557,7 +570,9 @@ class PanelBridge(commands.Cog):
         body = await self._json(request)
         defaults = get_default_settings(self.storage)
         before = get_guild_settings(self.storage, int(raw))
-        cleaned = validate_settings(body.get("settings"), defaults)
+        cleaned = sync_command_modules(before, validate_settings(body.get("settings"), defaults))
+        if cleaned.get("welcome_card_background") == "image" and welcome_card.read_background(self.storage, raw) is None:
+            cleaned["welcome_card_background"] = "gradient"  # nothing was uploaded to show
         # Goes through the bot's own save path so its in-memory cache updates
         # immediately - the change is live for the very next command.
         save_guild_settings(self.storage, int(raw), cleaned)
@@ -701,10 +716,8 @@ class PanelBridge(commands.Cog):
         """Why this server's settings stop the member from using a music
         command (disabled command, DJ mode), or "" if they don't."""
         settings = get_guild_settings(self.storage, guild.id)
-        if command:
-            blocked = {str(name).lower() for name in (settings.get("blocked_commands") or [])}
-            if command in blocked:
-                return f"/{command} is disabled in this server."
+        if command and blocking_entry(command, settings.get("blocked_commands")) is not None:
+            return f"/{command} is disabled in this server."
         if settings.get("music_dj_enabled"):
             role_name = str(settings.get("music_dj_role_name", "dj"))
             djadmin = str(settings.get("music_djadmin_role_id") or "")
@@ -1060,6 +1073,68 @@ class PanelBridge(commands.Cog):
         by_root = {name: key for key, _emoji, _label, names in CATEGORY_DEFS for name in names}
         return categories, by_root
 
+    @staticmethod
+    def _command_module(qualified_name: str) -> dict[str, Any]:
+        """Which module switches this command off with it, for the website's
+        command list. `module_solo` marks a module that is this one command."""
+        key = module_of(qualified_name)
+        if key is None:
+            return {"module": None}
+        flag, title, commands_in = MODULES[key]
+        return {"module": key, "module_flag": flag, "module_title": title, "module_solo": commands_in == (qualified_name,)}
+
+    # ---------- welcome card ----------
+
+    async def h_welcome_card(self, request: web.Request) -> web.Response:
+        """The welcome image as this server would post it right now, drawn
+        for the admin looking at the settings page. `settings` may carry
+        unsaved card settings to try out."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        member = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        settings = get_guild_settings(self.storage, guild.id)
+        tryout = body.get("settings")
+        if isinstance(tryout, dict):
+            try:
+                settings = validate_settings({**settings, **{k: v for k, v in tryout.items() if k.startswith("welcome_")}}, get_default_settings(self.storage))
+            except SettingsValidationError as exc:
+                raise BridgeError(400, str(exc)) from exc
+        cog = self.bot.get_cog("Welcome")
+        if cog is None:
+            raise BridgeError(503, "Welcome messages aren't loaded on the bot.")
+        card = await cog.build_card(member, settings)
+        if card is None:
+            raise BridgeError(500, "The image could not be made.")
+        return web.json_response({"image": base64.b64encode(card).decode("ascii")})
+
+    async def h_welcome_background(self, request: web.Request) -> web.Response:
+        """upload: store a picture as the welcome image's background and use
+        it. remove: delete it and go back to the gradient."""
+        guild = self._guild(request)
+        body = await self._json(request)
+        self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        action = str(body.get("action", ""))
+        before = get_guild_settings(self.storage, guild.id)
+        if action == "upload":
+            try:
+                raw = base64.b64decode(str(body.get("image", "")), validate=True)
+            except ValueError as exc:
+                raise BridgeError(400, "That file could not be read as an image.") from exc
+            try:
+                prepared = await asyncio.get_running_loop().run_in_executor(None, welcome_card.prepare_background, raw)
+            except welcome_card.BackgroundError as exc:
+                raise BridgeError(400, str(exc)) from exc
+            welcome_card.save_background(self.storage, guild.id, prepared)
+            settings = update_guild_settings(self.storage, guild.id, {"welcome_card_background": "image"})
+        elif action == "remove":
+            welcome_card.delete_background(self.storage, guild.id)
+            settings = update_guild_settings(self.storage, guild.id, {"welcome_card_background": "gradient"})
+        else:
+            raise BridgeError(400, "Unknown action.")
+        log.info("Panel %s the welcome background for guild %s", "set" if action == "upload" else "removed", guild.id)
+        return web.json_response({"ok": True, "before": before, "settings": settings,
+                                  "has_background": welcome_card.read_background(self.storage, guild.id) is not None})
+
     async def h_commands(self, request: web.Request) -> web.Response:
         categories, by_root = self._command_categories()
         result = []
@@ -1073,6 +1148,7 @@ class PanelBridge(commands.Cog):
                     "description": command.description,
                     "group": command.root_parent.name if command.root_parent else None,
                     "category": by_root.get(root, "owner" if root == "owner" else "other"),
+                    **self._command_module(command.qualified_name),
                     "kind": "slash",
                     "requires": self._required_permissions(command),
                     "params": [
