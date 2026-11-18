@@ -152,3 +152,13 @@ def test_watchmojo_shows_the_picture_as_the_video():
     scene = mm.watchmojo(picture(), "Top 10 Somethings")
     assert scene.size == mm._template("watchmojo.jpg").size
     assert scene.getpixel((100, 300))[:3] == (40, 60, 200) and scene.getpixel((980, 300))[:3] == (200, 60, 40)
+
+
+def test_watermarks_keep_the_size_and_land_where_they_should():
+    plain = picture((400, 300))
+    for style in mm.WATERMARKS:
+        assert mm.watermark(plain, style).size == plain.size and mm.watermark(picture((9, 7)), style).size == (9, 7)
+    assert mm.watermark(plain, "hypercam").getpixel((3, 3))[:3] == (255, 255, 255)  # a white label in the corner
+    assert mm.watermark(plain, "hypercam").getpixel((390, 290)) == plain.getpixel((390, 290))
+    assert mm.watermark(plain, "ifunny").getpixel((10, 297))[:3] != plain.getpixel((10, 297))[:3]  # a strip along the bottom
+    assert mm.watermark(plain, "bandicam").getpixel((10, 150)) == plain.getpixel((10, 150))

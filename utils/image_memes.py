@@ -451,3 +451,28 @@ def watchmojo(picture: Image.Image, title: "richtext.RichText | str") -> Image.I
     _lay_onto(scene, _flat(picture, (0, 0, 0, 255)), _box_quad(*WATCHMOJO_VIDEO))
     _write(scene, WATCHMOJO_TITLE, title, "arial.ttf", fill=(20, 20, 20, 255), max_size=36, align="left")
     return scene
+
+
+# ---------- watermarks ----------
+
+WATERMARKS = ("hypercam", "bandicam", "ifunny")
+
+
+def watermark(frame: Image.Image, style: str) -> Image.Image:
+    """Stamp a frame the way a screen recorder or a meme site would."""
+    result = frame.copy()
+    mark = _template(f"{style}.png")
+
+    def scaled(width: int) -> Image.Image:
+        width = max(8, width)
+        return mark.resize((width, max(1, round(mark.height * width / mark.width))), Image.LANCZOS)
+
+    if style == "hypercam":  # a white label in the top left corner
+        result.paste(scaled(round(frame.width * 0.45)), (0, 0))
+    elif style == "bandicam":  # the address across the top, in the middle
+        stamp = scaled(round(frame.width * 0.36))
+        result.alpha_composite(stamp, ((frame.width - stamp.width) // 2, max(0, round(frame.height * 0.012))))
+    else:  # ifunny: a strip over the bottom edge
+        strip = scaled(frame.width)
+        result.paste(strip, (0, frame.height - strip.height))
+    return result

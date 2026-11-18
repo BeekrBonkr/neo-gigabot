@@ -16,6 +16,11 @@ TAILS = [
     app_commands.Choice(name="Center", value="center"),
     app_commands.Choice(name="Right", value="right"),
 ]
+WATERMARKS = [
+    app_commands.Choice(name="Unregistered HyperCam 2", value="hypercam"),
+    app_commands.Choice(name="Bandicam", value="bandicam"),
+    app_commands.Choice(name="iFunny", value="ifunny"),
+]
 POSTER_MAX_EDGE = 1024
 USER_HELP = "Use this member's avatar instead of an image."
 
@@ -307,6 +312,16 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
         await self._poster(interaction, "watchmojo", "WatchMojo", mm.watchmojo, attachment, message_link, user=user, texts=(title,))
+
+    @app_commands.command(name="watermark", description="Stamp an image like a screen recorder or a meme site would.")
+    @app_commands.describe(style="Whose watermark to add.", **SOURCE_HELP)
+    @app_commands.choices(style=WATERMARKS)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def watermark(
+        self, interaction: discord.Interaction, style: app_commands.Choice[str],
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._per_frame(interaction, "watermark", "Watermarked", lambda frame: mm.watermark(frame, style.value), attachment, message_link)
 
 
 async def setup(bot: commands.Bot) -> None:
