@@ -66,3 +66,11 @@ def test_respects_puts_the_picture_in_the_portrait_frame():
     (top, left), (bottom, right) = changed[:, :2].min(axis=0), changed[:, :2].max(axis=0)
     xs, ys = [x for x, _ in mm.RESPECTS_PORTRAIT], [y for _, y in mm.RESPECTS_PORTRAIT]
     assert min(xs) - 2 <= left and right <= max(xs) + 2 and min(ys) - 2 <= top and bottom <= max(ys) + 2  # nothing else is touched
+
+
+def test_who_did_this_fills_the_gap_between_the_title_and_the_faces():
+    scene = mm.who_did_this(picture())
+    left, top, right, bottom = mm.WHO_DID_THIS_BOX
+    assert scene.size == (717, 717)
+    assert scene.getpixel((left + 40, (top + bottom) // 2))[:3] == (40, 60, 200) and scene.getpixel((right - 40, (top + bottom) // 2))[:3] == (200, 60, 40)
+    assert scene.getpixel((360, 20)) == mm._template("whodidthis.png").getpixel((360, 20))

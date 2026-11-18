@@ -250,3 +250,15 @@ def respects(picture: Image.Image) -> Image.Image:
     haze = Image.new("RGBA", picture.size, (112, 108, 96, 255))  # the scene is foggy, so the photo is dulled to sit in it
     _lay_onto(scene, Image.blend(_flat(picture), haze, 0.3), RESPECTS_PORTRAIT)
     return scene
+
+
+# ---------- who did this ----------
+
+WHO_DID_THIS_BOX = (0, 159, 717, 563)
+
+
+def who_did_this(picture: Image.Image) -> Image.Image:
+    """The picture between WHO DID THIS and a row of crying-laughing faces."""
+    scene = _template("whodidthis.png")
+    _lay_onto(scene, _flat(picture), _box_quad(*WHO_DID_THIS_BOX))
+    return scene

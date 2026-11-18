@@ -42,7 +42,8 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
 - **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet, bonk and triggered (on an image or a member's avatar),
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
-- **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted, respects.
+- **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted, respects,
+  whodidthis.
   Formats built on a well-known picture use the real template, kept in `assets/images/`
 - **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
   resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)

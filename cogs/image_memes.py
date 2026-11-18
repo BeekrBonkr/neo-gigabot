@@ -171,6 +171,15 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     ) -> None:
         await self._poster(interaction, "respects", "Press F", mm.respects, attachment, message_link, user=user)
 
+    @app_commands.command(name="whodidthis", description="Frame an image with WHO DID THIS and crying-laughing faces.")
+    @app_commands.describe(user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def whodidthis(
+        self, interaction: discord.Interaction, user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(interaction, "whodidthis", "Who Did This", mm.who_did_this, attachment, message_link, user=user)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))
