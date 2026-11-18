@@ -11,3 +11,4 @@ Overlays and meme templates the image commands open at run time.
 | `respects.jpg` | `/memegen respects` | The Press F to Pay Respects scene, from imgflip (imgflip.com/memetemplate/Press-F-to-Pay-Respects) |
 | `whodidthis.png` | `/memegen whodidthis` | The WHO DID THIS frame from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
 | `wheeze.png` | `/memegen wheeze` | The Wheeze comic, from imgflip (imgflip.com/memetemplate/85219185/Wheeze) |
+| `achievement.png` | `/memegen achievement` | An Xbox achievement popup, from imgflip (achievement-unlocked-template), with the white around it removed |

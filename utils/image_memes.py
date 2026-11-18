@@ -302,3 +302,15 @@ def keep_item(picture: Image.Image) -> Image.Image:
     _write(card, (124, 538, note[2] - 20, 590), "This product has fewer returns than average compared to similar products.", "DejaVuSans-Bold.ttf",
            fill=(86, 89, 89, 255), max_size=17, align="left", from_top=True)
     return card
+
+
+# ---------- achievement ----------
+
+ACHIEVEMENT_TEXT = (193, 80, 690, 136)  # the empty line under "Achievement unlocked"
+
+
+def achievement(text: "richtext.RichText | str") -> Image.Image:
+    """The Xbox achievement popup, with the text as the achievement's name."""
+    popup = _template("achievement.png")
+    _write(popup, ACHIEVEMENT_TEXT, text, "arial.ttf", fill=(214, 214, 214, 255), max_size=40, align="left")
+    return popup

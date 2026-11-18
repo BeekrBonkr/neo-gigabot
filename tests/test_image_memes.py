@@ -89,3 +89,9 @@ def test_keep_item_shows_the_picture_above_the_note():
     assert card.size == (mm.KEEP_ITEM_WIDTH, 640)
     assert card.getpixel((mm.KEEP_ITEM_WIDTH // 2 + 60, 240))[:3] == (200, 60, 40)
     assert card.getpixel((84, 522))[:3] != (255, 255, 255)  # the check mark's disc
+
+
+def test_achievement_writes_on_the_popup_and_keeps_its_corners_clear():
+    blank, named = mm._template("achievement.png"), mm.achievement("Did a thing")
+    assert named.size == blank.size and named.getpixel((0, 0))[3] == 0
+    assert named.tobytes() != blank.tobytes() and mm.achievement("x" * 60).size == blank.size

@@ -198,6 +198,24 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     ) -> None:
         await self._poster(interaction, "keepitem", "Keep This Item", mm.keep_item, attachment, message_link, user=user)
 
+    async def _from_text(self, interaction: discord.Interaction, name: str, title: str, build, *texts: str) -> None:
+        """A still made from words alone: `build(*texts)` returns it."""
+        ready: list = []
+
+        async def prepare() -> None:
+            for text in texts:
+                ready.append(await self.bot.image_tools.prepare_text(text, interaction.guild))
+
+        await self.bot.image_tools.run_image_command(
+            interaction, name, title, lambda _bytes, _name: encode_frames([build(*ready)], [100], name), source=_no_image, before=prepare,
+        )
+
+    @app_commands.command(name="achievement", description="An Xbox achievement popup with your text.")
+    @app_commands.describe(text="What the achievement is for.")
+    @app_commands.checks.cooldown(1, 3.0)
+    async def achievement(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 60]) -> None:
+        await self._from_text(interaction, "achievement", "Achievement Unlocked", mm.achievement, text)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))
