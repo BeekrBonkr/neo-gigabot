@@ -30,3 +30,4 @@ Overlays and meme templates the image commands open at run time.
 | `oldtv.png` | `/memegen scene` | An old TV set, from imgflip (Old-tv), with the screen cut out |
 | `bill.jpg` | `/memegen scene` | A hundred dollar bill, from imgflip (100-bill-dollar) |
 | `bobross.png` | `/memegen scene` | Bob Ross at his easel, from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/bob-ross.png`) |
+| `clown_nose.png` | `/image effects clown` | A clown nose, from imgflip (Clown-Nose) |
