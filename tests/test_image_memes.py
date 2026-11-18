@@ -162,3 +162,9 @@ def test_watermarks_keep_the_size_and_land_where_they_should():
     assert mm.watermark(plain, "hypercam").getpixel((390, 290)) == plain.getpixel((390, 290))
     assert mm.watermark(plain, "ifunny").getpixel((10, 297))[:3] != plain.getpixel((10, 297))[:3]  # a strip along the bottom
     assert mm.watermark(plain, "bandicam").getpixel((10, 150)) == plain.getpixel((10, 150))
+
+
+def test_kirby_goes_under_the_picture():
+    result = mm.kirby(picture((320, 160)))
+    assert result.size == (mm.PANEL_WIDTH, 320 + 360)
+    assert result.getpixel((40, 100))[:3] == (40, 60, 200) and result.getpixel((40, 400))[:3] != (40, 60, 200)

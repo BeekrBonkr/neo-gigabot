@@ -476,3 +476,24 @@ def watermark(frame: Image.Image, style: str) -> Image.Image:
         strip = scaled(frame.width)
         result.paste(strip, (0, frame.height - strip.height))
     return result
+
+
+# ---------- panels that react to the picture ----------
+
+PANEL_WIDTH = 640
+
+
+def _stack(*parts: Image.Image) -> Image.Image:
+    """The parts one above the other, each scaled to the same width."""
+    scaled = [part.resize((PANEL_WIDTH, max(1, round(part.height * PANEL_WIDTH / part.width))), Image.LANCZOS) for part in parts]
+    canvas = Image.new("RGBA", (PANEL_WIDTH, sum(part.height for part in scaled)), (255, 255, 255, 255))
+    top = 0
+    for part in scaled:
+        canvas.alpha_composite(part, (0, top))
+        top += part.height
+    return canvas
+
+
+def kirby(picture: Image.Image) -> Image.Image:
+    """The picture, and under it Kirby calling the police."""
+    return _stack(picture, _template("kirby.jpg"))

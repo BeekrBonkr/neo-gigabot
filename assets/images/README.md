@@ -23,3 +23,4 @@ Overlays and meme templates the image commands open at run time.
 | `hypercam.png` | `/memegen watermark` | The Unregistered HyperCam 2 label, from imgflip (Unregistered-HyperCam-2-Watermark) |
 | `bandicam.png` | `/memegen watermark` | The Bandicam address, cut from imgflip's Bandicam-Watermark |
 | `ifunny.png` | `/memegen watermark` | The iFunny strip, from imgflip (iFunny-Watermark) |
+| `kirby.jpg` | `/memegen kirby` | Kirby's Calling the Police, from imgflip (KIRBYS-CALLING-THE-POLICE) |
