@@ -23,3 +23,11 @@ def test_clown_puts_a_red_nose_below_the_middle_of_the_face():
     assert red > 180 and green < 90 and blue < 90
     assert result.getpixel((100, 50)) == plain().getpixel((100, 50))  # the forehead is untouched
     assert fx.clown(plain(), [(0, 0, 6, 6)]).size == (200, 200)  # a face at the edge still fits
+
+
+def test_forehead_stretches_upward_from_the_brow():
+    result = fx.forehead(plain(), [FACE], 50)
+    assert result.size == (200, 200)
+    assert plain().getpixel((100, 20))[:3] == (90, 120, 150) and result.getpixel((100, 20))[:3] == (230, 190, 160)  # skin where background was
+    assert result.getpixel((100, 120)) == plain().getpixel((100, 120))  # below the brow nothing moves
+    assert fx.forehead(plain(), [(0, 0, 3, 3)]).tobytes() == plain().tobytes()  # too small to stretch

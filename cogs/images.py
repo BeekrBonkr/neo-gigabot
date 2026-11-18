@@ -712,7 +712,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             ),
             self.bot.embeds.field(
                 "Face & Compositing",
-                "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/joy/clown/contentaware`",
+                "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/joy/clown/forehead/contentaware`",
             ),
             self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
             self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
@@ -2008,6 +2008,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         message_link: str | None = None,
     ) -> None:
         await self._face_effect(interaction, "clown", "Clown", image_faces.clown, attachment, message_link)
+
+    @effects.command(name="forehead", description="Give every detected face a bigger forehead.")
+    @app_commands.describe(
+        amount="How much taller, as a percent of the face. Defaults to 50.",
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
+    @app_commands.checks.cooldown(1, 10.0)
+    async def forehead(
+        self,
+        interaction: discord.Interaction,
+        amount: app_commands.Range[int, 10, 150] = 50,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._face_effect(interaction, "forehead", "Forehead", lambda frame, boxes: image_faces.forehead(frame, boxes, amount), attachment, message_link)
 
     @effects.command(name="googlyeyes", description="Slap googly eyes on every detected face.")
     @app_commands.describe(
