@@ -4,6 +4,7 @@ functions take one RGBA frame; the poster builders return a finished image."""
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from pathlib import Path
 
@@ -195,4 +196,57 @@ def change_my_mind(text: "richtext.RichText | str") -> Image.Image:
     warp = cv2.getPerspectiveTransform(flat, np.float32(CMM_SIGN))
     laid = cv2.warpPerspective(np.asarray(sheet), warp, CMM_SIZE, flags=cv2.INTER_AREA, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255, 0))
     scene.alpha_composite(Image.fromarray(laid, "RGBA"))
+    return scene
+
+
+# ---------- pictures placed into templates ----------
+
+def _flat(picture: Image.Image, color=(255, 255, 255, 255)) -> Image.Image:
+    """The picture with anything see-through filled in."""
+    backdrop = Image.new("RGBA", picture.size, color)
+    backdrop.alpha_composite(picture)
+    return backdrop
+
+
+def _box_quad(left: int, top: int, right: int, bottom: int) -> tuple:
+    return ((left, top), (right, top), (right, bottom), (left, bottom))
+
+
+def _lay_onto(scene: Image.Image, picture: Image.Image, quad, *, under: bool = False) -> None:
+    """Fit the picture into the scene so its corners land on `quad` (top left,
+    top right, bottom right, bottom left). `under` slides it beneath the scene,
+    for templates with a see-through hole where the picture goes."""
+    width = max(1, round(max(math.dist(quad[0], quad[1]), math.dist(quad[3], quad[2]))))
+    height = max(1, round(max(math.dist(quad[0], quad[3]), math.dist(quad[1], quad[2]))))
+    flat = np.float32([(0, 0), (width, 0), (width, height), (0, height)])
+    warp = cv2.getPerspectiveTransform(flat, np.float32(quad))
+    laid = cv2.warpPerspective(np.asarray(_cover(picture, (width, height))), warp, scene.size, flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    laid = Image.fromarray(laid, "RGBA")
+    if under:
+        laid.alpha_composite(scene)
+        scene.paste(laid)
+    else:
+        scene.alpha_composite(laid)
+
+
+def _write(image: Image.Image, box: tuple[int, int, int, int], text: "richtext.RichText | str", font_name: str, *, fill,
+           max_size: int, align: str = "center", from_top: bool = False) -> None:
+    """Fit text to a box and draw it there, centered or against one side."""
+    left, top, right, bottom = box
+    arranged = richtext.fit(richtext.as_rich(text).strip(), font_name, right - left, bottom - top, max_size=max_size)
+    drop = 0 if from_top else max(0, (bottom - top - arranged.height) // 2)
+    arranged.draw(image, left, top + drop, right - left, fill=fill, align=align)
+
+
+# ---------- respects ----------
+
+RESPECTS_PORTRAIT = ((477, 113), (573, 116), (588, 257), (499, 267))  # the framed photo beside the coffin
+
+
+def respects(picture: Image.Image) -> Image.Image:
+    """The funeral where you press F to pay respects, with the picture in the frame."""
+    scene = _template("respects.jpg")
+    haze = Image.new("RGBA", picture.size, (112, 108, 96, 255))  # the scene is foggy, so the photo is dulled to sit in it
+    _lay_onto(scene, Image.blend(_flat(picture), haze, 0.3), RESPECTS_PORTRAIT)
     return scene

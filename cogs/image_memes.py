@@ -17,6 +17,7 @@ TAILS = [
     app_commands.Choice(name="Right", value="right"),
 ]
 POSTER_MAX_EDGE = 1024
+USER_HELP = "Use this member's avatar instead of an image."
 
 
 async def _no_image() -> tuple[bytes, str]:
@@ -135,6 +136,40 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
             lambda _bytes, _name: encode_frames([mm.change_my_mind(texts["statement"])], [100], "changemymind"),
             source=_no_image, before=prepare,
         )
+
+    # ---------- formats built on a template picture ----------
+
+    async def _poster(self, interaction: discord.Interaction, name: str, title: str, build, attachment=None, message_link=None,
+                      *, user: discord.User | None = None, texts: tuple[str, ...] = ()) -> None:
+        """A still made from one picture: `build(picture, *texts)` returns it.
+        The picture is the member's avatar if `user` is given; `texts` are
+        words typed in Discord, made ready to draw first."""
+        ready: list = []
+
+        async def prepare() -> None:
+            for text in texts:
+                ready.append(await self.bot.image_tools.prepare_text(text, interaction.guild))
+
+        def work(image_bytes: bytes, filename: str) -> tuple[bytes, str]:
+            picture = load_frames(image_bytes, filename, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0]
+            return encode_frames([build(picture, *ready)], [100], name)
+
+        async def avatar() -> tuple[bytes, str]:
+            return await user.display_avatar.replace(size=512, static_format="png").read(), "avatar.png"
+
+        await self.bot.image_tools.run_image_command(
+            interaction, name, title, work, attachment=attachment, message_link=message_link,
+            source=avatar if user else None, before=prepare,
+        )
+
+    @app_commands.command(name="respects", description="Put an image in the funeral portrait. Press F to pay respects.")
+    @app_commands.describe(user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def respects(
+        self, interaction: discord.Interaction, user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(interaction, "respects", "Press F", mm.respects, attachment, message_link, user=user)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -723,6 +723,10 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 "`/animate spin/rainbow/wave/zoom/pet/bonk/triggered` • `/animate speed/reverse/frames/togif`",
             ),
             self.bot.embeds.field("More Meme Formats", "`/memegen speechbubble/wanted/drake/changemymind/jail/wasted`"),
+            self.bot.embeds.field(
+                "Meme Templates",
+                "`/memegen respects`"
+            ),
             self.bot.embeds.field("Layout & Utility", "`/edit mirror/tile/collage/border/circle/resize/palette/removebg`"),
         ]
         await self.bot.embeds.respond(interaction, title="Image Commands", fields=fields)

@@ -57,3 +57,12 @@ def test_drake_panels_take_text_or_a_picture():
     assert with_picture.getpixel((mm.DRAKE_PANEL + 10, 10))[:3] == (255, 255, 255)
     top, bottom = words.crop((0, 0, 400, 400)), words.crop((0, 400, 400, 800))
     assert top.tobytes() != bottom.tobytes()  # two different poses
+
+
+def test_respects_puts_the_picture_in_the_portrait_frame():
+    scene, plain = mm.respects(picture()), mm._template("respects.jpg")
+    assert scene.size == plain.size == (1280, 720)
+    changed = np.argwhere(np.asarray(scene) != np.asarray(plain))
+    (top, left), (bottom, right) = changed[:, :2].min(axis=0), changed[:, :2].max(axis=0)
+    xs, ys = [x for x, _ in mm.RESPECTS_PORTRAIT], [y for _, y in mm.RESPECTS_PORTRAIT]
+    assert min(xs) - 2 <= left and right <= max(xs) + 2 and min(ys) - 2 <= top and bottom <= max(ys) + 2  # nothing else is touched
