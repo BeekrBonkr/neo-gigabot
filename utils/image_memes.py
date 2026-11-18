@@ -425,3 +425,15 @@ def einstein(text: "richtext.RichText | str") -> Image.Image:
     _write(chalk, EINSTEIN_BOARD, text, "arial.ttf", fill=(236, 236, 230, 235), max_size=120)
     scene.alpha_composite(chalk.filter(ImageFilter.GaussianBlur(1.1)))  # chalk has soft edges
     return scene
+
+
+# ---------- sonic says ----------
+
+SONIC_TEXT = (188, 160, 584, 372)
+
+
+def sonic(text: "richtext.RichText | str") -> Image.Image:
+    """The Sonic Says card, with the text as his advice."""
+    scene = _template("sonic.jpg")
+    _write(scene, SONIC_TEXT, text, "arial.ttf", fill=(255, 255, 255, 255), max_size=64)
+    return scene

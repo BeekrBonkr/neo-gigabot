@@ -141,3 +141,8 @@ def test_einstein_chalks_the_text_on_the_board():
     outside = (0, bottom + 20, blank.width, blank.height)
     assert written.crop((left, top, right, bottom)).tobytes() != blank.crop((left, top, right, bottom)).tobytes()
     assert written.crop(outside).tobytes() == blank.crop(outside).tobytes()
+
+
+def test_sonic_says_the_text():
+    blank = mm._template("sonic.jpg")
+    assert mm.sonic("x" * 120).size == blank.size and mm.sonic("go outside").tobytes() != blank.tobytes()

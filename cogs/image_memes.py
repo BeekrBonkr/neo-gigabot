@@ -293,6 +293,12 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     async def einstein(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 60]) -> None:
         await self._from_text(interaction, "einstein", "Einstein", mm.einstein, text)
 
+    @app_commands.command(name="sonic", description="Sonic says your text.")
+    @app_commands.describe(text="What Sonic says.")
+    @app_commands.checks.cooldown(1, 3.0)
+    async def sonic(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 120]) -> None:
+        await self._from_text(interaction, "sonic", "Sonic Says", mm.sonic, text)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))
