@@ -229,6 +229,36 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
         else:
             await self.bot.image_tools.send_error(interaction, "Nothing To Bury", "Give some text, a member, or both.")
 
+    @app_commands.command(name="rtx", description="Two images side by side: RTX OFF and RTX ON.")
+    @app_commands.describe(
+        off_image="The RTX OFF image.", on_image="The RTX ON image.",
+        off_user="Use this member's avatar for RTX OFF.", on_user="Use this member's avatar for RTX ON.",
+    )
+    @app_commands.checks.cooldown(1, 3.0)
+    async def rtx(
+        self, interaction: discord.Interaction,
+        off_image: discord.Attachment | None = None, on_image: discord.Attachment | None = None,
+        off_user: discord.User | None = None, on_user: discord.User | None = None,
+    ) -> None:
+        sides = ((off_image, off_user), (on_image, on_user))
+        if any(image is None and member is None for image, member in sides):
+            await self.bot.image_tools.send_error(interaction, "Missing A Side", "Give an image or a member for both RTX OFF and RTX ON.")
+            return
+        pictures: list[bytes] = []
+
+        async def prepare() -> None:
+            for image, member in sides:
+                if image is not None:
+                    pictures.append((await self.bot.image_tools.get_source_image(interaction, image, None))[0])
+                else:
+                    pictures.append(await member.display_avatar.replace(size=512, static_format="png").read())
+
+        def work(_bytes: bytes, _name: str) -> tuple[bytes, str]:
+            off, on = (load_frames(data, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0] for data in pictures)
+            return encode_frames([mm.rtx(off, on)], [100], "rtx")
+
+        await self.bot.image_tools.run_image_command(interaction, "rtx", "RTX", work, source=_no_image, before=prepare)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

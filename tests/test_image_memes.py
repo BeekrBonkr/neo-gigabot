@@ -103,3 +103,11 @@ def test_rip_carves_words_and_an_optional_picture():
     assert words.tobytes() != mm._template("rip.jpg").tobytes() and words.tobytes() != with_picture.tobytes()
     red, green, blue, _ = with_picture.getpixel(((mm.RIP_STONE[0] + mm.RIP_STONE[2]) // 2, mm.RIP_STONE[1] + 200))
     assert max(red, green, blue) - min(red, green, blue) < 12  # the picture is carved in gray
+
+
+def test_rtx_puts_the_pictures_side_by_side():
+    off, on = Image.new("RGBA", (50, 80), (10, 200, 10, 255)), Image.new("RGBA", (90, 40), (10, 10, 200, 255))
+    result = mm.rtx(off, on)
+    assert result.size == (mm.RTX_PANEL * 2 + mm.RTX_GAP, mm.RTX_PANEL)
+    assert result.getpixel((240, 40))[:3] == (10, 200, 10) and result.getpixel((mm.RTX_PANEL + mm.RTX_GAP + 240, 40))[:3] == (10, 10, 200)
+    assert result.getpixel((30, mm.RTX_PANEL - 80))[:3] != (10, 200, 10)  # a badge sits on the lower left

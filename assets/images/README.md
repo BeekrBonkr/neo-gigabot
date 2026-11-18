@@ -13,3 +13,5 @@ Overlays and meme templates the image commands open at run time.
 | `wheeze.png` | `/memegen wheeze` | The Wheeze comic, from imgflip (imgflip.com/memetemplate/85219185/Wheeze) |
 | `achievement.png` | `/memegen achievement` | An Xbox achievement popup, from imgflip (achievement-unlocked-template), with the white around it removed |
 | `rip.jpg` | `/memegen rip` | The blank headstone from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/rip.png`) |
+| `rtx_off.png` | `/memegen rtx` | The RTX OFF badge, cut from imgflip's RTX on/off template |
+| `rtx_on.png` | `/memegen rtx` | The RTX ON badge, from the same template |

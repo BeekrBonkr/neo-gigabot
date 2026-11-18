@@ -336,3 +336,22 @@ def rip(text: "richtext.RichText | str", picture: Image.Image | None = None) -> 
         words_top += side + 16
     _write(scene, (left + 20, words_top, right - 20, bottom - 24), text, "arial.ttf", fill=RIP_INK, max_size=64)
     return scene
+
+
+# ---------- rtx ----------
+
+RTX_PANEL = 480
+RTX_GAP = 6
+RTX_BADGE_WIDTH = 170
+
+
+def rtx(off: Image.Image, on: Image.Image) -> Image.Image:
+    """Two pictures side by side, badged RTX OFF and RTX ON."""
+    canvas = Image.new("RGBA", (RTX_PANEL * 2 + RTX_GAP, RTX_PANEL), (255, 255, 255, 255))
+    for index, (picture, badge_name) in enumerate(((off, "rtx_off.png"), (on, "rtx_on.png"))):
+        left = index * (RTX_PANEL + RTX_GAP)
+        canvas.alpha_composite(_cover(_flat(picture), (RTX_PANEL, RTX_PANEL)), (left, 0))
+        badge = _template(badge_name)
+        badge = badge.resize((RTX_BADGE_WIDTH, round(badge.height * RTX_BADGE_WIDTH / badge.width)), Image.LANCZOS)
+        canvas.alpha_composite(badge, (left, RTX_PANEL - badge.height - 48))
+    return canvas
