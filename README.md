@@ -44,7 +44,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
 - **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted, respects,
   whodidthis, wheeze, keepitem, achievement, rip, rtx, news, presidential, notification, einstein, sonic,
-  watchmojo, watermark, kirby.
+  watchmojo, watermark, kirby, excuse.
   Formats built on a well-known picture use the real template, kept in `assets/images/`
 - **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
   resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)

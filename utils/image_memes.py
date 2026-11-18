@@ -497,3 +497,8 @@ def _stack(*parts: Image.Image) -> Image.Image:
 def kirby(picture: Image.Image) -> Image.Image:
     """The picture, and under it Kirby calling the police."""
     return _stack(picture, _template("kirby.jpg"))
+
+
+def excuse(picture: Image.Image) -> Image.Image:
+    """The picture, and under it the "excuse me what" reaction."""
+    return _stack(picture, _template("excuse.jpg"))

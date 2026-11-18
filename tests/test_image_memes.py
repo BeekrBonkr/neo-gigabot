@@ -168,3 +168,8 @@ def test_kirby_goes_under_the_picture():
     result = mm.kirby(picture((320, 160)))
     assert result.size == (mm.PANEL_WIDTH, 320 + 360)
     assert result.getpixel((40, 100))[:3] == (40, 60, 200) and result.getpixel((40, 400))[:3] != (40, 60, 200)
+
+
+def test_excuse_goes_under_the_picture():
+    result = mm.excuse(picture((320, 160)))
+    assert result.width == mm.PANEL_WIDTH and result.height > 320 and result.getpixel((600, 100))[:3] == (200, 60, 40)

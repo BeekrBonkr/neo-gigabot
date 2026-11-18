@@ -24,3 +24,4 @@ Overlays and meme templates the image commands open at run time.
 | `bandicam.png` | `/memegen watermark` | The Bandicam address, cut from imgflip's Bandicam-Watermark |
 | `ifunny.png` | `/memegen watermark` | The iFunny strip, from imgflip (iFunny-Watermark) |
 | `kirby.jpg` | `/memegen kirby` | Kirby's Calling the Police, from imgflip (KIRBYS-CALLING-THE-POLICE) |
+| `excuse.jpg` | `/memegen excuse` | The "excuse me what" panel from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
