@@ -8,6 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils.cases import add_case
+from utils.website import site_link
 from utils.durations import parse_duration
 from utils.tempbans import add_tempban, due_tempbans, remove_tempban
 from utils.settings import (
@@ -176,6 +178,30 @@ class PollView(discord.ui.View):
                 pass
 
 
+MAX_SLOWMODE_SECONDS = 21600  # Discord's limit: six hours
+
+
+def parse_slowmode(value: str) -> int | None:
+    """Seconds for a slowmode option: "off"/"0" is 0, a bare number is seconds,
+    otherwise a duration like 10s or 2m. None if it isn't one or is over 6 hours."""
+    text = (value or "").strip().lower()
+    if text in ("off", "none", "0"):
+        return 0
+    if text.isdigit():
+        seconds = int(text)
+    else:
+        delta = parse_duration(text)
+        if delta is None:
+            return None
+        seconds = int(delta.total_seconds())
+    return seconds if 0 <= seconds <= MAX_SLOWMODE_SECONDS else None
+
+
+def format_seconds(seconds: int) -> str:
+    parts = [(seconds // 3600, "h"), (seconds % 3600 // 60, "m"), (seconds % 60, "s")]
+    return " ".join(f"{amount}{unit}" for amount, unit in parts if amount) or "0s"
+
+
 class Moderation(commands.Cog):
     """Moderation commands: member actions, channel/message cleanup, and mass
     role management."""
@@ -239,6 +265,13 @@ class Moderation(commands.Cog):
             return False
         return interaction.user.top_role > target.top_role
 
+    def _appeal_note(self, guild: discord.Guild) -> str:
+        """A line for ban DMs pointing at the appeal form, when this server
+        takes appeals and the bot has a website to host the form."""
+        settings = get_guild_settings(self.bot.storage_path, guild.id)
+        link = site_link(self.bot, "Appeal this ban", f"/appeal/{guild.id}")
+        return f"\n\nIf you think this was a mistake: {link}." if settings.get("appeals_enabled") and link else ""
+
     async def _try_dm(self, user: discord.abc.User, embed: discord.Embed, *, guild_id: int | None = None) -> None:
         # Guild-scoped DMs (kick/ban/mute/warn notices) can be turned off per
         # guild; pass no guild_id for DMs that aren't moderation notices.
@@ -266,7 +299,17 @@ class Moderation(commands.Cog):
         general audit trail admins opt into per-channel/per-user; this is
         specifically for kick/ban/mute/warn actions, which nothing previously
         recorded anywhere persistent. `event` is the filterable action kind
-        ("warn"/"mute"/"kick"/"ban") admins can toggle from the dashboard."""
+        ("warn"/"mute"/"kick"/"ban") admins can toggle from the dashboard.
+
+        Every action is also recorded as a case first, mod log or not, so a
+        member's history exists even in servers that never set a channel."""
+        try:
+            add_case(
+                self.bot.storage_path, guild.id, target.id, moderator.id,
+                title.lstrip("".join(ch for ch in title if not ch.isascii())).strip() or event, reason, duration,
+            )
+        except Exception:  # noqa: BLE001 - history is a record of the action, never a reason to fail it
+            LOGGER.exception("Could not record a moderation case in guild %s", guild.id)
         if not is_mod_log_enabled(self.bot.storage_path, guild.id):
             return
         if not is_mod_log_event_enabled(self.bot.storage_path, guild.id, event):
@@ -287,10 +330,21 @@ class Moderation(commands.Cog):
             pass
 
     async def _maybe_escalate_warning(self, interaction: discord.Interaction, user: discord.Member, warning_count: int) -> None:
+        async def announce(title: str, description: str) -> None:
+            await self.bot.embeds.info_interaction(interaction, title, description)
+
+        await self.escalate_warning(interaction.guild, user, warning_count, announce)
+
+    async def escalate_warning(self, guild: discord.Guild, user: discord.Member, warning_count: int, announce=None) -> None:
         """Automatically mute/kick/ban a member once their warning count reaches
         this guild's configured threshold. A no-op unless an admin has opted in
-        via the settings dashboard (warn_threshold > 0 and warn_action != "none")."""
-        settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        via the settings dashboard (warn_threshold > 0 and warn_action != "none").
+        `announce(title, description)` tells whoever caused the warning what
+        happened; automatic warnings (automod) pass their own or none."""
+        if announce is None:
+            async def announce(title: str, description: str) -> None:
+                return None
+        settings = get_guild_settings(self.bot.storage_path, guild.id)
         threshold = int(settings.get("warn_threshold", 0) or 0)
         action = settings.get("warn_action", "none")
         if threshold <= 0 or action == "none":
@@ -299,10 +353,10 @@ class Moderation(commands.Cog):
         # infractions age out instead of counting against the member forever.
         window_days = int(settings.get("warn_window_days", 0) or 0)
         if window_days > 0:
-            warning_count = count_warnings(self.bot.storage_path, interaction.guild.id, user.id, within_days=window_days)
+            warning_count = count_warnings(self.bot.storage_path, guild.id, user.id, within_days=window_days)
         if warning_count < threshold:
             return
-        if user.top_role >= interaction.guild.me.top_role:
+        if user.top_role >= guild.me.top_role:
             return
 
         reason = f"Automatic action: reached {warning_count} warning(s) (threshold {threshold})"
@@ -318,15 +372,13 @@ class Moderation(commands.Cog):
             await self._try_dm(
                 user,
                 self.bot.embeds.warning_embed(
-                    "You Were Muted", f"You were automatically muted in **{interaction.guild.name}** after reaching {warning_count} warnings."
+                    "You Were Muted", f"You were automatically muted in **{guild.name}** after reaching {warning_count} warnings."
                 ),
-                guild_id=interaction.guild.id,
+                guild_id=guild.id,
             )
-            await self.bot.embeds.info_interaction(
-                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically muted."
-            )
+            await announce("Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically muted.")
             await self._log_mod_action(
-                interaction.guild, event="mute", title="🔇 Auto-Muted (Warning Threshold)", color=self.bot.embeds.warning_color,
+                guild, event="mute", title="🔇 Auto-Muted (Warning Threshold)", color=self.bot.embeds.warning_color,
                 target=user, moderator=self.bot.user, reason=reason,
             )
         elif action == "kick":
@@ -334,11 +386,9 @@ class Moderation(commands.Cog):
                 await user.kick(reason=reason)
             except discord.Forbidden:
                 return
-            await self.bot.embeds.info_interaction(
-                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically kicked."
-            )
+            await announce("Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically kicked.")
             await self._log_mod_action(
-                interaction.guild, event="kick", title="👢 Auto-Kicked (Warning Threshold)", color=self.bot.embeds.warning_color,
+                guild, event="kick", title="👢 Auto-Kicked (Warning Threshold)", color=self.bot.embeds.warning_color,
                 target=user, moderator=self.bot.user, reason=reason,
             )
         elif action == "ban":
@@ -346,11 +396,9 @@ class Moderation(commands.Cog):
                 await user.ban(reason=reason)
             except discord.Forbidden:
                 return
-            await self.bot.embeds.info_interaction(
-                interaction, "Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically banned."
-            )
+            await announce("Auto-Escalation", f"{user.mention} reached {warning_count} warning(s) and has been automatically banned.")
             await self._log_mod_action(
-                interaction.guild, event="ban", title="🔨 Auto-Banned (Warning Threshold)", color=self.bot.embeds.error_color,
+                guild, event="ban", title="🔨 Auto-Banned (Warning Threshold)", color=self.bot.embeds.error_color,
                 target=user, moderator=self.bot.user, reason=reason,
             )
 
@@ -438,7 +486,10 @@ class Moderation(commands.Cog):
 
         await self._try_dm(
             user,
-            self.bot.embeds.error_embed("You Were Banned", f"You were banned from **{interaction.guild.name}**.\nReason: {reason or 'No reason provided.'}"),
+            self.bot.embeds.error_embed(
+                "You Were Banned",
+                f"You were banned from **{interaction.guild.name}**.\nReason: {reason or 'No reason provided.'}" + self._appeal_note(interaction.guild),
+            ),
             guild_id=interaction.guild.id,
         )
 
@@ -501,7 +552,7 @@ class Moderation(commands.Cog):
             self.bot.embeds.error_embed(
                 "You Were Banned",
                 f"You were banned from **{interaction.guild.name}** until {discord.utils.format_dt(unban_at, 'F')}.\n"
-                f"Reason: {reason or 'No reason provided.'}",
+                f"Reason: {reason or 'No reason provided.'}" + self._appeal_note(interaction.guild),
             ),
             guild_id=interaction.guild.id,
         )
@@ -561,6 +612,98 @@ class Moderation(commands.Cog):
             interaction.guild, event="ban", title="🔓 Member Unbanned", color=self.bot.embeds.success_color,
             target=user, moderator=interaction.user, reason=reason,
         )
+
+    @app_commands.command(name="softban", description="Kick a member and delete their recent messages (a ban that is lifted right away).")
+    @app_commands.describe(
+        user="Member to softban",
+        reason="Reason (shown to the member and in the audit log)",
+        delete_message_days="Delete this many days of their recent messages (1-7, default 1)",
+    )
+    @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.checks.bot_has_permissions(ban_members=True)
+    @app_commands.guild_only()
+    async def softban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str | None = None,
+        delete_message_days: app_commands.Range[int, 1, 7] = 1,
+    ) -> None:
+        if user.id == interaction.user.id:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't softban yourself.", ephemeral=True)
+            return
+        if user.top_role >= interaction.guild.me.top_role:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) mine.", ephemeral=True
+            )
+            return
+        if not self._invoker_outranks(interaction, user):
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", "That member's highest role is above (or equal to) yours.", ephemeral=True
+            )
+            return
+
+        await self._try_dm(
+            user,
+            self.bot.embeds.warning_embed(
+                "You Were Kicked",
+                f"You were removed from **{interaction.guild.name}** and your recent messages were deleted. You can rejoin with an invite.\n"
+                f"Reason: {reason or 'No reason provided.'}",
+            ),
+            guild_id=interaction.guild.id,
+        )
+        audit_reason = f"Softban by {interaction.user} ({interaction.user.id}): {reason or 'No reason provided.'}"
+        try:
+            await user.ban(reason=audit_reason, delete_message_seconds=delete_message_days * 86400)
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Softban Failed", "I don't have permission to ban that member.", ephemeral=True)
+            return
+        try:
+            await interaction.guild.unban(user, reason=audit_reason)
+        except discord.HTTPException:
+            # The ban landed but lifting it didn't: say so, or the member stays banned without anyone knowing.
+            await self.bot.embeds.warning_interaction(
+                interaction, "Softban Incomplete", f"{user.mention} was banned, but I couldn't lift the ban. Use `/unban {user.id}` to finish."
+            )
+            return
+
+        await self.bot.embeds.success_interaction(
+            interaction, "Member Softbanned",
+            f"{user.mention} was removed and {delete_message_days} day(s) of their messages deleted. They can rejoin.\nReason: {reason or 'No reason provided.'}",
+        )
+        await self._log_mod_action(
+            interaction.guild, event="kick", title="🧹 Member Softbanned", color=self.bot.embeds.warning_color,
+            target=user, moderator=interaction.user, reason=reason,
+        )
+
+    @app_commands.command(name="slowmode", description="Set how often members can send a message in a channel.")
+    @app_commands.describe(
+        delay="Time between messages, like 10s, 2m or 1h. Use 0 or off to turn slowmode off",
+        channel="Channel to change (defaults to the current channel)",
+    )
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def slowmode(self, interaction: discord.Interaction, delay: str, channel: discord.TextChannel | None = None) -> None:
+        target = channel or interaction.channel
+        if not hasattr(target, "slowmode_delay"):
+            await self.bot.embeds.error_interaction(interaction, "Not Supported", "Slowmode can't be set on this kind of channel.", ephemeral=True)
+            return
+        seconds = parse_slowmode(delay)
+        if seconds is None:
+            await self.bot.embeds.error_interaction(
+                interaction, "Invalid Delay", "Give a time like `10s`, `2m` or `1h` (up to 6 hours), or `off`.", ephemeral=True
+            )
+            return
+        try:
+            await target.edit(slowmode_delay=seconds, reason=f"Slowmode set by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await self.bot.embeds.error_interaction(interaction, "Slowmode Failed", "I don't have permission to edit that channel.", ephemeral=True)
+            return
+        if seconds:
+            await self.bot.embeds.success_interaction(interaction, "Slowmode Set", f"Members can send one message every **{format_seconds(seconds)}** in {target.mention}.")
+        else:
+            await self.bot.embeds.success_interaction(interaction, "Slowmode Off", f"Slowmode is off in {target.mention}.")
 
     @app_commands.command(name="mute", description="Temporarily prevent a member from sending messages or speaking.")
     @app_commands.describe(user="Member to mute", duration="e.g. 10m, 2h, 1d (max 28 days)", reason="Optional reason")

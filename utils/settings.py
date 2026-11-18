@@ -44,7 +44,85 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "embed_color": "",
     "music_max_queue_length": 0,
     "music_max_track_minutes": 0,
+    "music_autoplay": False,
+    "web_player_enabled": True,
+    "web_join_enabled": True,
+    "web_discovery_enabled": True,
+    # Automod: each rule is off, or deletes the message and optionally warns or mutes.
+    "automod_invites_action": "off",
+    "automod_words_action": "off",
+    "automod_banned_words": "",
+    "automod_mentions_action": "off",
+    "automod_mention_limit": 6,
+    "automod_spam_action": "off",
+    "automod_spam_limit": 6,
+    "automod_mute_duration": "10m",
+    "automod_exempt_roles": [],
+    "automod_exempt_channels": [],
+    # Anti-raid: a burst of joins starts a lockdown, during which new joiners are kicked.
+    "antiraid_enabled": False,
+    "antiraid_join_limit": 10,
+    "antiraid_window_seconds": 30,
+    "antiraid_lockdown_minutes": 10,
+    "antiraid_min_account_age_days": 0,
+    # Verification gate: a button that grants a role.
+    "verify_role_id": "",
+    "verify_min_account_age_days": 0,
+    "verify_message": "Welcome! Press the button below to get access to the rest of the server.",
+    # Honeypot: a channel nobody should post in. Whoever does is removed.
+    "honeypot_channel_id": "",
+    "honeypot_action": "ban",
+    # Ban appeals: banned users can answer these questions on the website.
+    "appeals_enabled": False,
+    "appeals_questions": "",
+    # How long the website's searchable copy of the activity log is kept. 0 keeps no copy.
+    "logging_keep_days": 30,
+    # Where /suggest posts. Empty turns suggestions off.
+    "suggestions_channel_id": "",
+    # Richer welcomes: how the join greeting is posted, and an optional DM.
+    "welcome_style": "text",
+    "welcome_embed_title": "Welcome to {server}!",
+    "welcome_embed_color": "",
+    "welcome_embed_image_url": "",
+    "welcome_embed_footer": "",
+    "welcome_dm_message": "",
+    # Temporary voice channels: joining the hub channel creates one.
+    "tempvoice_hub_channel_id": "",
+    "tempvoice_name": "{name}'s channel",
+    "tempvoice_user_limit": 0,
 }
+
+# How the newer settings are validated when they arrive from the web panel
+# (cogs/panel_bridge.py validate_settings). Declared here, next to the
+# defaults, so adding a setting is one edit in one file.
+AUTOMOD_ACTIONS = ("off", "delete", "warn", "mute")
+SETTING_CHOICES: dict[str, tuple[str, ...]] = {
+    "automod_invites_action": AUTOMOD_ACTIONS,
+    "automod_words_action": AUTOMOD_ACTIONS,
+    "automod_mentions_action": AUTOMOD_ACTIONS,
+    "automod_spam_action": AUTOMOD_ACTIONS,
+    "honeypot_action": ("ban", "softban", "kick"),
+    "welcome_style": ("text", "embed", "image"),
+}
+# Hex colors ("" for none) and https links ("" for none).
+SETTING_COLORS: set[str] = {"welcome_embed_color"}
+SETTING_URLS: set[str] = {"welcome_embed_image_url"}
+SETTING_DURATIONS: set[str] = {"automod_mute_duration"}
+SETTING_ID_LISTS: set[str] = {"automod_exempt_roles", "automod_exempt_channels"}
+SETTING_IDS: set[str] = {"verify_role_id", "honeypot_channel_id", "suggestions_channel_id", "tempvoice_hub_channel_id"}
+SETTING_INT_RANGES: dict[str, tuple[int, int]] = {
+    "automod_mention_limit": (2, 50),
+    "automod_spam_limit": (3, 30),
+    "antiraid_join_limit": (3, 100),
+    "antiraid_window_seconds": (5, 600),
+    "antiraid_lockdown_minutes": (1, 1440),
+    "antiraid_min_account_age_days": (0, 365),
+    "verify_min_account_age_days": (0, 365),
+    "logging_keep_days": (0, 90),
+    "tempvoice_user_limit": (0, 99),
+}
+# Text settings that may be longer than the usual 1000 characters.
+SETTING_TEXT_LIMITS: dict[str, int] = {"automod_banned_words": 2000}
 
 WARN_ACTION_CHOICES = ("none", "mute", "kick", "ban")
 MOD_LOG_EVENT_KINDS = ("warn", "mute", "kick", "ban")

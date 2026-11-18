@@ -7,6 +7,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.website import site_link, site_url
+
 HELP_COLOR = discord.Color.blurple()
 HELP_VIEW_TIMEOUT_SECONDS = 180.0
 MENTION_HELP_COOLDOWN_SECONDS = 5.0
@@ -38,10 +40,11 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
         [
             "kick", "ban", "tempban", "unban", "mute", "unmute", "warn", "warnings",
             "purge", "clean", "lock", "unlock", "prune", "role", "autorole",
-            "nick", "poll", "say",
+            "nick", "poll", "say", "modhistory", "note", "softban", "slowmode", "lockdown", "verification", "honeypot",
         ],
     ),
-    ("reactionroles", "🎭", "Reaction Roles", ["reactionrole"]),
+    ("community", "💬", "Community", ["suggest", "suggestion", "tag", "tags", "schedule", "stick", "stickembed", "stickslow", "stickstop", "stickstart", "stickremove", "getstickies"]),
+    ("reactionroles", "🎭", "Reaction Roles & Role Menus", ["reactionrole", "rolemenu"]),
     ("settings", "⚙️", "Server Settings", ["settings"]),
     ("info", "ℹ️", "Info & Support", ["about", "userinfo", "feedback"]),
 ]
@@ -144,7 +147,9 @@ class Help(commands.Cog):
         ]
         return self.bot.embeds.create(
             title="📖 GigaBot Help",
-            description="Pick a category below to see what I can do.\n\n" + "\n".join(lines),
+            description="Pick a category below to see what I can do.\n\n" + "\n".join(lines)
+            + (f"\n\n🌐 **Website** - {site_link(self.bot, 'open it')} for the web music player, playlists, the full command list, "
+               "and a settings dashboard for admins." if site_url(self.bot) else ""),
             color=HELP_COLOR,
             footer="Only you can see this menu.",
         )

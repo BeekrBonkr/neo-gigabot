@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import discord
 import yt_dlp
@@ -16,6 +16,7 @@ from discord.ext import commands
 
 from utils import playlists as playlist_store
 from utils.playlists import PlaylistError
+from utils.website import site_link, site_url
 from utils.settings import (
     get_guild_settings,
     get_music_djadmin_role_id,
@@ -48,6 +49,13 @@ VOICE_CONNECT_TIMEOUT_SECONDS = 15
 MAX_CONCURRENT_EXTRACTIONS = 4
 SEARCH_RESULT_COUNT = 5
 MAX_QUERY_LENGTH = 300
+# Autoplay: how many related candidates to look at, and how many recently
+# played tracks a guild remembers so the same few songs don't go round in circles.
+AUTOPLAY_CANDIDATES = 15
+AUTOPLAY_MEMORY = 40
+AUTOPLAY_REQUESTER = "Autoplay"
+# Seconds of audio per frame discord.py reads from a source.
+FRAME_SECONDS = 0.02
 
 # YouTube (and similar) stream URLs are signed and expire after a few hours. A
 # track that has sat deep in a long queue can outlive its URL, so any cached
@@ -100,6 +108,78 @@ async def own_playlist_autocomplete(
     return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
 
 
+def parse_timestamp(value: str) -> int | None:
+    """Seconds from "90", "1:30" or "1:02:03"; None if it isn't a time."""
+    parts = (value or "").strip().split(":")
+    if not 1 <= len(parts) <= 3 or not all(part.isdigit() for part in parts):
+        return None
+    if any(int(part) > 59 for part in parts[1:]):
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
+def track_key(url: str) -> str:
+    """A stable identity for a track URL: the video ID for YouTube links (so
+    youtu.be/x, watch?v=x and music.youtube.com all match), else the URL."""
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    if host.endswith("youtu.be"):
+        return "yt:" + parsed.path.strip("/")
+    if host.endswith("youtube.com"):
+        for pair in parsed.query.split("&"):
+            if pair.startswith("v="):
+                return "yt:" + pair[2:]
+    return (url or "").split("?")[0].rstrip("/").lower()
+
+
+def flat_entry_to_song(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """A playlist entry from a flat yt-dlp extraction as a stored song, or None
+    if it isn't a playable link. SoundCloud's flat entries carry only the URL,
+    so the title and uploader are read from it."""
+    url = str(entry.get("url") or entry.get("webpage_url") or "")
+    if not url.startswith("http"):
+        if entry.get("ie_key") == "Youtube" and entry.get("id"):
+            url = f"https://www.youtube.com/watch?v={entry['id']}"
+        else:
+            return None
+    if not is_allowed_media_url(url):
+        return None
+    title, uploader = entry.get("title"), entry.get("uploader") or entry.get("channel")
+    if not title:
+        parts = [part for part in urlparse(url).path.split("/") if part]
+        title = parts[-1].replace("-", " ").replace("_", " ").title() if parts else "Unknown title"
+        uploader = uploader or (parts[0] if len(parts) > 1 else None)
+    thumbnails = entry.get("thumbnails") or []
+    thumbnail = entry.get("thumbnail") or (thumbnails[-1].get("url") if thumbnails and isinstance(thumbnails[-1], dict) else None)
+    duration = entry.get("duration")
+    return {"title": str(title), "webpage_url": url, "uploader": uploader,
+            "duration": int(duration) if duration else None, "thumbnail": thumbnail}
+
+
+class PositionedSource(discord.PCMVolumeTransformer):
+    """The volume transformer the player has always used, counting the frames
+    handed to Discord so the playback position is known. Pausing stops the
+    reads, so it needs no clock of its own. `offset` is where a seek started."""
+
+    def __init__(self, original: discord.AudioSource, volume: float = 1.0, *, offset: float = 0.0) -> None:
+        super().__init__(original, volume=volume)
+        self.offset = offset
+        self.frames = 0
+
+    def read(self) -> bytes:
+        data = super().read()
+        if data:
+            self.frames += 1
+        return data
+
+    @property
+    def position(self) -> float:
+        return self.offset + self.frames * FRAME_SECONDS
+
+
 def format_duration(seconds: int | None) -> str:
     if not seconds:
         return "Unknown"
@@ -125,6 +205,9 @@ class Track:
     # How many times the player loop has handed this track to ffmpeg. Bounds the
     # fast-fail retry so a dead stream can't be retried forever.
     playback_attempts: int = 0
+    # Where the next playback of this track starts, in seconds. Set by a seek
+    # and consumed by the player loop.
+    start_at: float = 0.0
 
     @property
     def duration_label(self) -> str:
@@ -191,12 +274,20 @@ class GuildMusicState:
     # Set by /skip so track-loop mode advances past a skipped track instead of
     # replaying it forever.
     skip_requested: bool = False
+    # Set by a seek: the position the current track should restart from.
+    seek_to: float | None = None
+    # For autoplay: the last track that played to its end, and what has played
+    # lately. Both are dropped by a stop, so a stopped session stays stopped.
+    last_track: Track | None = None
+    recent_keys: deque[str] = field(default_factory=lambda: deque(maxlen=AUTOPLAY_MEMORY))
 
     def clear_queue(self) -> None:
         self.queue.clear()
         self.current = None
         self.loop_mode = "off"
         self.skip_requested = False
+        self.seek_to = None
+        self.last_track = None
 
 
 class SearchResultsView(discord.ui.View):
@@ -624,6 +715,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             "dj_enabled": bool(settings.get("music_dj_enabled", False)),
             "dj_role_name": str(settings.get("music_dj_role_name", "dj")),
             "default_volume": max(0, min(default_volume, 100)),
+            "autoplay": bool(settings.get("music_autoplay", False)),
         }
 
     def get_state(self, guild_id: int) -> GuildMusicState:
@@ -752,14 +844,29 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         target_channel: discord.VoiceChannel | discord.StageChannel,
     ) -> discord.VoiceClient:
         assert interaction.guild is not None
+        return await self.connect_to_channel(interaction.guild, target_channel, text_channel_id=interaction.channel_id)
 
-        async with self._get_connect_lock(interaction.guild.id):
-            voice_client = interaction.guild.voice_client
-            state = self.get_state(interaction.guild.id)
+    async def connect_to_channel(
+        self,
+        guild: discord.Guild,
+        target_channel: discord.VoiceChannel | discord.StageChannel,
+        *,
+        text_channel_id: int | None = None,
+    ) -> discord.VoiceClient:
+        """Join or move to a voice channel, refusing to leave a channel where
+        music is playing. `text_channel_id` is where announcements go; a caller
+        with no text channel (the website) leaves the previous one in place."""
+        async with self._get_connect_lock(guild.id):
+            voice_client = guild.voice_client
+            state = self.get_state(guild.id)
+
+            def remember_text_channel() -> None:
+                if text_channel_id is not None:
+                    state.text_channel_id = text_channel_id
 
             if voice_client is None:
-                self.reset_session_volume(interaction.guild.id)
-                state.text_channel_id = interaction.channel_id
+                self.reset_session_volume(guild.id)
+                remember_text_channel()
                 try:
                     voice_client = await asyncio.wait_for(
                         target_channel.connect(self_deaf=True), timeout=VOICE_CONNECT_TIMEOUT_SECONDS
@@ -773,21 +880,21 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
                 if isinstance(target_channel, discord.StageChannel):
                     try:
-                        await interaction.guild.me.edit(suppress=False)
+                        await guild.me.edit(suppress=False)
                     except discord.HTTPException:
                         pass
 
                 return voice_client
 
             if voice_client.channel == target_channel:
-                state.text_channel_id = interaction.channel_id
+                remember_text_channel()
                 return voice_client
 
             if voice_client.is_playing() or voice_client.is_paused():
                 raise RuntimeError("I am already playing music in another voice channel.")
 
-            self.reset_session_volume(interaction.guild.id)
-            state.text_channel_id = interaction.channel_id
+            self.reset_session_volume(guild.id)
+            remember_text_channel()
             try:
                 await asyncio.wait_for(voice_client.move_to(target_channel), timeout=VOICE_CONNECT_TIMEOUT_SECONDS)
             except asyncio.TimeoutError as exc:
@@ -940,19 +1047,113 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         except yt_dlp.utils.DownloadError as exc:
             raise RuntimeError("I couldn't fetch that. Double check the link or try a different search.") from exc
 
-    async def create_source(self, track: Track, volume: float) -> discord.PCMVolumeTransformer:
+    async def create_source(self, track: Track, volume: float, *, start_at: float = 0.0) -> discord.PCMVolumeTransformer:
         stream_url_is_fresh = (
             track.stream_url is not None
             and track.stream_url_fetched_at is not None
             and (time.monotonic() - track.stream_url_fetched_at) < STREAM_URL_TTL_SECONDS
         )
         stream_url = track.stream_url if stream_url_is_fresh else await self.refresh_stream_url(track)
+        before_options = FFMPEG_BEFORE_OPTIONS + (f" -ss {start_at:.2f}" if start_at > 0 else "")
         audio = discord.FFmpegPCMAudio(
             stream_url,
-            before_options=FFMPEG_BEFORE_OPTIONS,
+            before_options=before_options,
             options=FFMPEG_OPTIONS,
         )
-        return discord.PCMVolumeTransformer(audio, volume=volume)
+        return PositionedSource(audio, volume=volume, offset=max(0.0, start_at))
+
+    # ---------- position and seeking ----------
+
+    def playback_position(self, guild: discord.Guild) -> float | None:
+        """Seconds into the current track, or None if nothing is loaded."""
+        voice_client = guild.voice_client
+        state = self.guild_states.get(guild.id)
+        if voice_client is None or state is None or state.current is None:
+            return None
+        position = getattr(getattr(voice_client, "source", None), "position", None)
+        if position is None:
+            return None
+        return min(float(position), float(state.current.duration)) if state.current.duration else float(position)
+
+    def seek(self, guild: discord.Guild, seconds: int) -> Track:
+        """Restart the current track at `seconds`. The player loop sees
+        `seek_to`, replays the same track from there and skips the announcement."""
+        voice_client = guild.voice_client
+        state = self.get_state(guild.id)
+        if voice_client is None or state.current is None or not (voice_client.is_playing() or voice_client.is_paused()):
+            raise RuntimeError("Nothing is playing.")
+        track = state.current
+        if not track.duration:
+            raise RuntimeError("This track has no known length, so it can't be seeked.")
+        if not 0 <= seconds < track.duration:
+            raise RuntimeError(f"Pick a time between 0:00 and {format_duration(track.duration)}.")
+        state.seek_to = float(seconds)
+        voice_client.stop()
+        return track
+
+    # ---------- autoplay and playlist links ----------
+
+    async def _flat_entries(self, url: str, limit: int) -> list[dict[str, Any]]:
+        """The first `limit` entries of a playlist-like URL, without resolving
+        each one (one request instead of one per track)."""
+        options = {**YTDL_OPTIONS, "noplaylist": False, "extract_flat": "in_playlist", "playlistend": limit}
+
+        def _extract() -> list[dict[str, Any]]:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                data = ydl.extract_info(url, download=False)
+            return [entry for entry in (data or {}).get("entries") or [] if entry]
+
+        return await self._run_extraction(asyncio.get_running_loop(), _extract)
+
+    async def extract_playlist_songs(self, url: str, limit: int) -> list[dict[str, Any]]:
+        """Songs of a YouTube/SoundCloud/Bandcamp playlist link, as stored
+        playlist entries. Raises RuntimeError with a message for the user."""
+        url = (url or "").strip()
+        if not is_probably_url(url) or len(url) > MAX_QUERY_LENGTH:
+            raise RuntimeError("Paste the link to a playlist.")
+        if not is_allowed_media_url(url):
+            raise RuntimeError("I can only import playlists from YouTube, SoundCloud, Bandcamp, or Vimeo.")
+        songs = [song for song in (flat_entry_to_song(entry) for entry in await self._flat_entries(url, limit)) if song]
+        if not songs:
+            raise RuntimeError("I couldn't find any songs at that link. Is it a public playlist?")
+        return songs
+
+    async def find_related_track(self, track: Track, exclude: set[str], guild_id: int | None = None) -> Track | None:
+        """A track to follow `track` with: the next unplayed entry of its
+        YouTube mix, or for other sites a search for more by the same uploader."""
+        key = track_key(track.webpage_url)
+        if key.startswith("yt:"):
+            video_id = key[3:]
+            source = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+        else:
+            source = f"ytsearch{AUTOPLAY_CANDIDATES}:{track.uploader or track.title}"
+        max_seconds = self.effective_max_track_seconds(guild_id)
+        for entry in await self._flat_entries(source, AUTOPLAY_CANDIDATES):
+            song = flat_entry_to_song(entry)
+            if song is None or track_key(song["webpage_url"]) in exclude:
+                continue
+            if track.title.lower() in song["title"].lower():
+                continue  # the same song again, uploaded somewhere else
+            if song["duration"] and song["duration"] > max_seconds:
+                continue
+            found = Track.from_storage_dict(song)
+            found.requested_by_name = AUTOPLAY_REQUESTER
+            return found
+        return None
+
+    async def _autoplay_track(self, guild: discord.Guild, state: GuildMusicState) -> Track | None:
+        """What to play now that the queue has run out, if this server has
+        autoplay on and someone is still listening. Never raises."""
+        if state.last_track is None or not self.get_music_settings(guild.id)["autoplay"]:
+            return None
+        channel = getattr(guild.voice_client, "channel", None)
+        if channel is None or not any(not member.bot for member in channel.members):
+            return None
+        try:
+            return await self.find_related_track(state.last_track, set(state.recent_keys), guild.id)
+        except Exception as exc:  # noqa: BLE001 - autoplay is a nicety; a failed lookup just ends the session
+            LOGGER.warning("Autoplay lookup failed in guild %s: %s", guild.id, exc)
+            return None
 
     # ---------- queue management ----------
 
@@ -1167,19 +1368,28 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
                 if not state.queue:
                     state.current = None
-                    await self.schedule_idle_disconnect(guild_id)
-                    return
+                    related = await self._autoplay_track(guild, state)
+                    if state.queue:
+                        continue  # someone queued a song while autoplay was looking
+                    if related is None:
+                        await self.schedule_idle_disconnect(guild_id)
+                        return
+                    state.queue.append(related)
+                    continue
 
                 if state.idle_disconnect_task and not state.idle_disconnect_task.done():
                     state.idle_disconnect_task.cancel()
 
                 track = state.queue.popleft()
                 state.current = track
+                # A seek replays the same track from a new position.
+                start_at, track.start_at = track.start_at, 0.0
+                resumed = start_at > 0
 
                 text_channel = self.bot.get_channel(state.text_channel_id) if state.text_channel_id else None
 
                 try:
-                    source = await self.create_source(track, state.volume)
+                    source = await self.create_source(track, state.volume, start_at=start_at)
                 except Exception as exc:
                     LOGGER.exception("Failed to create audio source for %s", track.webpage_url, exc_info=exc)
                     if isinstance(text_channel, discord.abc.Messageable):
@@ -1208,7 +1418,12 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                     state.current = None
                     continue
 
-                track.playback_attempts += 1
+                if not resumed:
+                    track.playback_attempts += 1
+                    key = track_key(track.webpage_url)
+                    if key in state.recent_keys:
+                        state.recent_keys.remove(key)
+                    state.recent_keys.append(key)
                 started_at = time.monotonic()
 
                 # Announcing the track is best-effort. If the bot lost send access
@@ -1216,7 +1431,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                 # this raise would kill the loop while ffmpeg keeps playing, and
                 # the next /play would then fail every track with "Already
                 # playing audio".
-                if isinstance(text_channel, discord.abc.Messageable):
+                if isinstance(text_channel, discord.abc.Messageable) and not resumed:
                     try:
                         await self.bot.embeds.send(
                             text_channel,
@@ -1226,7 +1441,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                                 self.bot.embeds.field("Duration", track.duration_label, True),
                                 self.bot.embeds.field("Uploader", track.uploader or "Unknown", True),
                                 self.bot.embeds.field("Requested By", track.requested_by_name or "Unknown", False),
-                            ],
+                            ]
+                            + ([self.bot.embeds.field("Web Player", site_link(self.bot, "Control it from your browser", f"/app/{guild_id}"), False)]
+                               if site_url(self.bot) else []),
                             thumbnail_url=track.thumbnail,
                         )
                     except discord.HTTPException as exc:
@@ -1241,6 +1458,13 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
                 finished_track = state.current
                 state.current = None
+
+                if state.seek_to is not None:
+                    seek_to, state.seek_to = state.seek_to, None
+                    if finished_track is not None and not state.skip_requested:
+                        finished_track.start_at = max(seek_to, 0.01)
+                        state.queue.appendleft(finished_track)
+                        continue
 
                 if (
                     finished_track is not None
@@ -1273,6 +1497,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                     continue
 
                 if finished_track is not None:
+                    state.last_track = finished_track
                     if state.loop_mode == "track" and not state.skip_requested:
                         state.queue.appendleft(finished_track)
                     elif state.loop_mode == "queue":
@@ -1311,6 +1536,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         max_page = max(0, (len(queue_list) - 1) // per_page)
         loop_label = f" • Loop: {state.loop_mode}" if state.loop_mode != "off" else ""
+        web_player = site_link(self.bot, "Open the web player", f"/app/{guild_id}")
+        if web_player:
+            description += f"\n🌐 {web_player} to see and reorder the queue from your browser."
         return self.bot.embeds.info_embed(
             "Music Queue",
             description,
@@ -1348,6 +1576,9 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
 
         loop_label = f" • Loop: {state.loop_mode}" if state.loop_mode != "off" else ""
         channel_name = voice_client.channel.name if voice_client and voice_client.channel else "voice"
+        web_player = site_link(self.bot, "web player", f"/app/{guild_id}")
+        if web_player:
+            description += f"\n🌐 The same controls, plus the full queue, are on the {web_player}."
         return self.bot.embeds.info_embed(
             "🎛️ Music Remote",
             description,
@@ -1370,9 +1601,10 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         else:
             body = "This playlist is empty."
 
+        on_site = site_link(self.bot, "View and edit on the website", f"/playlists/{playlist['owner_id']}/{quote(playlist['name'], safe='')}")
         return self.bot.embeds.create(
             title=f"🎵 {playlist['display_name']} ({'Private' if playlist['status'] == 'private' else 'Public'})",
-            description=playlist["description"] or "No description.",
+            description=(playlist["description"] or "No description.") + (f"\n🌐 {on_site}" if on_site else ""),
             color=discord.Color.teal(),
             fields=[self.bot.embeds.field(f"Songs ({len(songs)})", body)],
             footer=f"❤️ {len(playlist['likes'])} like(s) • Page {page + 1}/{max_page + 1}",
@@ -1681,6 +1913,27 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         guild.voice_client.stop()
         await self.bot.embeds.success_interaction(interaction, "Skipped", "Skipped the current track.")
 
+    @app_commands.command(name="seek", description="Jump to a time in the current track.")
+    @app_commands.describe(position="Where to jump to, like 1:30 or 90 (seconds)")
+    @app_commands.checks.cooldown(2, 5.0)
+    @app_commands.guild_only()
+    async def seek_command(self, interaction: discord.Interaction, position: str) -> None:
+        allowed, reason = await self.ensure_music_allowed(interaction, require_voice=True)
+        if not allowed:
+            await self.bot.embeds.error_interaction(interaction, "Music Unavailable", reason or "Not allowed.", ephemeral=True)
+            return
+
+        seconds = parse_timestamp(position)
+        if seconds is None:
+            await self.bot.embeds.error_interaction(interaction, "Seek", "Give me a time like `1:30` or `90`.", ephemeral=True)
+            return
+        try:
+            track = self.seek(interaction.guild, seconds)
+        except RuntimeError as exc:
+            await self.bot.embeds.error_interaction(interaction, "Seek", str(exc), ephemeral=True)
+            return
+        await self.bot.embeds.success_interaction(interaction, "Seek", f"Jumped to `{format_duration(seconds) if seconds else '0:00'}` in `{track.title}`.")
+
     @app_commands.command(name="pause", description="Pause playback.")
     @app_commands.checks.cooldown(1, 5.0)
     @app_commands.guild_only()
@@ -1884,6 +2137,24 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             interaction,
             "DJ Mode Updated",
             f"DJ mode is now {'enabled' if enabled else 'disabled'}.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="autoplay", description="Keep playing similar tracks when the queue runs out.")
+    @app_commands.describe(enabled="Whether autoplay should be on in this server")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def autoplay(self, interaction: discord.Interaction, enabled: bool) -> None:
+        if interaction.guild is None:
+            await self.bot.embeds.error_interaction(interaction, "Settings Error", "This command can only be used in a server.", ephemeral=True)
+            return
+
+        update_guild_settings(self.bot.storage_path, interaction.guild.id, {"music_autoplay": enabled})
+        await self.bot.embeds.success_interaction(
+            interaction,
+            "Autoplay Updated",
+            "Autoplay is on. When the queue runs out I'll keep playing similar tracks until `/music stop` or everyone leaves."
+            if enabled else "Autoplay is off. I'll leave a few minutes after the queue runs out.",
             ephemeral=True,
         )
 
