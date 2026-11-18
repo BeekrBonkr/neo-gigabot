@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
 from utils.image_filters import sepia
 from utils import richtext
@@ -153,52 +153,6 @@ def wanted(picture: Image.Image, name: "richtext.RichText | str" = "", reward: "
 # ---------- drake ----------
 
 DRAKE_PANEL = 400
-_JACKET = (245, 166, 35, 255)
-_SKIN = (150, 100, 70, 255)
-
-
-def _figure_panel(approve: bool) -> Image.Image:
-    """The left column: a figure in an orange jacket, turning away with a
-    hand up (reject) or leaning in and pointing (approve)."""
-    scale = 2
-    size = DRAKE_PANEL * scale
-    panel = Image.new("RGBA", (size, size), (252, 196, 76, 255) if approve else (236, 150, 60, 255))
-    draw = ImageDraw.Draw(panel)
-    line = 5 * scale
-    u = size / 100.0  # one percent of the panel
-
-    def box(x0, y0, x1, y1):
-        return (x0 * u, y0 * u, x1 * u, y1 * u)
-
-    # body
-    draw.rounded_rectangle(box(22, 62, 70, 118), radius=14 * u, fill=_JACKET, outline=INK, width=line)
-    draw.line([(46 * u, 64 * u), (46 * u, 100 * u)], fill=INK, width=line // 2)
-    # head
-    head = box(30, 20, 62, 58) if approve else box(26, 22, 58, 60)
-    draw.ellipse(head, fill=_SKIN, outline=INK, width=line)
-    draw.pieslice((head[0], head[1] - 2 * u, head[2], head[3] - 14 * u), 180, 360, fill=INK)  # hair
-    if approve:
-        # eyes closed in a smile, looking toward the right panel
-        draw.arc(box(44, 36, 50, 42), 200, 340, fill=INK, width=line // 2)
-        draw.arc(box(53, 36, 59, 42), 200, 340, fill=INK, width=line // 2)
-        draw.arc(box(43, 40, 59, 53), 20, 160, fill=INK, width=line // 2)
-        # arm reaching right, finger out
-        draw.line([(64 * u, 74 * u), (84 * u, 60 * u)], fill=INK, width=line * 3)
-        draw.line([(64 * u, 74 * u), (84 * u, 60 * u)], fill=_JACKET, width=line * 2)
-        draw.ellipse(box(81, 53, 91, 63), fill=_SKIN, outline=INK, width=line // 2)
-        draw.line([(89 * u, 57 * u), (98 * u, 53 * u)], fill=INK, width=line + 2)
-        draw.line([(89 * u, 57 * u), (97 * u, 53.5 * u)], fill=_SKIN, width=line - 2)
-    else:
-        # face turned away to the left: one eye, a flat mouth
-        draw.line([(31 * u, 40 * u), (37 * u, 41 * u)], fill=INK, width=line // 2)
-        draw.line([(30 * u, 50 * u), (38 * u, 50 * u)], fill=INK, width=line // 2)
-        # arm up, palm out toward the right panel
-        draw.line([(62 * u, 76 * u), (80 * u, 52 * u)], fill=INK, width=line * 3)
-        draw.line([(62 * u, 76 * u), (80 * u, 52 * u)], fill=_JACKET, width=line * 2)
-        draw.rounded_rectangle(box(76, 30, 92, 54), radius=5 * u, fill=_SKIN, outline=INK, width=line // 2)
-        for x in (80, 84, 88):
-            draw.line([(x * u, 31 * u), (x * u, 42 * u)], fill=INK, width=max(1, line // 3))
-    return panel.resize((DRAKE_PANEL, DRAKE_PANEL), Image.LANCZOS)
 
 
 def _content_panel(text: "richtext.RichText | str", picture: Image.Image | None) -> Image.Image:
@@ -215,13 +169,9 @@ def drake(reject_text: "richtext.RichText | str" = "", approve_text: "richtext.R
     """Two rows: the thing turned down, then the thing preferred. Each right-hand
     panel shows its picture if one was given, otherwise its text."""
     canvas = Image.new("RGBA", (DRAKE_PANEL * 2, DRAKE_PANEL * 2), (255, 255, 255, 255))
-    canvas.paste(_figure_panel(False), (0, 0))
-    canvas.paste(_figure_panel(True), (0, DRAKE_PANEL))
+    canvas.paste(_template("drake.jpg"), (0, 0))  # the left column: turning away on top, approving below
     canvas.paste(_content_panel(reject_text, reject_picture), (DRAKE_PANEL, 0))
     canvas.paste(_content_panel(approve_text, approve_picture), (DRAKE_PANEL, DRAKE_PANEL))
-    draw = ImageDraw.Draw(canvas)
-    draw.line([(0, DRAKE_PANEL), (DRAKE_PANEL * 2, DRAKE_PANEL)], fill=INK, width=4)
-    draw.line([(DRAKE_PANEL, 0), (DRAKE_PANEL, DRAKE_PANEL * 2)], fill=INK, width=4)
     return canvas
 
 
