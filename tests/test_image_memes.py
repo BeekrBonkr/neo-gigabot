@@ -146,3 +146,9 @@ def test_einstein_chalks_the_text_on_the_board():
 def test_sonic_says_the_text():
     blank = mm._template("sonic.jpg")
     assert mm.sonic("x" * 120).size == blank.size and mm.sonic("go outside").tobytes() != blank.tobytes()
+
+
+def test_watchmojo_shows_the_picture_as_the_video():
+    scene = mm.watchmojo(picture(), "Top 10 Somethings")
+    assert scene.size == mm._template("watchmojo.jpg").size
+    assert scene.getpixel((100, 300))[:3] == (40, 60, 200) and scene.getpixel((980, 300))[:3] == (200, 60, 40)

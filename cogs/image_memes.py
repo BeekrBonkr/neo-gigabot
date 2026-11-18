@@ -299,6 +299,15 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     async def sonic(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 120]) -> None:
         await self._from_text(interaction, "sonic", "Sonic Says", mm.sonic, text)
 
+    @app_commands.command(name="watchmojo", description="Turn an image into a WatchMojo video with your title.")
+    @app_commands.describe(title="The video's title, such as Top 10 Images You Need To See.", user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def watchmojo(
+        self, interaction: discord.Interaction, title: app_commands.Range[str, 1, 80], user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(interaction, "watchmojo", "WatchMojo", mm.watchmojo, attachment, message_link, user=user, texts=(title,))
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

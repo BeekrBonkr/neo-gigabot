@@ -437,3 +437,17 @@ def sonic(text: "richtext.RichText | str") -> Image.Image:
     scene = _template("sonic.jpg")
     _write(scene, SONIC_TEXT, text, "arial.ttf", fill=(255, 255, 255, 255), max_size=64)
     return scene
+
+
+# ---------- watchmojo ----------
+
+WATCHMOJO_VIDEO = (0, 0, 1080, 613)
+WATCHMOJO_TITLE = (36, 620, 1000, 678)
+
+
+def watchmojo(picture: Image.Image, title: "richtext.RichText | str") -> Image.Image:
+    """The picture as a WatchMojo video on a phone, with the title under it."""
+    scene = _template("watchmojo.jpg")
+    _lay_onto(scene, _flat(picture, (0, 0, 0, 255)), _box_quad(*WATCHMOJO_VIDEO))
+    _write(scene, WATCHMOJO_TITLE, title, "arial.ttf", fill=(20, 20, 20, 255), max_size=36, align="left")
+    return scene
