@@ -268,6 +268,12 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     ) -> None:
         await self._poster(interaction, "news", "Breaking News", mm.news, attachment, message_link, user=user, texts=(headline,))
 
+    @app_commands.command(name="presidential", description="A phone's Presidential Alert with your text.")
+    @app_commands.describe(text="The alert's message.")
+    @app_commands.checks.cooldown(1, 3.0)
+    async def presidential(self, interaction: discord.Interaction, text: app_commands.Range[str, 1, 160]) -> None:
+        await self._from_text(interaction, "presidential", "Presidential Alert", mm.presidential, text)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ImageMemes(bot))

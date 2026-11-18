@@ -119,3 +119,8 @@ def test_news_covers_the_frame_and_writes_the_headline():
     assert quiet.getpixel((300, 200))[:3] == (40, 60, 200)  # the picture shows above the banner
     left, top, right, bottom = mm.NEWS_HEADLINE
     assert quiet.crop((left, top, right, bottom)).tobytes() != loud.crop((left, top, right, bottom)).tobytes()
+
+
+def test_presidential_alert_fits_long_text():
+    blank = mm._template("presidential.png")
+    assert mm.presidential("x " * 80).size == blank.size and mm.presidential("hello").tobytes() != blank.tobytes()

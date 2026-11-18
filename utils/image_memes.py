@@ -370,3 +370,15 @@ def news(picture: Image.Image, headline: "richtext.RichText | str") -> Image.Ima
     scene.alpha_composite(_template("news.png"))
     _write(scene, NEWS_HEADLINE, richtext.as_rich(headline).upper(), "impact.ttf", fill=(22, 22, 28, 255), max_size=84, align="left")
     return scene
+
+
+# ---------- presidential alert ----------
+
+PRESIDENTIAL_TEXT = (48, 190, 598, 300)
+
+
+def presidential(text: "richtext.RichText | str") -> Image.Image:
+    """A phone's Presidential Alert with the text as its message."""
+    alert = _template("presidential.png")
+    _write(alert, PRESIDENTIAL_TEXT, text, "DejaVuSans-Bold.ttf", fill=(40, 40, 40, 255), max_size=30, align="left", from_top=True)
+    return alert
