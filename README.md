@@ -40,7 +40,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - **Content-aware scale** (seam carving), GIF-aware — effects apply to every frame
 - **Color filters** (`/filter …`): invert, grayscale, sepia, hue, adjust (brightness, contrast, saturation),
   posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
-- **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet and bonk (on an image or a member's avatar),
+- **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet, bonk and triggered (on an image or a member's avatar),
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
 - **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted.
   Formats built on a well-known picture use the real template, kept in `assets/images/`

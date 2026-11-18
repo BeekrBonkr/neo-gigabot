@@ -10,7 +10,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from utils.image_filters import hue_shift
 from utils.imaging import MIN_GIF_FRAME_MS, Frames, load_font
@@ -120,6 +120,33 @@ def pet(loaded: Frames, speed_ms: int = 60) -> tuple[list[Image.Image], list[int
         canvas.alpha_composite(hand, (0, drop * PET_SCALE))
         frames.append(canvas)
     return frames, [speed_ms] * PET_FRAMES
+
+
+# ---------- triggered ----------
+
+TRIGGERED_LABEL = Path(__file__).resolve().parents[1] / "assets" / "images" / "triggered.png"
+TRIGGERED_SIZE = 256
+TRIGGERED_LABEL_HEIGHT = 56
+TRIGGERED_MARGIN = 12  # spare picture around the edge, so shaking never shows a gap
+# How far the picture jumps in each frame. The label jumps too, out of step.
+TRIGGERED_SHAKES = ((0, 0), (-9, 6), (8, -7), (-6, -9), (10, 5), (-10, -4), (6, 9), (-4, 8))
+
+
+def triggered(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[int]]:
+    """The picture shakes under a red cast, over the TRIGGERED label."""
+    margin, size = TRIGGERED_MARGIN, TRIGGERED_SIZE
+    side = size + margin * 2
+    base = Image.new("RGBA", (side, side), (255, 255, 255, 255))
+    base.alpha_composite(ImageOps.fit(loaded.frames[0], (side, side), Image.LANCZOS))
+    base = Image.blend(base, Image.new("RGBA", base.size, (255, 40, 0, 255)), 0.22)
+    label = Image.open(TRIGGERED_LABEL).convert("RGBA").resize((side, TRIGGERED_LABEL_HEIGHT + margin), Image.LANCZOS)
+    frames = []
+    for index, (dx, dy) in enumerate(TRIGGERED_SHAKES):
+        frame = base.crop((margin + dx, margin + dy, margin + dx + size, margin + dy + size))
+        label_dx, label_dy = TRIGGERED_SHAKES[(index + 3) % len(TRIGGERED_SHAKES)]
+        frame.paste(label, (label_dx // 3 - margin, size - TRIGGERED_LABEL_HEIGHT + label_dy // 2))
+        frames.append(frame)
+    return frames, [speed_ms] * len(frames)
 
 
 # ---------- bonk ----------

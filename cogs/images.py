@@ -720,7 +720,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             self.bot.embeds.field("Color Filters", "`/filter invert/grayscale/sepia/hue/adjust/posterize/edges/emboss/vaporwave`"),
             self.bot.embeds.field(
                 "Animations & GIF Tools",
-                "`/animate spin/rainbow/wave/zoom/pet/bonk` • `/animate speed/reverse/frames/togif`",
+                "`/animate spin/rainbow/wave/zoom/pet/bonk/triggered` • `/animate speed/reverse/frames/togif`",
             ),
             self.bot.embeds.field("More Meme Formats", "`/memegen speechbubble/wanted/drake/changemymind/jail/wasted`"),
             self.bot.embeds.field("Layout & Utility", "`/edit mirror/tile/collage/border/circle/resize/palette/removebg`"),

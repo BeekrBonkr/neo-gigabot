@@ -51,6 +51,14 @@ def test_pet_and_bonk_build_a_fixed_animation_around_the_picture():
     assert name == "bonk.gif" and 6 <= result.n_frames <= len(an.BONK_ANGLES) and total == sum(durations)
 
 
+def test_triggered_shakes_the_picture_over_its_label():
+    frames, durations = an.triggered(still(), 50)
+    assert len(frames) == len(an.TRIGGERED_SHAKES) and frames[0].size == (an.TRIGGERED_SIZE, an.TRIGGERED_SIZE) and set(durations) == {50}
+    assert len({frame.tobytes() for frame in frames}) == len(frames)  # every frame is in a different place
+    red, green, blue, _ = frames[0].getpixel((128, an.TRIGGERED_SIZE - 20))  # the label: black letters on orange
+    assert red >= green >= blue
+
+
 def test_speed_scales_timing_and_drops_frames_it_cannot_show():
     frames, durations = an.speed(moving(), 2.0)
     assert len(frames) == 6 and durations == [50] * 6
