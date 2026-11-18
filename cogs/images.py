@@ -14,7 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequence
 
-from utils import richtext
+from utils import image_faces, richtext
 from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS
 
 LINE_SPACING = 6
@@ -712,7 +712,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             ),
             self.bot.embeds.field(
                 "Face & Compositing",
-                "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/contentaware`",
+                "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/joy/contentaware`",
             ),
             self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
             self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
@@ -1963,6 +1963,37 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 )
         except Exception as exc:
             await self.bot.image_tools.send_error(interaction, "Face Swap Failed", self.bot.image_tools.user_error_message(exc))
+
+    async def _face_effect(self, interaction: discord.Interaction, name: str, title: str, effect, attachment, message_link) -> None:
+        """Run `effect(frame, boxes)` on every face in every frame and send the result."""
+        if not await self.bot.image_tools.ensure_command_allowed(interaction, name):
+            return
+        await self.bot.image_tools.note_heavy_command(interaction, name)
+        await self.bot.image_tools.defer(interaction)
+        try:
+            image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
+            data, out_name = await self._run_cpu_bound(
+                lambda: self._faces_work(image_bytes, filename, effect, static_name=f"{name}.png", gif_name=f"{name}.gif")
+            )
+            await self.bot.image_tools.send_processed_file(interaction, data=data, filename=out_name, title=title)
+        except NotEnoughFacesError:
+            await self.bot.image_tools.send_error(interaction, "No Faces Found", "I could not detect any faces in that image.")
+        except Exception as exc:
+            await self.bot.image_tools.send_error(interaction, f"{title} Failed", self.bot.image_tools.user_error_message(exc))
+
+    @effects.command(name="joy", description="Cover every detected face with a crying-laughing emoji.")
+    @app_commands.describe(
+        attachment="Optional image attachment.",
+        message_link="Optional Discord message link containing the image.",
+    )
+    @app_commands.checks.cooldown(1, 10.0)
+    async def joy(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> None:
+        await self._face_effect(interaction, "joy", "Joy", image_faces.joy, attachment, message_link)
 
     @effects.command(name="googlyeyes", description="Slap googly eyes on every detected face.")
     @app_commands.describe(

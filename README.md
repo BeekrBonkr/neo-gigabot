@@ -36,7 +36,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - Grouped into `effects`, `transform`, `text`, `template`, and `misc`:
   deepfry, swirl, shake, jpegify, pixelate, blur, rotate/flip/flop/crop/stretch,
   caption/toptext/bottomtext, motivational posters, quote images, format conversion, and more
-- **Face detection** (OpenCV DNN): `facebox`, `blurfaces`, `facecrop`, `faceswap`, `googlyeyes`
+- **Face detection** (OpenCV DNN): `facebox`, `blurfaces`, `facecrop`, `faceswap`, `googlyeyes`, `joy`
 - **Content-aware scale** (seam carving), GIF-aware — effects apply to every frame
 - **Color filters** (`/filter …`): invert, grayscale, sepia, hue, adjust (brightness, contrast, saturation),
   posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
