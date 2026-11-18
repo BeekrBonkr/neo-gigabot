@@ -1,9 +1,13 @@
-"""Meme formats for the /memegen commands. All artwork is drawn in code, so
-there are no template images to ship. The frame functions take one RGBA frame;
-the poster builders take a picture and return a finished image."""
+"""Meme formats for the /memegen commands. Most artwork is drawn in code; the
+formats built on a well-known picture open it from assets/images. The frame
+functions take one RGBA frame; the poster builders return a finished image."""
 
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
+
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
@@ -11,6 +15,17 @@ from utils.image_filters import sepia
 from utils import richtext
 
 INK = (30, 24, 20, 255)
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "assets" / "images"
+
+
+@lru_cache(maxsize=None)
+def _load_template(name: str) -> Image.Image:
+    return Image.open(TEMPLATES_DIR / name).convert("RGBA")
+
+
+def _template(name: str) -> Image.Image:
+    """A fresh copy of a template picture from assets/images."""
+    return _load_template(name).copy()
 
 
 def _cover(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -212,43 +227,22 @@ def drake(reject_text: "richtext.RichText | str" = "", approve_text: "richtext.R
 
 # ---------- change my mind ----------
 
-CMM_SIZE = (800, 560)
+CMM_SIZE = (800, 636)
+CMM_SHEET = (720, 250)  # the statement is drawn flat at this size, then laid onto the sign
+# The corners of the blank part of the sign in the photo, above the printed
+# CHANGE MY MIND: top left, top right, bottom right, bottom left.
+CMM_SIGN = ((290, 364), (617, 240), (646, 357), (334, 471))
 
 
 def change_my_mind(text: "richtext.RichText | str") -> Image.Image:
-    """Someone at a table outdoors, with the statement on a sign and
-    CHANGE MY MIND under it."""
-    width, height = CMM_SIZE
-    scene = Image.new("RGBA", CMM_SIZE, (0, 0, 0, 255))
-    sky = np.linspace(0, 1, int(height * 0.58))[:, None, None]
-    top_color, low_color = np.array([112, 176, 232], dtype=np.float32), np.array([206, 230, 246], dtype=np.float32)
-    sky_pixels = np.broadcast_to(top_color + (low_color - top_color) * sky, (len(sky), width, 3)).astype(np.uint8)
-    scene.paste(Image.fromarray(sky_pixels, "RGB"), (0, 0))
-    draw = ImageDraw.Draw(scene)
-    horizon = int(height * 0.58)
-    draw.rectangle((0, horizon, width, height), fill=(96, 152, 84, 255))  # lawn
-    draw.polygon([(0, height), (width * 0.30, horizon), (width * 0.50, horizon), (width * 0.62, height)], fill=(188, 182, 170, 255))  # path
-    for x, crown in ((90, 78), (690, 92), (560, 60)):  # trees
-        draw.rectangle((x - 7, horizon - crown, x + 7, horizon), fill=(96, 70, 48, 255))
-        draw.ellipse((x - crown * 0.7, horizon - crown * 2.0, x + crown * 0.7, horizon - crown * 0.7), fill=(58, 122, 66, 255))
-    # the person, behind the table
-    draw.rounded_rectangle((120, 232, 250, 420), radius=38, fill=(60, 84, 132, 255), outline=INK, width=4)
-    draw.ellipse((146, 150, 226, 240), fill=(226, 180, 140, 255), outline=INK, width=4)
-    draw.pieslice((146, 144, 226, 214), 180, 360, fill=(70, 48, 32, 255))
-    draw.arc((168, 196, 204, 222), 20, 160, fill=INK, width=3)
-    draw.ellipse((166, 186, 174, 194), fill=INK)
-    draw.ellipse((196, 186, 204, 194), fill=INK)
-    # the table, seen from the front
-    draw.polygon([(70, 330), (width - 70, 330), (width - 40, 372), (40, 372)], fill=(238, 238, 232, 255), outline=INK, width=4)
-    draw.rectangle((40, 372, width - 40, height - 30), fill=(250, 250, 246, 255), outline=INK, width=4)
-    # a mug on the table
-    draw.rounded_rectangle((276, 296, 312, 346), radius=6, fill=(196, 60, 52, 255), outline=INK, width=3)
-    draw.arc((300, 306, 330, 336), 270, 90, fill=INK, width=4)
-    # the sign on the front of the table
-    sign = (300, 384, width - 62, height - 44)
-    draw.rectangle(sign, fill=(255, 255, 255, 255), outline=INK, width=3)
-    split = sign[3] - 46
-    scene = scene.filter(ImageFilter.SMOOTH)  # soften the drawn shapes before the lettering goes on
-    _centered_text(scene, (sign[0] + 14, sign[1] + 8, sign[2] - 14, split - 4), richtext.as_rich(text).strip(), "arial.ttf", fill=(20, 20, 20, 255), max_size=60)
-    _centered_text(scene, (sign[0] + 14, split, sign[2] - 14, sign[3] - 6), "CHANGE MY MIND", "impact.ttf", fill=(20, 20, 20, 255), max_size=40)
+    """The change-my-mind photo with the statement on the sign, tilted to
+    follow the paper."""
+    scene = _template("changemymind.jpg")
+    sheet = Image.new("RGBA", CMM_SHEET, (255, 255, 255, 0))
+    _centered_text(sheet, (0, 0, *CMM_SHEET), richtext.as_rich(text).strip(), "arial.ttf", fill=(24, 24, 28, 255), max_size=110)
+    width, height = CMM_SHEET
+    flat = np.float32([(0, 0), (width, 0), (width, height), (0, height)])
+    warp = cv2.getPerspectiveTransform(flat, np.float32(CMM_SIGN))
+    laid = cv2.warpPerspective(np.asarray(sheet), warp, CMM_SIZE, flags=cv2.INTER_AREA, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255, 0))
+    scene.alpha_composite(Image.fromarray(laid, "RGBA"))
     return scene

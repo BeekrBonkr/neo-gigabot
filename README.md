@@ -43,7 +43,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet and bonk (on an image or a member's avatar),
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
 - **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted.
-  The artwork is drawn in code, so there are no template images to ship
+  Formats built on a well-known picture use the real template, kept in `assets/images/`
 - **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
   resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)
 - **Text that survives real input**: every command that writes on an image draws emoji in color (flags,
