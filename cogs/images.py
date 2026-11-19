@@ -725,7 +725,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             self.bot.embeds.field("More Meme Formats", "`/memegen speechbubble/wanted/drake/changemymind/jail/wasted`"),
             self.bot.embeds.field(
                 "Meme Templates",
-                "`/memegen respects/whodidthis/wheeze/keepitem/achievement/rip/rtx/news"
+                "`/memegen respects/whodidthis/beautiful/wheeze/keepitem/achievement/rip/rtx/news"
                 "/presidential/notification/einstein/sonic/watchmojo/watermark/kirby/excuse"
                 "/perfection/scene`"
             ),

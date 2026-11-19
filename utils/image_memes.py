@@ -478,6 +478,20 @@ def watermark(frame: Image.Image, style: str) -> Image.Image:
     return result
 
 
+# ---------- beautiful ----------
+
+BEAUTIFUL_FRAMES = ((329, 30, 460, 174), (336, 318, 455, 467))  # the painting Grunkle Stan admires, in each panel
+
+
+def beautiful(picture: Image.Image) -> Image.Image:
+    """Grunkle Stan turns to the painting on the wall: "Oh, this- this is
+    beautiful". The picture hangs in the frame in both panels, behind his hand."""
+    scene = _template("beautiful.png")
+    for frame in BEAUTIFUL_FRAMES:
+        _lay_onto(scene, _flat(picture), _box_quad(*frame), under=True)
+    return scene
+
+
 # ---------- panels that react to the picture ----------
 
 PANEL_WIDTH = 640

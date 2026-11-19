@@ -11,6 +11,7 @@ Overlays and meme templates the image commands open at run time.
 | `triggered.png` | `/animate triggered` | The TRIGGERED label from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
 | `respects.jpg` | `/memegen respects` | The Press F to Pay Respects scene, from imgflip (imgflip.com/memetemplate/Press-F-to-Pay-Respects) |
 | `whodidthis.png` | `/memegen whodidthis` | The WHO DID THIS frame from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
+| `beautiful.png` | `/memegen beautiful` | The Grunkle Stan "this is beautiful" template from imgflip (imgflip.com/memegenerator/180760382/grunkle-stan-beautiful), with the two white frames cut out |
 | `wheeze.png` | `/memegen wheeze` | The Wheeze comic, from imgflip (imgflip.com/memetemplate/85219185/Wheeze) |
 | `achievement.png` | `/memegen achievement` | An Xbox achievement popup, from imgflip (achievement-unlocked-template), with the white around it removed |
 | `rip.jpg` | `/memegen rip` | The blank headstone from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/rip.png`) |
