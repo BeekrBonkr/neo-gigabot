@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
 from utils.image_filters import hue_shift
-from utils.imaging import MIN_GIF_FRAME_MS, Frames
+from utils.imaging import MIN_GIF_FRAME_MS, Frames, load_font
 
 # Stills are shrunk to this before being animated: a GIF stores every frame
 # whole, so size is what decides whether the result fits Discord's upload cap.
@@ -151,13 +151,12 @@ def triggered(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], li
 
 # ---------- bonk ----------
 
-_IMAGES = Path(__file__).resolve().parents[1] / "assets" / "images"
-BONK_SCENE = _IMAGES / "bonk.jpg"  # the dog, without its bat or the dog it hits
-BONK_BAT = _IMAGES / "bonk_bat.png"  # the bat as it lands, on a square whose center is the paw holding it
-BONK_LABEL = _IMAGES / "bonk_label.png"
+BONK_SCENE = Path(__file__).resolve().parents[1] / "assets" / "images" / "bonk.jpg"  # the dog, without its bat or the dog it hits
 BONK_TARGET_BOX = (301, 164, 461, 324)  # where the picture stands
-BONK_PIVOT = (225, 282)
-BONK_LABEL_AT = (258, 93)
+BONK_PIVOT = (225, 282)  # the paw holding the bat
+BONK_BAT_LENGTH = 250
+BONK_HIT_ANGLE = -43  # the bat as it lands, in degrees counterclockwise from straight up
+BONK_LABEL_AT = (232, 4)
 # How far the bat is lifted off the picture in each frame, in degrees:
 # wind back, swing, hit and hold, lift away.
 BONK_LIFTS = (30, 36, 36, 22, 8, 0, 0, 0, 6, 16, 26)
@@ -165,13 +164,38 @@ BONK_HELD = BONK_LIFTS.index(0) + 2  # the frame that lingers on the hit
 
 
 @lru_cache(maxsize=1)
-def _bonk_parts() -> tuple[Image.Image, Image.Image, Image.Image]:
-    return tuple(Image.open(path).convert("RGBA") for path in (BONK_SCENE, BONK_BAT, BONK_LABEL))
+def _bat_sprite(length: int) -> Image.Image:
+    """A baseball bat standing on its handle, on a square sprite whose center
+    is the end of the handle, so rotating the sprite swings the bat."""
+    scale = 4
+    side = length * 2 * scale
+    sprite = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sprite)
+    cx, cy, reach = side // 2, side // 2, length * scale
+    outline, wood, grip, line = (48, 30, 18, 255), (196, 140, 80, 255), (120, 80, 44, 255), 3 * scale
+    handle, barrel = 5 * scale, 15 * scale
+    top = cy - reach
+    draw.polygon([(cx - handle, cy), (cx - barrel, top + barrel * 3), (cx - barrel, top + barrel), (cx + barrel, top + barrel),
+                  (cx + barrel, top + barrel * 3), (cx + handle, cy)], fill=wood, outline=outline, width=line)
+    draw.ellipse((cx - barrel, top, cx + barrel, top + barrel * 2), fill=wood, outline=outline, width=line)
+    draw.rectangle((cx - barrel + line, top + barrel, cx + barrel - line, top + barrel + line * 2), fill=wood)
+    draw.polygon([(cx - handle, cy), (cx - handle - scale, cy - reach * 0.28), (cx + handle + scale, cy - reach * 0.28), (cx + handle, cy)],
+                 fill=grip, outline=outline, width=line)
+    draw.ellipse((cx - handle * 2, cy - handle, cx + handle * 2, cy + handle), fill=grip, outline=outline, width=line)
+    return sprite.resize((length * 2, length * 2), Image.LANCZOS)
+
+
+@lru_cache(maxsize=1)
+def _bonk_label() -> Image.Image:
+    label = Image.new("RGBA", (220, 90), (0, 0, 0, 0))
+    ImageDraw.Draw(label).text((110, 45), "BONK!", font=load_font("impact.ttf", 54), anchor="mm", fill=(255, 221, 51, 255),
+                               stroke_width=4, stroke_fill=(30, 20, 20, 255))
+    return label.rotate(12, resample=Image.BICUBIC, expand=True)
 
 
 def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[int]]:
-    """The bonk meme: the dog brings its bat down on the picture, which squashes when hit."""
-    scene, bat, label = _bonk_parts()
+    """The bonk meme: the dog brings a bat down on the picture, which squashes when hit."""
+    scene, bat, label = Image.open(BONK_SCENE).convert("RGBA"), _bat_sprite(BONK_BAT_LENGTH), _bonk_label()
     base = loaded.frames[0]
     left, top, right, bottom = BONK_TARGET_BOX
     box_w, box_h = right - left, bottom - top
@@ -184,7 +208,7 @@ def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[in
         canvas = scene.copy()
         shown = squashed if hit else target
         canvas.paste(shown, (left + (box_w - shown.width) // 2, bottom - shown.height), shown)
-        swung = bat.rotate(lift, resample=Image.BICUBIC)
+        swung = bat.rotate(BONK_HIT_ANGLE + lift, resample=Image.BICUBIC)
         canvas.paste(swung, (BONK_PIVOT[0] - swung.width // 2, BONK_PIVOT[1] - swung.height // 2), swung)
         if hit:
             canvas.paste(label, BONK_LABEL_AT, label)
