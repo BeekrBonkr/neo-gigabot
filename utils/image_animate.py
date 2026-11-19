@@ -155,7 +155,7 @@ BONK_SCENE = Path(__file__).resolve().parents[1] / "assets" / "images" / "bonk.j
 BONK_TARGET_BOX = (301, 164, 461, 324)  # where the picture stands
 BONK_PIVOT = (225, 282)  # the paw holding the bat
 BONK_BAT_LENGTH = 250
-BONK_HIT_ANGLE = -43  # the bat as it lands, in degrees counterclockwise from straight up
+BONK_HIT_ANGLE = -58  # the bat as it lands, in degrees counterclockwise from straight up
 BONK_LABEL_AT = (232, 4)
 # How far the bat is lifted off the picture in each frame, in degrees:
 # wind back, swing, hit and hold, lift away.
