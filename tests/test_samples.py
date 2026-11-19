@@ -51,6 +51,50 @@ def test_a_sample_is_what_the_command_would_have_posted():
     asyncio.run(run())
 
 
+def test_a_command_with_nothing_to_show_for_the_avatar_is_tried_on_a_face_and_then_a_gif(monkeypatch):
+    seen = []
+
+    def needs(kind):
+        @app_commands.command(name=f"only{kind}", description="Picky.")
+        async def picky(interaction: discord.Interaction, attachment: discord.Attachment) -> None:
+            seen.append(attachment.content_type)
+            if attachment.content_type != f"image/{kind}":
+                await interaction.response.send_message("not for me", ephemeral=True)
+                return
+            await interaction.response.send_message(file=discord.File(io.BytesIO(await attachment.read()), filename=attachment.filename))
+        return picky
+
+    class Avatar:
+        def replace(self, **_):
+            return self
+
+        async def read(self):
+            return b"AVATAR"
+
+    monkeypatch.setattr(samples, "_moving", lambda avatar: b"GIF-OF-" + avatar)
+    face, gif, never = needs("jpeg"), needs("gif"), needs("bmp")
+    bot = SimpleNamespace(user=SimpleNamespace(id=1, display_avatar=Avatar()), tree=SimpleNamespace(walk_commands=lambda: [face, gif, never]))
+    store = samples.SampleStore(bot)
+
+    async def run():
+        assert await store.get("onlyjpeg") == (samples.FACE_PICTURE.read_bytes(), "sample.jpeg")
+        assert seen == ["image/png", "image/jpeg"]  # the avatar first, then the portrait, and no further
+        assert await store.get("onlygif") == (b"GIF-OF-AVATAR", "sample.gif")
+        assert await store.get("onlybmp") is None
+
+    asyncio.run(run())
+
+
+def test_commands_that_need_an_option_set_get_one():
+    @app_commands.command(name="resize", description="Resize.")
+    async def resize(interaction: discord.Interaction, percent: int | None = None, attachment: discord.Attachment | None = None) -> None:
+        await interaction.response.send_message(file=discord.File(io.BytesIO(str(percent).encode()), filename="r.png"))
+
+    group = app_commands.Group(name="edit", description="x")
+    group.add_command(resize)
+    assert asyncio.run(samples.render(SimpleNamespace(user=None), resize, b"PIC")) == (b"50", "r.png")
+
+
 def test_the_store_makes_each_sample_once_from_the_bots_own_picture():
     echo, *_ = make_commands()
     reads = []

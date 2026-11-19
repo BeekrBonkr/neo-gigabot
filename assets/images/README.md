@@ -33,4 +33,5 @@ Overlays and meme templates the image commands open at run time.
 | `oldtv.png` | `/memegen scene` | An old TV set, from imgflip (Old-tv), with the screen cut out |
 | `bill.jpg` | `/memegen scene` | A hundred dollar bill, from imgflip (100-bill-dollar) |
 | `bobross.png` | `/memegen scene` | Bob Ross at his easel, from the Xiao bot (github.com/dragonfire535/xiao, `assets/images/bob-ross.png`) |
+| `sample_face.jpg` | Samples of the face commands on the website and in `/whatsnew` | The Mona Lisa, public domain, from Wikimedia Commons (commons.wikimedia.org/wiki/File:Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg), cropped to a square |
 | `clown_nose.png` | `/image effects clown` | A clown nose, from imgflip (Clown-Nose) |
