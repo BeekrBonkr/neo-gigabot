@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 import discord
@@ -29,6 +30,12 @@ CATEGORIES: list[tuple[str, str, str, str]] = [
     ("starboard", "Starboard", "🌟", "Repost popular messages that collect enough star reactions."),
     ("music", "Music", "🎵", "DJ restrictions, playback defaults, and queue limits."),
 ]
+
+# A join event only earns a greeting in a known guild when the bot joined this
+# recently (seconds); see on_guild_join.
+JOIN_GREETING_WINDOW = 300
+# Pause before the second audit log read when looking for who added the bot.
+INVITER_LOOKUP_RETRY = 2.0
 
 MOD_LOG_EVENT_LABELS = {
     "warn": ("Warnings", "⚠️"),
@@ -1123,29 +1130,90 @@ class Settings(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        # A kicked-and-reinvited guild (or a replayed join event after an
-        # outage) must keep its existing config - only seed defaults for
-        # guilds we've truly never stored.
+        # A kicked-and-reinvited guild must keep its existing config, so only
+        # seed defaults for guilds we've truly never stored. A known guild is
+        # greeted again only if the bot really just joined, which rules out a
+        # join event replayed after an outage.
         if guild_settings_exists(self.bot.storage_path, guild.id):
-            return
-        create_guild_settings(self.bot.storage_path, guild.id)
+            if not self._just_joined(guild):
+                return
+        else:
+            create_guild_settings(self.bot.storage_path, guild.id)
         await self._introduce(guild)
 
+    @staticmethod
+    def _just_joined(guild: discord.Guild) -> bool:
+        joined_at = guild.me.joined_at if guild.me else None
+        return joined_at is not None and (discord.utils.utcnow() - joined_at).total_seconds() < JOIN_GREETING_WINDOW
+
     async def _introduce(self, guild: discord.Guild) -> None:
-        """Say hello once in a brand-new server, so admins know where setup
-        lives. Best-effort: no system channel or no permission means no message."""
-        channel = guild.system_channel
-        me = guild.me
-        if channel is None or me is None or not channel.permissions_for(me).send_messages:
+        """Tell whoever added the bot where setup lives: a DM to them, or a
+        message in the server's main channel when the DM can't be delivered.
+        Best-effort: nobody to DM and nowhere to post means no message."""
+        title = f"👋 Hi, I'm {self.bot.user.name}"
+        inviter = await self._find_inviter(guild)
+        if inviter is not None:
+            try:
+                await inviter.send(embed=self.bot.embeds.info_embed(title, self._intro_text(guild, dm=True)))
+                return
+            except discord.HTTPException:
+                pass
+        channel = self._main_channel(guild)
+        if channel is None:
             return
-        website = site_link(self.bot, "website", f"/app/{guild.id}")
-        lines = ["Thanks for adding me! Admins can set everything up with `/settings`, and `/help` lists what I can do."]
-        if website:
-            lines.append(f"There is also a {website}: a web music player and playlists for everyone, and a settings dashboard for admins.")
         try:
-            await channel.send(embed=self.bot.embeds.info_embed(f"👋 Hi, I'm {self.bot.user.name}", "\n".join(lines)))
+            await channel.send(embed=self.bot.embeds.info_embed(title, self._intro_text(guild, dm=False)))
         except discord.HTTPException:
             pass
+
+    def _intro_text(self, guild: discord.Guild, *, dm: bool) -> str:
+        thanks = f"Thanks for adding me to **{guild.name}**!" if dm else "Thanks for adding me!"
+        settings_page = site_link(self.bot, "settings page", f"/app/{guild.id}/settings")
+        if not settings_page:
+            return f"{thanks} Admins can set everything up with `/settings`, and `/help` lists what I can do."
+        website = site_link(self.bot, "website", f"/app/{guild.id}")
+        return (
+            f"{thanks} Admins can set everything up on the server's {settings_page}, or with `/settings` in Discord. "
+            f"`/help` lists what I can do.\n"
+            f"The {website} also has a web music player and playlists for everyone."
+        )
+
+    async def _find_inviter(self, guild: discord.Guild) -> discord.abc.User | None:
+        """Who added the bot, read from the audit log. None when the bot can't
+        see the log or its own entry isn't there."""
+        me = guild.me
+        if me is None or not me.guild_permissions.view_audit_log:
+            return None
+        # The entry can land a moment after the join event, so look twice.
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(INVITER_LOOKUP_RETRY)
+            try:
+                async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                    if entry.target is not None and entry.target.id == me.id:
+                        return entry.user
+            except discord.HTTPException:
+                return None
+        return None
+
+    @staticmethod
+    def _main_channel(guild: discord.Guild) -> discord.TextChannel | None:
+        """The system channel, else #general, else the topmost text channel,
+        skipping any the bot can't post embeds in."""
+        me = guild.me
+        if me is None:
+            return None
+
+        def usable(channel: discord.TextChannel | None) -> bool:
+            if channel is None:
+                return False
+            perms = channel.permissions_for(me)
+            return perms.view_channel and perms.send_messages and perms.embed_links
+
+        if usable(guild.system_channel):
+            return guild.system_channel
+        channels = [c for c in sorted(guild.text_channels, key=lambda c: (c.position, c.id)) if usable(c)]
+        return next((c for c in channels if c.name.lower() == "general"), channels[0] if channels else None)
 
     @app_commands.command(name="settings", description="Open the interactive server settings dashboard.")
     @app_commands.checks.has_permissions(administrator=True)
