@@ -1,3 +1,5 @@
+import io
+
 import numpy as np
 from PIL import Image
 
@@ -43,3 +45,21 @@ def test_a_plan_is_replayed_on_other_frames_of_any_size():
     assert replayed.size == (40, 60) and replayed.getpixel((5, 5)) == (10, 200, 30)
     untouched = ic.plan(source, 80, 60)
     assert ic.apply(source, untouched).tobytes() == source.tobytes()
+
+
+def test_every_frame_of_an_animation_is_carved_and_keeps_its_timing():
+    frames = [Image.new("RGB", (40, 30), (index * 60, 90, 200 - index * 40)) for index in range(4)]
+    buffer = io.BytesIO()
+    frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:], duration=[30, 40, 50, 60], loop=0)
+    data, name = ic.carve_bytes(buffer.getvalue(), "a.gif", 50, 50, 450)
+    result = Image.open(io.BytesIO(data))
+    assert name == "contentaware.gif" and result.size == (20, 15) and result.n_frames == 4
+    seen = []
+    for index in range(4):
+        result.seek(index)
+        seen.append((result.info["duration"], result.convert("RGB").getpixel((5, 5))[0] // 30))
+    assert seen == [(30, 0), (40, 2), (50, 4), (60, 6)]  # four different frames, not the last one repeated
+    still = io.BytesIO()
+    Image.new("RGB", (900, 600), (9, 9, 9)).save(still, format="PNG")
+    data, name = ic.carve_bytes(still.getvalue(), "a.png", 50, 10, 450)
+    assert name == "contentaware.png" and Image.open(io.BytesIO(data)).size == (225, 30)

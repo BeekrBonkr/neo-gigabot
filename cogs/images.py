@@ -2008,44 +2008,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
 
             def work() -> tuple[bytes, str]:
-                with Image.open(io.BytesIO(image_bytes)) as image:
-                    is_gif = self.bot.image_tools.is_gif(image, filename)
-                    first_frame = (
-                        next(ImageSequence.Iterator(image)).convert("RGB") if is_gif else image.convert("RGB")
-                    )
-
-                    longest_edge = max(first_frame.width, first_frame.height)
-                    if longest_edge > CONTENTAWARE_MAX_DIMENSION:
-                        scale = CONTENTAWARE_MAX_DIMENSION / longest_edge
-                        working_size = (
-                            max(1, int(first_frame.width * scale)),
-                            max(1, int(first_frame.height * scale)),
-                        )
-                    else:
-                        working_size = first_frame.size
-
-                    source = (
-                        first_frame.resize(working_size, Image.LANCZOS)
-                        if working_size != first_frame.size
-                        else first_frame
-                    )
-                    target_width = max(2, int(working_size[0] * width_percent / 100))
-                    target_height = max(2, int(working_size[1] * height_percent / 100))
-                    carve = image_carve.plan(source, target_width, target_height)
-                    carved = image_carve.apply(source, carve)
-
-                    if not is_gif:
-                        output = io.BytesIO()
-                        carved.save(output, format="PNG")
-                        return output.getvalue(), "contentaware.png"
-
-                    frames = [carved.convert("RGBA")]
-                    for frame in list(self.bot.image_tools.gif_frames(image))[1:]:
-                        frames.append(image_carve.apply(frame, carve).convert("RGBA"))
-
-                    output = io.BytesIO()
-                    frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                    return output.getvalue(), "contentaware.gif"
+                return image_carve.carve_bytes(image_bytes, filename, width_percent, height_percent, CONTENTAWARE_MAX_DIMENSION)
 
             data, out_name = await self._run_cpu_bound(work, timeout=CPU_BOUND_TIMEOUT_SECONDS)
             await self.bot.image_tools.send_processed_file(

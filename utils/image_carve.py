@@ -17,6 +17,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from utils.imaging import encode_frames, load_frames
+
 # One scoring pass takes out this share of the current width at most. Smaller
 # is closer to carving one seam at a time, and slower.
 SEAMS_PER_PASS = 1 / 40
@@ -118,3 +120,14 @@ def apply(image: Image.Image, carve: CarveMap) -> Image.Image:
     narrowed = _read(np.asarray(frame), carve.columns)
     carved = _read(narrowed.transpose(1, 0, 2), carve.rows).transpose(1, 0, 2)
     return Image.fromarray(np.ascontiguousarray(carved), "RGB")
+
+
+def carve_bytes(image_bytes: bytes, filename: str | None, width_percent: int, height_percent: int, max_edge: int) -> tuple[bytes, str]:
+    """Carve an upload down to these percentages of its size, after shrinking
+    it to `max_edge`. Every frame of an animation is carved the way the first
+    one is, and keeps its own timing."""
+    loaded = load_frames(image_bytes, filename, max_edge=max_edge)
+    width, height = loaded.size
+    carve = plan(loaded.frames[0], max(2, width * width_percent // 100), max(2, height * height_percent // 100))
+    frames = [apply(frame, carve) for frame in loaded.frames]
+    return encode_frames(frames, loaded.durations, "contentaware", loop=loaded.loop)
