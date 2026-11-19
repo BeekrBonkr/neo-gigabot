@@ -746,3 +746,65 @@ def test_welcome_background_upload_and_preview_are_for_admins(storage):
             assert status == 200 and body["settings"]["welcome_card_background"] == "gradient" and body["has_background"] is False
 
     asyncio.run(run())
+
+
+# ---------- announcements ----------
+
+def test_an_announcement_is_posted_with_its_sample_and_published(storage):
+    from unittest.mock import Mock
+
+    from utils.embeds import EmbedManager
+
+    sent, published = [], []
+
+    def channel(news=True, can_send=True, publish_error=None):
+        made = Mock(spec=discord.TextChannel)
+        made.id, made.name, made.guild = 55, "updates", SimpleNamespace(name="Home", me=object())
+        made.is_news = lambda: news
+        made.permissions_for = lambda _me: SimpleNamespace(view_channel=True, send_messages=can_send, embed_links=True, attach_files=True)
+
+        async def send(embed=None, files=None):
+            sent.append((embed, files))
+
+            async def publish():
+                if publish_error:
+                    raise publish_error
+                published.append(1)
+
+            return SimpleNamespace(id=900, jump_url="https://discord.com/channels/1/55/900", publish=publish)
+
+        made.send = send
+        return made
+
+    channels = {55: channel(), 56: channel(news=False), 57: channel(can_send=False)}
+
+    async def sample(name):
+        return (b"GIF", "boom.gif") if name == "animate boom" else None
+
+    bot = SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, embeds=EmbedManager(),
+                          get_channel=channels.get, samples=SimpleNamespace(get=sample))
+    cog = PanelBridge(bot)
+    cog._token = TOKEN
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            seen = (await (await client.get("/v1/announce/channel/55", headers=AUTH)).json())["channel"]
+            assert seen == {"id": "55", "name": "updates", "guild": "Home", "news": True, "can_post": True, "can_publish": True}
+            assert (await client.get("/v1/announce/channel/1", headers=AUTH)).status == 404
+            assert (await client.get("/v1/announce/channel/abc", headers=AUTH)).status == 404
+
+            post = {"channel_id": "55", "title": "New: /animate boom", "body": "It goes boom.", "sample": "animate boom"}
+            done = await (await client.post("/v1/announce", headers=AUTH, json=post)).json()
+            assert done == {"message_id": "900", "url": "https://discord.com/channels/1/55/900", "published": True, "note": ""}
+            embed, files = sent[-1]
+            assert embed.title == "New: /animate boom" and embed.description == "It goes boom." and embed.image.url == "attachment://boom.gif"
+            assert files[0].filename == "boom.gif" and published == [1]
+
+            plain = await (await client.post("/v1/announce", headers=AUTH, json={**post, "channel_id": "56", "sample": "ping"})).json()
+            assert plain["published"] is False and "ordinary channel" in plain["note"] and sent[-1][1] == [] and published == [1]
+            refused = await client.post("/v1/announce", headers=AUTH, json={**post, "channel_id": "57"})
+            assert refused.status == 409 and "Send Messages" in (await refused.json())["error"]
+            assert (await client.post("/v1/announce", headers=AUTH, json={**post, "body": " "})).status == 400
+            assert len(sent) == 2
+
+    asyncio.run(run())

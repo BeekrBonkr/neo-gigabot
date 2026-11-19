@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import io
 import json
 import logging
 import math
@@ -363,6 +364,8 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/actions/avatar", self.h_avatar)
         r.add_post("/v1/actions/restart", self.h_restart)
         r.add_post("/v1/notify", self.h_notify)
+        r.add_get("/v1/announce/channel/{channel_id}", self.h_announce_channel)
+        r.add_post("/v1/announce", self.h_announce)
         r.add_post("/v1/data/{kind}/delete", self.h_data_delete)
         r.add_post("/v1/data/playlists/update", self.h_playlist_update)
         r.add_get("/v1/guilds/{guild_id}/reactionroles", self.h_rr_overview)
@@ -1324,6 +1327,61 @@ class PanelBridge(commands.Cog):
         except discord.HTTPException as exc:
             raise BridgeError(502, f"Could not DM the owner: {exc}") from exc
         return web.json_response({"ok": True})
+
+    # ---------- announcements ----------
+
+    def _announce_channel(self, raw: Any) -> discord.TextChannel:
+        channel = self.bot.get_channel(int(raw)) if str(raw).isdigit() else None
+        if not isinstance(channel, discord.TextChannel):
+            raise BridgeError(404, "I can't see a text or announcement channel with that ID. It has to be in a server I'm in.")
+        return channel
+
+    @staticmethod
+    def _announce_report(channel: discord.TextChannel) -> dict[str, Any]:
+        mine = channel.permissions_for(channel.guild.me)
+        return {
+            "id": str(channel.id), "name": channel.name, "guild": channel.guild.name, "news": channel.is_news(),
+            "can_post": mine.view_channel and mine.send_messages and mine.embed_links and mine.attach_files,
+            # publishing your own message needs Send Messages; Manage Messages covers every case
+            "can_publish": channel.is_news() and mine.send_messages,
+        }
+
+    async def h_announce_channel(self, request: web.Request) -> web.Response:
+        """What the panel shows beside the announcement channel setting."""
+        return web.json_response({"channel": self._announce_report(self._announce_channel(request.match_info["channel_id"]))})
+
+    async def h_announce(self, request: web.Request) -> web.Response:
+        """Post an announcement, with one command's sample as its picture if
+        asked, and publish it when the channel is an announcement channel so
+        the servers following it get a copy."""
+        body = await self._json(request)
+        channel = self._announce_channel(body.get("channel_id"))
+        title, text = str(body.get("title", "")).strip()[:256], str(body.get("body", "")).strip()[:4000]
+        if not title or not text:
+            raise BridgeError(400, "An announcement needs a title and a message.")
+        if not self._announce_report(channel)["can_post"]:
+            raise BridgeError(409, f"I can't post in #{channel.name}: I need View Channel, Send Messages, Embed Links and Attach Files there.")
+        embed = self.bot.embeds.create(title=title, description=text, color=discord.Color.blurple(), timestamp=True)
+        files = []
+        sample = await self.bot.samples.get(str(body["sample"])) if body.get("sample") else None
+        if sample is not None:
+            embed.set_image(url=f"attachment://{sample[1]}")
+            files.append(discord.File(io.BytesIO(sample[0]), filename=sample[1]))
+        try:
+            message = await channel.send(embed=embed, files=files)
+        except discord.HTTPException as exc:
+            raise BridgeError(502, f"Discord refused the message: {exc}") from exc
+        published, note = False, ""
+        if body.get("publish", True):
+            if not channel.is_news():
+                note = "Posted, but not published: that is an ordinary channel, not an announcement channel, so nobody can follow it."
+            else:
+                try:
+                    await message.publish()
+                    published = True
+                except discord.HTTPException as exc:
+                    note = f"Posted, but publishing failed ({exc}). Press Publish on the message in Discord."
+        return web.json_response({"message_id": str(message.id), "url": message.jump_url, "published": published, "note": note})
 
     # ---------- stored-data edits ----------
 
