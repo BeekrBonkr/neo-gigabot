@@ -107,7 +107,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 `/meme`, `/reddit`, `/cursed`, `/trivia`, `/joke`, `/fact`, `/catfact`, `/wiki`, `/weather`,
 `/gif`, `/cute`, `/beans`, games (`/simon`, `/tictactoe`, `/hotpotato`),
 `/poll` (yes/no or up to 5 options), `/snipe`, `/ascii`, `/hug`, `/kiss`, `/kill`, `/insult`,
-`/coinflip`, `/roll`, `/ping`, `/server`, `/userinfo`, `/about`, `/feedback`
+`/coinflip`, `/roll`, `/ping`, `/server`, `/userinfo`, `/about`, `/whatsnew` (commands added in the last month, with examples), `/feedback`
 
 ### ⚙️ Per-server configuration — `/settings`
 One admin-only interactive dashboard (no memorizing subcommands) covering:
