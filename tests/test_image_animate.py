@@ -57,25 +57,31 @@ def test_pet_and_bonk_build_a_fixed_animation_around_the_picture():
 
 
 def test_boom_swells_the_picture_then_plays_the_explosion():
-    frames, durations = an.boom(still(), 40)
+    frames, durations = an.boom(still(), 30)
     swell = an.BOOM_SWELL_FRAMES
-    assert len(frames) == len(durations) == swell + 1 + an.BOOM_FRAMES and {frame.size for frame in frames} == {(60, 40)}
-    assert durations[:swell] == [40] * swell and durations[-1] == an.BOOM_HOLD_MS
+    assert len(frames) == len(durations) == swell + an.BOOM_FRAMES and {frame.size for frame in frames} == {(60, 40)}
+    assert durations == [30] * swell + [an.BOOM_FRAME_MS] * an.BOOM_FRAMES
     assert frames[0].tobytes() == still().frames[0].tobytes()  # it starts untouched
     assert len({frame.tobytes() for frame in frames[:swell]}) == swell  # every frame is swollen further than the last
-    assert frames[swell - 1].getpixel((5, 20))[1] > frames[0].getpixel((5, 20))[1]  # and it is whitening by the end
-    assert frames[swell].getpixel((30, 20)) == (255, 255, 255, 255)  # the flash
-    red, green, blue_part, _ = frames[swell + 8].getpixel((30, 20))  # the fireball: bright and orange
-    assert red > 200 and red > blue_part
+    assert min(frames[swell + 1].getpixel((30, 20))[:3]) > 200  # the explosion opens on a bright bang
+    red, _, blue, _ = frames[swell + 12].getpixel((30, 12))  # then the fireball: orange
+    assert red > 150 and red > blue
     data, name = encode_frames(frames, durations, "boom")
     assert name == "boom.gif" and Image.open(io.BytesIO(data)).n_frames > an.BOOM_FRAMES
 
 
+def test_boom_swell_eases_in_along_its_curve():
+    steps = [an._bezier_ease(index / 10) for index in range(11)]
+    assert steps[0] == pytest.approx(0, abs=1e-6) and steps[-1] == pytest.approx(1, abs=1e-6) and steps == sorted(steps)
+    assert steps[5] < 0.2  # half the time gone, most of the swell still to come
+    assert an._bezier_ease(0.3, (0.25, 0.25, 0.75, 0.75)) == pytest.approx(0.3, abs=1e-4)  # a straight curve is linear
+
+
 def test_boom_swells_a_gif_over_its_own_frames():
     frames, durations = an.boom(moving(count=12, durations=[30] * 12))
-    assert len(frames) == 12 + 1 + an.BOOM_FRAMES and durations[:12] == [30] * 12
-    frames, durations = an.boom(moving(count=4, durations=[30, 40, 50, 60]))  # too short to swell in one pass, so it repeats
-    assert len(frames) == 12 + 1 + an.BOOM_FRAMES and durations[:12] == [30, 40, 50, 60] * 3
+    assert len(frames) == 12 + an.BOOM_FRAMES and durations[:12] == [30] * 12
+    frames, durations = an.boom(moving(count=3, durations=[30, 40, 50]))  # too short to swell in one pass, so it repeats
+    assert len(frames) == 9 + an.BOOM_FRAMES and durations[:9] == [30, 40, 50] * 3
 
 
 def test_triggered_shakes_the_picture_over_its_label():

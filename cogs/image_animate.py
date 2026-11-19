@@ -118,7 +118,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
     @app_commands.describe(user=USER_HELP, speed="Milliseconds per frame while a still image swells. Lower is faster.", **SOURCE_HELP)
     @app_commands.checks.cooldown(1, 5.0)
     async def boom(
-        self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 60,
+        self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 40,
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
         await self._animate(interaction, "boom", "Boom", lambda loaded: an.boom(loaded, speed), attachment, message_link, user=user)

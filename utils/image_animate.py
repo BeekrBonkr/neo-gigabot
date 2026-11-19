@@ -218,26 +218,42 @@ def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[in
 
 # ---------- boom ----------
 
-# The explosion is the Castle Bravo test film (public domain, from Wikimedia
-# Commons), thinned to thirty frames and kept as a sheet of 324x182 cells.
+# The explosion is the second half of the "exploding cat" GIF on Klipy: 22
+# frames that open on the flash, kept as a sheet of 480px cells.
 BOOM_SHEET = Path(__file__).resolve().parents[1] / "assets" / "images" / "boom.jpg"
-BOOM_CELL = (324, 182)
+BOOM_CELL = 480
 BOOM_COLUMNS = 6
-BOOM_FRAMES = 30
-BOOM_FRAME_MS = 80
-BOOM_HOLD_MS = 700  # the last frame of the cloud lingers before the loop starts over
-BOOM_SWELL_FRAMES = 10  # how many frames a still takes to swell; a short GIF repeats until it has this many
+BOOM_FRAMES = 22
+BOOM_FRAME_MS = 40
+BOOM_SWELL_FRAMES = 8  # how many frames a still takes to swell; a short GIF repeats until it has this many
 BOOM_BULGE = 1.6  # how hard the middle is pushed out at the end
 BOOM_ZOOM = 0.3  # how much closer the whole picture has come by the end
-BOOM_GLOW = 0.55  # how white the last swollen frame is
+BOOM_CURVE = (0.6, 0.0, 0.9, 0.35)  # the swell's easing, as a CSS cubic-bezier: barely moving, then all at once
 
 
 @lru_cache(maxsize=1)
 def _boom_cells() -> list[Image.Image]:
     sheet = Image.open(BOOM_SHEET).convert("RGBA")
-    width, height = BOOM_CELL
-    return [sheet.crop((column * width, row * height, (column + 1) * width, (row + 1) * height))
+    return [sheet.crop((column * BOOM_CELL, row * BOOM_CELL, (column + 1) * BOOM_CELL, (row + 1) * BOOM_CELL))
             for row, column in (divmod(index, BOOM_COLUMNS) for index in range(BOOM_FRAMES))]
+
+
+def _bezier_ease(progress: float, curve: tuple[float, float, float, float] = BOOM_CURVE) -> float:
+    """How far along an eased move is at `progress` (0..1) through its time,
+    for the cubic bezier from (0, 0) to (1, 1) with these two control points."""
+    x1, y1, x2, y2 = curve
+
+    def along(a: float, b: float, t: float) -> float:
+        return 3 * a * t * (1 - t) ** 2 + 3 * b * t * t * (1 - t) + t ** 3
+
+    low, high = 0.0, 1.0
+    for _ in range(30):  # the curve's x only ever rises, so halving finds the point at this time
+        middle = (low + high) / 2
+        if along(x1, x2, middle) < progress:
+            low = middle
+        else:
+            high = middle
+    return along(y1, y2, (low + high) / 2)
 
 
 def _bulge(frame: Image.Image, amount: float) -> Image.Image:
@@ -254,24 +270,21 @@ def _bulge(frame: Image.Image, amount: float) -> Image.Image:
     pull = np.where(radius < 1.0, np.power(np.maximum(radius, 1e-6), BOOM_BULGE * amount), 1.0) / (1.0 + BOOM_ZOOM * amount)
     map_x = (x * pull * (width / 2) + (width - 1) / 2).astype(np.float32)
     map_y = (y * pull * (height / 2) + (height - 1) / 2).astype(np.float32)
-    swollen = Image.fromarray(cv2.remap(np.asarray(frame), map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE), "RGBA")
-    glow = BOOM_GLOW * amount ** 3
-    return Image.blend(swollen, Image.new("RGBA", frame.size, (255, 255, 255, 255)), glow) if glow > 0.01 else swollen
+    return Image.fromarray(cv2.remap(np.asarray(frame), map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE), "RGBA")
 
 
-def boom(loaded: Frames, speed_ms: int = 60) -> tuple[list[Image.Image], list[int]]:
-    """The picture swells faster and faster, then goes up in a nuclear
-    explosion. A GIF swells over its own frames, playing at its own speed."""
+def boom(loaded: Frames, speed_ms: int = 40) -> tuple[list[Image.Image], list[int]]:
+    """The picture swells, slowly and then all at once, and goes up in a
+    nuclear explosion. A GIF swells over its own frames, playing at its own speed."""
     if loaded.animated:
         repeats = -(-BOOM_SWELL_FRAMES // len(loaded.frames))
         sources, durations = loaded.frames * repeats, list(loaded.durations) * repeats
     else:
         sources, durations = [loaded.frames[0]] * BOOM_SWELL_FRAMES, [speed_ms] * BOOM_SWELL_FRAMES
     count = len(sources)
-    frames = [_bulge(frame, (index / (count - 1)) ** 2) for index, frame in enumerate(sources)]
-    frames.append(Image.new("RGBA", loaded.size, (255, 255, 255, 255)))  # the flash
+    frames = [_bulge(frame, _bezier_ease(index / (count - 1))) for index, frame in enumerate(sources)]
     frames.extend(ImageOps.fit(cell, loaded.size, Image.LANCZOS) for cell in _boom_cells())
-    return frames, durations + [BOOM_FRAME_MS] * BOOM_FRAMES + [BOOM_HOLD_MS]
+    return frames, durations + [BOOM_FRAME_MS] * BOOM_FRAMES
 
 
 # ---------- tools for existing GIFs ----------
