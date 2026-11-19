@@ -6,8 +6,9 @@ alone, which is what gives the effect its melted look.
 
 Finding the cheapest seam means scoring every pixel, so seams are taken out a
 handful at a time from one scoring pass rather than one pass each. What comes
-out of carving is a map of which source pixel each output pixel shows, so the
-frames of a GIF can all be carved the same way with two lookups each."""
+out of carving is a map of which source pixel each output pixel shows, so a
+plan made for one frame of a GIF can be used on others with two lookups each,
+and two plans can be blended for the frames between them."""
 
 from __future__ import annotations
 
@@ -122,12 +123,45 @@ def apply(image: Image.Image, carve: CarveMap) -> Image.Image:
     return Image.fromarray(np.ascontiguousarray(carved), "RGB")
 
 
+# Carving is worked out afresh on this many frames of an animation at most,
+# spread evenly through it. The frames between them are carved by a blend of
+# the plans on either side, so the melt drifts from one to the next.
+KEYFRAMES = 6
+
+
+def blend(before: CarveMap, after: CarveMap, share: float) -> CarveMap:
+    """A plan part of the way from one to another. Both maps only ever rise
+    along a row, so a mix of them does too and is as valid a plan as either."""
+    if share <= 0:
+        return before
+    if share >= 1:
+        return after
+
+    def mix(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        return np.rint(first * (1 - share) + second * share).astype(np.int32)
+
+    return CarveMap(before.source_size, mix(before.columns, after.columns), mix(before.rows, after.rows))
+
+
+def carve_frames(frames: list[Image.Image], target_width: int, target_height: int) -> list[Image.Image]:
+    """Carve every frame of an animation to the target size."""
+    last = len(frames) - 1
+    count = min(KEYFRAMES, len(frames))
+    keys = sorted({round(index * last / max(1, count - 1)) for index in range(count)})
+    plans = {key: plan(frames[key], target_width, target_height) for key in keys}
+    carved = []
+    for index, frame in enumerate(frames):
+        before = max(key for key in keys if key <= index)
+        after = min(key for key in keys if key >= index)
+        share = (index - before) / (after - before) if after > before else 0.0
+        carved.append(apply(frame, blend(plans[before], plans[after], share)))
+    return carved
+
+
 def carve_bytes(image_bytes: bytes, filename: str | None, width_percent: int, height_percent: int, max_edge: int) -> tuple[bytes, str]:
     """Carve an upload down to these percentages of its size, after shrinking
-    it to `max_edge`. Every frame of an animation is carved the way the first
-    one is, and keeps its own timing."""
+    it to `max_edge`. Each frame of an animation keeps its own timing."""
     loaded = load_frames(image_bytes, filename, max_edge=max_edge)
     width, height = loaded.size
-    carve = plan(loaded.frames[0], max(2, width * width_percent // 100), max(2, height * height_percent // 100))
-    frames = [apply(frame, carve) for frame in loaded.frames]
+    frames = carve_frames(loaded.frames, max(2, width * width_percent // 100), max(2, height * height_percent // 100))
     return encode_frames(frames, loaded.durations, "contentaware", loop=loaded.loop)

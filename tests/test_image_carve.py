@@ -63,3 +63,27 @@ def test_every_frame_of_an_animation_is_carved_and_keeps_its_timing():
     Image.new("RGB", (900, 600), (9, 9, 9)).save(still, format="PNG")
     data, name = ic.carve_bytes(still.getvalue(), "a.png", 50, 10, 450)
     assert name == "contentaware.png" and Image.open(io.BytesIO(data)).size == (225, 30)
+
+
+def test_an_animation_is_carved_afresh_on_a_few_frames_and_blended_between():
+    def frame(at: int) -> Image.Image:
+        pixels = np.full((40, 80, 3), 120, dtype=np.uint8)
+        pixels[10:30, at:at + 20] = np.random.default_rng(1).integers(0, 255, (20, 20, 3), dtype=np.uint8)
+        return Image.fromarray(pixels, "RGB")
+
+    frames = [frame(index * 2) for index in range(26)]  # the detailed square slides from the left edge to the right
+    planned = []
+    real_plan = ic.plan
+    ic.plan = lambda image, *size: planned.append(image) or real_plan(image, *size)
+    try:
+        carved = ic.carve_frames(frames, 40, 40)
+    finally:
+        ic.plan = real_plan
+    assert len(carved) == 26 and {image.size for image in carved} == {(40, 40)}
+    assert len(planned) == ic.KEYFRAMES and planned[0] is frames[0] and planned[-1] is frames[-1]
+    assert busy(carved[0]) == busy(carved[-1]) == 400  # the square is spared wherever it is, not only where it started
+    assert all(busy(image) > 300 for image in carved)  # and mostly spared on the frames between
+    first, last = ic.plan(frames[0], 40, 40), ic.plan(frames[-1], 40, 40)
+    assert ic.blend(first, last, 0) is first and ic.blend(first, last, 1) is last
+    halfway = ic.blend(first, last, 0.5)
+    assert (np.diff(halfway.columns, axis=1) >= 0).all() and halfway.size == (40, 40)
