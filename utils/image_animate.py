@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
 from utils.image_filters import hue_shift
-from utils.imaging import MIN_GIF_FRAME_MS, Frames, load_font
+from utils.imaging import MIN_GIF_FRAME_MS, Frames
 
 # Stills are shrunk to this before being animated: a GIF stores every frame
 # whole, so size is what decides whether the result fits Discord's upload cap.
@@ -151,63 +151,38 @@ def triggered(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], li
 
 # ---------- bonk ----------
 
-BONK_CANVAS = (340, 330)
-BONK_TARGET_BOX = (15, 175, 185, 325)  # where the picture stands
-BONK_PIVOT = (286, 226)  # the hand holding the bat
-BONK_BAT_LENGTH = 190
-# The bat's angle in each frame, in degrees counterclockwise from straight up:
-# wind back, swing, hit and hold, lift away.
-BONK_ANGLES = (-6, -12, -12, 14, 50, 76, 76, 76, 60, 30, 6)
-BONK_HIT_ANGLE = 76
+BONK_SPRITE = Path(__file__).resolve().parents[1] / "assets" / "images" / "bonk.png"
+BONK_CELL = (247, 285)
+BONK_FRAMES = 7
+# Where the picture sits in each frame: (left, top, width, height). It flattens under the hammer.
+BONK_BOXES = ((62, 143, 158, 113), (52, 177, 173, 105), (42, 192, 192, 92), (46, 182, 184, 100),
+              (54, 169, 174, 110), (69, 128, 144, 135), (65, 130, 152, 124))
 
 
-def _bat_sprite(length: int) -> Image.Image:
-    """A baseball bat standing on its handle, on a square sprite whose center
-    is the end of the handle, so rotating the sprite swings the bat."""
-    scale = 4
-    side = length * 2 * scale
-    sprite = Image.new("RGBA", (side, side), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(sprite)
-    cx, cy, reach = side // 2, side // 2, length * scale
-    outline, wood, grip, line = (48, 30, 18, 255), (196, 140, 80, 255), (120, 80, 44, 255), 3 * scale
-    handle, barrel = 5 * scale, 15 * scale
-    top = cy - reach
-    draw.polygon([(cx - handle, cy), (cx - barrel, top + barrel * 3), (cx - barrel, top + barrel), (cx + barrel, top + barrel),
-                  (cx + barrel, top + barrel * 3), (cx + handle, cy)], fill=wood, outline=outline, width=line)
-    draw.ellipse((cx - barrel, top, cx + barrel, top + barrel * 2), fill=wood, outline=outline, width=line)
-    draw.rectangle((cx - barrel + line, top + barrel, cx + barrel - line, top + barrel + line * 2), fill=wood)
-    draw.polygon([(cx - handle, cy), (cx - handle - scale, cy - reach * 0.28), (cx + handle + scale, cy - reach * 0.28), (cx + handle, cy)],
-                 fill=grip, outline=outline, width=line)
-    draw.ellipse((cx - handle * 2, cy - handle, cx + handle * 2, cy + handle), fill=grip, outline=outline, width=line)
-    return sprite.resize((length * 2, length * 2), Image.LANCZOS)
+@lru_cache(maxsize=1)
+def _bonk_cells() -> list[tuple[Image.Image, Image.Image]]:
+    """Each frame's drawing, and the part of the frame the picture may show through.
+    The sheet keeps the drawings in its top row and those masks in the row below."""
+    sheet = Image.open(BONK_SPRITE).convert("RGBA")
+    width, height = BONK_CELL
+    return [(sheet.crop((index * width, 0, (index + 1) * width, height)),
+             sheet.crop((index * width, height, (index + 1) * width, height * 2)).getchannel("A"))
+            for index in range(BONK_FRAMES)]
 
 
 def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[int]]:
-    """A bat comes down on the picture, which squashes when hit."""
-    base = loaded.frames[0]
-    left, top, right, bottom = BONK_TARGET_BOX
-    box_w, box_h = right - left, bottom - top
-    scale = min(box_w / base.width, box_h / base.height)
-    target = base.resize((max(1, int(base.width * scale)), max(1, int(base.height * scale))), Image.LANCZOS)
-    bat = _bat_sprite(BONK_BAT_LENGTH)
-    font = load_font("impact.ttf", 54)
+    """A hammer comes down on the picture, which flattens under it and springs back."""
+    side = max(width for _, _, width, _ in BONK_BOXES)
+    base = ImageOps.fit(loaded.frames[0], (side, side), Image.LANCZOS)
     frames = []
-    for angle in BONK_ANGLES:
-        hit = angle >= BONK_HIT_ANGLE
-        canvas = Image.new("RGBA", BONK_CANVAS, (0, 0, 0, 0))
-        shown = target.resize((int(target.width * 1.12), int(target.height * 0.68)), Image.LANCZOS) if hit else target
-        canvas.alpha_composite(shown, (left + (box_w - shown.width) // 2, bottom - shown.height))
-        swung = bat.rotate(angle, resample=Image.BICUBIC)
-        canvas.alpha_composite(swung, (BONK_PIVOT[0] - swung.width // 2, BONK_PIVOT[1] - swung.height // 2),
-                               (0, 0, swung.width, min(swung.height, BONK_CANVAS[1] - (BONK_PIVOT[1] - swung.height // 2))))
-        if hit:
-            label = Image.new("RGBA", (220, 90), (0, 0, 0, 0))
-            ImageDraw.Draw(label).text((110, 45), "BONK!", font=font, anchor="mm", fill=(255, 221, 51, 255), stroke_width=4, stroke_fill=(30, 20, 20, 255))
-            canvas.alpha_composite(label.rotate(12, resample=Image.BICUBIC, expand=True), (4, 40))
+    for (left, top, width, height), (drawing, window) in zip(BONK_BOXES, _bonk_cells()):
+        picture = Image.new("RGBA", BONK_CELL, (0, 0, 0, 0))
+        picture.alpha_composite(base.resize((width, height), Image.LANCZOS), (left, top))
+        canvas = Image.new("RGBA", BONK_CELL, (0, 0, 0, 0))
+        canvas.paste(picture, (0, 0), window)
+        canvas.alpha_composite(drawing)
         frames.append(canvas)
-    durations = [speed_ms * (4 if angle >= BONK_HIT_ANGLE and index == BONK_ANGLES.index(BONK_HIT_ANGLE) + 2 else 1)
-                 for index, angle in enumerate(BONK_ANGLES)]
-    return frames, durations
+    return frames, [speed_ms] * BONK_FRAMES
 
 
 # ---------- tools for existing GIFs ----------

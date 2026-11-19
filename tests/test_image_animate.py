@@ -39,16 +39,14 @@ def test_pet_and_bonk_build_a_fixed_animation_around_the_picture():
     frames, durations = an.pet(still(), 40)
     assert len(frames) == an.PET_FRAMES and frames[0].size == (an.PET_SIZE, an.PET_SIZE) and set(durations) == {40}
     frames, durations = an.bonk(still(), 50)
-    assert len(frames) == len(an.BONK_ANGLES) and frames[0].size == an.BONK_CANVAS
-    assert max(durations) == 200 and durations.count(200) == 1  # the hit is held
+    assert len(frames) == an.BONK_FRAMES and frames[0].size == an.BONK_CELL and set(durations) == {50}
+    assert frames[0].getpixel((0, 0))[3] == 0  # nothing around the picture but the drawing
+    left, top, width, height = an.BONK_BOXES[0]
+    assert frames[0].getpixel((left + width // 2, top + height // 2))[3] == 255  # the picture shows through
+    assert frames[0].getpixel((left + 2, top + 2))[3] == 0  # and its corners are cut to the drawn outline
     data, name = encode_frames(frames, durations, "bonk")
     result = Image.open(io.BytesIO(data))
-    total = 0
-    for index in range(result.n_frames):
-        result.seek(index)
-        total += result.info["duration"]
-    # the encoder merges frames that are identical (the held hit), keeping the loop's length
-    assert name == "bonk.gif" and 6 <= result.n_frames <= len(an.BONK_ANGLES) and total == sum(durations)
+    assert name == "bonk.gif" and result.n_frames == an.BONK_FRAMES
 
 
 def test_triggered_shakes_the_picture_over_its_label():

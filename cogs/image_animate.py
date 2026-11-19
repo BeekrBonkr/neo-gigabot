@@ -105,7 +105,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
             interaction, "triggered", "Triggered", lambda loaded: an.triggered(loaded, speed), attachment, message_link, user=user, still_only=True,
         )
 
-    @app_commands.command(name="bonk", description="A bat comes down on an image or someone's avatar.")
+    @app_commands.command(name="bonk", description="A hammer comes down on an image or someone's avatar.")
     @app_commands.describe(user=USER_HELP, speed=SPEED_HELP, **SOURCE_HELP)
     @app_commands.checks.cooldown(1, 5.0)
     async def bonk(
