@@ -655,6 +655,7 @@ def test_command_list_names_each_commands_module(storage):
     assert by_name["snipe"]["module"] == "snipe" and by_name["snipe"]["module_flag"] == "snipe_enabled" and by_name["snipe"]["module_solo"] is True
     assert by_name["kick"]["module"] == "moderation" and by_name["kick"]["module_solo"] is False
     assert by_name["ping"]["module"] is None
+    assert by_name["kick"]["added"] == "2026-03-28" and by_name["ping"]["added"] == "2026-03-27"  # from utils/command_dates.json
 
 
 def test_saving_settings_keeps_snipe_and_its_module_in_step(storage):

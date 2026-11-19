@@ -37,6 +37,7 @@ from discord.ext import commands
 
 from utils import appeals as appeal_store
 from utils import cases as case_store
+from utils import command_dates
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
@@ -1150,6 +1151,7 @@ class PanelBridge(commands.Cog):
                     "category": by_root.get(root, "owner" if root == "owner" else "other"),
                     **self._command_module(command.qualified_name),
                     "kind": "slash",
+                    "added": command_dates.added_on(command.qualified_name),
                     "requires": self._required_permissions(command),
                     "params": [
                         {"name": p.display_name, "description": p.description if p.description != "…" else "", "required": p.required}
@@ -1162,7 +1164,8 @@ class PanelBridge(commands.Cog):
             for menu in self.bot.tree.get_commands(type=kind):
                 result.append(
                     {"name": menu.name, "description": f"Right-click a {kind.name}, then Apps.", "group": None,
-                     "category": "images" if "Image" in menu.name else "other", "kind": "menu", "requires": [], "params": []}
+                     "category": "images" if "Image" in menu.name else "other", "kind": "menu", "requires": [], "params": [],
+                     "added": command_dates.added_on(menu.name)}
                 )
         result.sort(key=lambda c: (c["kind"] != "slash", c["name"]))
         return web.json_response({"commands": result, "categories": categories})
