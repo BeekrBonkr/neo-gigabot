@@ -79,3 +79,55 @@ def test_cpu_bound_work_runs_off_the_loop_and_times_out():
         assert tools._cpu_semaphore._value == 2
 
     asyncio.run(scenario())
+
+
+def _embed_message(image=None, thumbnail=None, attachments=()):
+    import discord
+    embed = discord.Embed.from_dict({"type": "rich", **({"image": image} if image else {}), **({"thumbnail": thumbnail} if thumbnail else {})})
+    return type("Message", (), {"attachments": list(attachments), "embeds": [embed]})()
+
+
+CDN = "https://cdn.discordapp.com/attachments/1/2/bonk.gif?ex=1"
+ELSEWHERE = {"url": "https://i.ytimg.com/vi/x/hq.jpg", "proxy_url": "https://images-ext-1.discordapp.net/external/abc/https/i.ytimg.com/vi/x/hq.jpg"}
+
+
+def test_an_embedded_picture_is_only_taken_from_discords_own_hosts():
+    from utils.imaging import embed_image_url, is_discord_image_host
+    assert embed_image_url(_embed_message(image={"url": CDN})) == CDN
+    assert embed_image_url(_embed_message(thumbnail=ELSEWHERE)) == ELSEWHERE["proxy_url"]  # Discord's copy, not the site
+    assert embed_image_url(_embed_message(thumbnail={"url": "https://i.ytimg.com/vi/x/hq.jpg"})) is None
+    assert not is_discord_image_host("https://images-ext-1.discordapp.net.evil.example/x.png")
+    assert not ImageToolkit(bot=None).message_has_image(_embed_message(thumbnail={"url": "https://evil.example/x.png"}))
+
+
+def test_the_channel_search_skips_pictures_it_cannot_fetch_and_a_bad_selection_is_dropped():
+    tools = ImageToolkit(bot=None)
+    fetched = []
+
+    async def fetch(url):
+        fetched.append(url)
+        return b"data"
+
+    tools.fetch_bytes_from_url = fetch
+    unusable = _embed_message(thumbnail={"url": "https://evil.example/x.png"})
+    usable = _embed_message(image={"url": CDN})
+
+    class Channel:
+        id = 5
+
+        def history(self, limit):
+            async def walk():
+                for message in (unusable, usable):
+                    yield message
+            return walk()
+
+        async def fetch_message(self, message_id):
+            return unusable
+
+    channel = Channel()
+    guild = type("Guild", (), {"get_channel": lambda self, _id: channel, "get_thread": lambda self, _id: None})()
+    interaction = type("Interaction", (), {"channel": channel, "guild": guild, "user": type("User", (), {"id": 9})()})()
+    tools.sources.remember(9, 5, 77)
+
+    assert asyncio.run(tools.get_source_image(interaction)) == (b"data", "embedded_image.png")
+    assert fetched == [CDN] and tools.sources.get(9) is None

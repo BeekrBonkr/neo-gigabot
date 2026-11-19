@@ -26,13 +26,32 @@ SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 SOURCE_TTL_SECONDS = 60 * 15
 
 # Embed-image URLs are attacker-controlled (any user can post a link that
-# unfurls to an arbitrary URL), so fetches are restricted to Discord's own CDN
-# - same reasoning as the music cog's ALLOWED_URL_HOSTS. Attachments already
-# live on these hosts, so nothing legitimate is lost.
+# unfurls to an arbitrary URL), so fetches are restricted to Discord's own hosts
+# - same reasoning as the music cog's ALLOWED_URL_HOSTS. An embedded picture
+# from another site is fetched through the copy Discord serves of it (the
+# embed's proxy_url), never from the site itself.
 ALLOWED_IMAGE_HOSTS: tuple[str, ...] = (
     "cdn.discordapp.com",
     "media.discordapp.net",
 )
+DISCORD_IMAGE_PROXY_HOST = re.compile(r"images-ext-\d+\.discordapp\.net")
+
+
+def is_discord_image_host(url: str | None) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host in ALLOWED_IMAGE_HOSTS or DISCORD_IMAGE_PROXY_HOST.fullmatch(host) is not None
+
+
+def embed_image_url(message: discord.Message) -> str | None:
+    """The first embedded picture in the message that Discord itself serves."""
+    for embed in message.embeds:
+        for picture in (embed.image, embed.thumbnail):
+            if not picture:
+                continue
+            for url in (picture.url, picture.proxy_url):
+                if url and is_discord_image_host(url):
+                    return url
+    return None
 # Cap what we'll buffer into RAM, whether from a URL or an oversized attachment.
 MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 # Every GIF frame is expanded to RGBA in memory during processing; anything past
@@ -385,16 +404,10 @@ class ImageToolkit:
     def message_has_image(self, message: discord.Message) -> bool:
         if any(self.supported_attachment(attachment) for attachment in message.attachments):
             return True
-
-        for embed in message.embeds:
-            if (embed.image and embed.image.url) or (embed.thumbnail and embed.thumbnail.url):
-                return True
-
-        return False
+        return embed_image_url(message) is not None
 
     async def fetch_bytes_from_url(self, url: str) -> bytes:
-        host = (urlparse(url).hostname or "").lower()
-        if host not in ALLOWED_IMAGE_HOSTS:
+        if not is_discord_image_host(url):
             raise ValueError("I only fetch embedded images hosted on Discord's CDN - upload the image or attach it directly.")
 
         max_bytes = MAX_IMAGE_DOWNLOAD_BYTES
@@ -422,11 +435,9 @@ class ImageToolkit:
                 self._checked_attachment_size(attachment)
                 return await attachment.read(), attachment.filename
 
-        for embed in message.embeds:
-            if embed.image and embed.image.url:
-                return await self.fetch_bytes_from_url(embed.image.url), "embedded_image.png"
-            if embed.thumbnail and embed.thumbnail.url:
-                return await self.fetch_bytes_from_url(embed.thumbnail.url), "embedded_thumbnail.png"
+        url = embed_image_url(message)
+        if url:
+            return await self.fetch_bytes_from_url(url), "embedded_image.png"
 
         raise ValueError("That message does not contain a supported image.")
 
@@ -453,6 +464,10 @@ class ImageToolkit:
             self.sources.clear(interaction.user.id)
             return None
 
+        if not self.message_has_image(message):
+            # edited since it was picked, say: forget it rather than fail every command until it expires
+            self.sources.clear(interaction.user.id)
+            return None
         return await self.extract_image_from_message(message)
 
     async def history_image(self, interaction: discord.Interaction) -> tuple[bytes, str]:
