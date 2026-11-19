@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+import io
 import time
 from typing import Final
 
@@ -52,7 +54,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
     ("community", "💬", "Community", ["suggest", "suggestion", "tag", "tags", "schedule", "stick", "stickembed", "stickslow", "stickstop", "stickstart", "stickremove", "getstickies"]),
     ("reactionroles", "🎭", "Reaction Roles & Role Menus", ["reactionrole", "rolemenu"]),
     ("settings", "⚙️", "Server Settings", ["settings"]),
-    ("info", "ℹ️", "Info & Support", ["about", "userinfo", "feedback"]),
+    ("info", "ℹ️", "Info & Support", ["about", "whatsnew", "userinfo", "feedback"]),
 ]
 # Not a category of its own: every command from the categories above that was
 # added recently, newest first. It is only offered while there are some.
@@ -133,6 +135,55 @@ class HelpView(discord.ui.View):
                 "This help menu isn't yours - run `/help` (or ping me) to get your own.",
                 ephemeral=True,
             )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+WHATS_NEW_SUMMARY_LINES = 10
+
+
+class WhatsNewButton(discord.ui.Button["WhatsNewView"]):
+    def __init__(self, *, label: str, page: int, disabled: bool) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.primary, disabled=disabled)
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        assert self.view is not None
+        await self.view.show(interaction, self.page)
+
+
+class WhatsNewView(discord.ui.View):
+    """/whatsnew: a summary, then one page per new command with its sample."""
+
+    def __init__(self, *, cog: "Help", author_id: int, page: int = 0, timeout: float = HELP_VIEW_TIMEOUT_SECONDS) -> None:
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.author_id = author_id
+        self.message: discord.Message | None = None
+        last = len(cog.new_commands())
+        self.add_item(WhatsNewButton(label="◀ Previous", page=page - 1, disabled=page <= 0))
+        self.add_item(WhatsNewButton(label="Next ▶" if page else "Browse them ▶", page=page + 1, disabled=page >= last))
+
+    async def show(self, interaction: discord.Interaction, page: int) -> None:
+        await interaction.response.defer()  # a sample that has not been made yet takes a moment
+        embed, files = await self.cog.build_whats_new(page)
+        view = WhatsNewView(cog=self.cog, author_id=self.author_id, page=page)
+        await interaction.edit_original_response(embed=embed, attachments=files, view=view)
+        view.message = self.message
+        self.stop()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("These buttons aren't yours - run `/whatsnew` to browse it yourself.", ephemeral=True)
             return False
         return True
 
@@ -236,6 +287,46 @@ class Help(commands.Cog):
             color=HELP_COLOR,
             footer=f"Page {page + 1} of {len(pages)}" if len(pages) > 1 else None,
         )
+
+    async def build_whats_new(self, page: int) -> tuple[discord.Embed, list[discord.File]]:
+        """Page 0 sums up what is new; each page after it is one command,
+        newest first, with a sample of what it makes when it has one."""
+        fresh = self.new_commands()
+        if not fresh:
+            return self.bot.embeds.create(title=f"{NEW_EMOJI} {NEW_LABEL}", description="Nothing new in the last month.", color=HELP_COLOR), []
+        page = max(0, min(page, len(fresh)))
+        if page == 0:
+            lines = [self._line(command).replace(f" {NEW_EMOJI}", "") for command in fresh[:WHATS_NEW_SUMMARY_LINES]]
+            if len(fresh) > len(lines):
+                lines.append(f"...and {len(fresh) - len(lines)} more.")
+            site = f"\n\n🌐 {site_link(self.bot, 'See them all with examples', '/whatsnew')}" if site_url(self.bot) else ""
+            return self.bot.embeds.create(
+                title=f"{NEW_EMOJI} {NEW_LABEL}",
+                description=f"**{len(fresh)}** command(s) added in the last month, newest first.\n\n" + "\n".join(lines) + site,
+                color=HELP_COLOR,
+            ), []
+        command = fresh[page - 1]
+        added = datetime.date.fromisoformat(command_dates.added_on(command.qualified_name))
+        embed = self.bot.embeds.create(
+            title=f"{NEW_EMOJI} /{command.qualified_name}",
+            description=f"{command.description or 'No description.'}\n\nAdded {added.strftime('%B')} {added.day}, {added.year}.",
+            color=HELP_COLOR,
+            footer=f"{page} of {len(fresh)}",
+        )
+        sample = await self.bot.samples.get(command.qualified_name)
+        if sample is None:
+            return embed, []
+        data, filename = sample
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, [discord.File(io.BytesIO(data), filename=filename)]
+
+    @app_commands.command(name="whatsnew", description="See the commands added in the last month, with examples.")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def whats_new(self, interaction: discord.Interaction) -> None:
+        embed, files = await self.build_whats_new(0)
+        view = WhatsNewView(cog=self, author_id=interaction.user.id)
+        await interaction.response.send_message(embed=embed, files=files, view=view)
+        view.message = await interaction.original_response()
 
     @app_commands.command(name="help", description="Show a categorized list of everything I can do.")
     async def help_command(self, interaction: discord.Interaction) -> None:
