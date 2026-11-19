@@ -162,12 +162,12 @@ class WhatsNewButton(discord.ui.Button["WhatsNewView"]):
 
 
 class WhatsNewView(discord.ui.View):
-    """/whatsnew: a summary, then one page per new command with its sample."""
+    """/whatsnew: a summary, then one page per new command with its sample.
+    Only the person who ran it sees it, so the buttons need no owner check."""
 
-    def __init__(self, *, cog: "Help", author_id: int, page: int = 0, timeout: float = HELP_VIEW_TIMEOUT_SECONDS) -> None:
+    def __init__(self, *, cog: "Help", page: int = 0, timeout: float = HELP_VIEW_TIMEOUT_SECONDS) -> None:
         super().__init__(timeout=timeout)
         self.cog = cog
-        self.author_id = author_id
         self.message: discord.Message | None = None
         last = len(cog.new_commands())
         self.add_item(WhatsNewButton(label="◀ Previous", page=page - 1, disabled=page <= 0))
@@ -176,16 +176,10 @@ class WhatsNewView(discord.ui.View):
     async def show(self, interaction: discord.Interaction, page: int) -> None:
         await interaction.response.defer()  # a sample that has not been made yet takes a moment
         embed, files = await self.cog.build_whats_new(page)
-        view = WhatsNewView(cog=self.cog, author_id=self.author_id, page=page)
+        view = WhatsNewView(cog=self.cog, page=page)
         await interaction.edit_original_response(embed=embed, attachments=files, view=view)
         view.message = self.message
         self.stop()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("These buttons aren't yours - run `/whatsnew` to browse it yourself.", ephemeral=True)
-            return False
-        return True
 
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -311,7 +305,7 @@ class Help(commands.Cog):
             title=f"{NEW_EMOJI} /{command.qualified_name}",
             description=f"{command.description or 'No description.'}\n\nAdded {added.strftime('%B')} {added.day}, {added.year}.",
             color=HELP_COLOR,
-            footer=f"{page} of {len(fresh)}",
+            footer=f"{page} of {len(fresh)} · Only you can see this.",
         )
         sample = await self.bot.samples.get(command.qualified_name)
         if sample is None:
@@ -324,8 +318,8 @@ class Help(commands.Cog):
     @app_commands.checks.cooldown(1, 5.0)
     async def whats_new(self, interaction: discord.Interaction) -> None:
         embed, files = await self.build_whats_new(0)
-        view = WhatsNewView(cog=self, author_id=interaction.user.id)
-        await interaction.response.send_message(embed=embed, files=files, view=view)
+        view = WhatsNewView(cog=self)
+        await interaction.response.send_message(embed=embed, files=files, view=view, ephemeral=True)
         view.message = await interaction.original_response()
 
     @app_commands.command(name="help", description="Show a categorized list of everything I can do.")

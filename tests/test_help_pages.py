@@ -115,14 +115,14 @@ def test_whatsnew_sums_up_then_shows_one_command_a_page_with_its_sample(monkeypa
         assert "**12** command(s)" in summary.description and "...and 2 more." in summary.description and not files
         assert "🆕" not in summary.description.split("\n", 2)[2]  # every line is new, so none needs the marker
         first, files = await cog.build_whats_new(1)
-        assert first.title == "🆕 /image cmd9" and first.footer.text == "1 of 12" and first.image.url == "attachment://boom.gif"
+        assert first.title == "🆕 /image cmd9" and first.footer.text.startswith("1 of 12") and first.image.url == "attachment://boom.gif"
         assert files[0].filename == "boom.gif" and files[0].fp.read() == b"gif-bytes"
         second, files = await cog.build_whats_new(2)
         assert second.image.url is None and not files  # no sample, no picture
-        assert (await cog.build_whats_new(99))[0].footer.text == "12 of 12"
-        previous, following = WhatsNewView(cog=cog, author_id=1).children
+        assert (await cog.build_whats_new(99))[0].footer.text.startswith("12 of 12")
+        previous, following = WhatsNewView(cog=cog).children
         assert previous.disabled and following.label == "Browse them ▶" and following.page == 1
-        assert WhatsNewView(cog=cog, author_id=1, page=12).children[1].disabled
+        assert WhatsNewView(cog=cog, page=12).children[1].disabled
         monkeypatch.setattr(command_dates, "_dates", lambda: {})
         assert "Nothing new" in (await cog.build_whats_new(3))[0].description
 
