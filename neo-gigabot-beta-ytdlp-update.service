@@ -1,0 +1,12 @@
+# Companion to neo-gigabot-beta-ytdlp-update.timer (systemd user units).
+
+[Unit]
+Description=Upgrade yt-dlp for neo-GigaBot Beta and restart if changed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/neogigabot-beta
+Environment=BOT_SERVICE=neo-gigabot-beta BOT_SERVICE_SCOPE=user
+ExecStart=%h/neogigabot-beta/scripts/update_ytdlp.sh

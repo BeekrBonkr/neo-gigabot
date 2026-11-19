@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.config import beta_notice
 from utils.website import site_link, site_url
 
 HELP_COLOR = discord.Color.blurple()
@@ -169,7 +170,8 @@ class Help(commands.Cog):
         ]
         return self.bot.embeds.create(
             title="📖 GigaBot Help",
-            description="Pick a category below to see what I can do.\n\n" + "\n".join(lines)
+            description=(f"{beta_notice(self.bot.config)}\n\n" if beta_notice(self.bot.config) else "")
+            + "Pick a category below to see what I can do.\n\n" + "\n".join(lines)
             + (f"\n\n🌐 **Website** - {site_link(self.bot, 'open it')} for the web music player, playlists, the full command list, "
                "and a settings dashboard for admins." if site_url(self.bot) else ""),
             color=HELP_COLOR,

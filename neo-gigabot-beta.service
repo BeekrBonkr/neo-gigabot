@@ -1,0 +1,29 @@
+# systemd *user* unit for a test copy of the bot (a separate Discord
+# application running the dev branch from its own checkout, with its own
+# .env, venv and storage/). No root needed:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp neo-gigabot-beta.service neo-gigabot-beta-ytdlp-update.service neo-gigabot-beta-ytdlp-update.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now neo-gigabot-beta neo-gigabot-beta-ytdlp-update.timer
+#
+# It keeps running after you log out as long as lingering is on for your user
+# (`loginctl enable-linger $USER`).
+
+[Unit]
+Description=neo-GigaBot Beta Discord Bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/neogigabot-beta
+ExecStart=%h/neogigabot-beta/start.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+
+[Install]
+WantedBy=default.target

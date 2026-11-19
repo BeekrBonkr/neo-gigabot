@@ -12,7 +12,10 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
 
 PIP=.venv/bin/pip
-SERVICE=neo-gigabot
+# The live bot is a system unit. A test copy run as a systemd user unit sets
+# BOT_SERVICE and BOT_SERVICE_SCOPE=user (see neo-gigabot-beta-ytdlp-update.service).
+SERVICE=${BOT_SERVICE:-neo-gigabot}
+SCOPE=${BOT_SERVICE_SCOPE:-system}
 OWNER=$(stat -c %U .)
 
 # When run as root (from the systemd timer) do the pip work as the repo owner
@@ -37,6 +40,12 @@ if [ "$before" = "$after" ]; then
 fi
 
 echo "yt-dlp upgraded $before -> $after"
+if [ "$SCOPE" = "user" ]; then
+    if systemctl --user is-active --quiet "$SERVICE"; then
+        systemctl --user restart "$SERVICE"
+    fi
+    exit 0
+fi
 # Only restart when the service is actually running; a stopped bot stays stopped.
 if systemctl is-active --quiet "$SERVICE"; then
     if [ "$(id -u)" -eq 0 ]; then

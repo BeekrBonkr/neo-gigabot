@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from utils.cases import count_cases
 from utils.warnings import count_warnings
+from utils.config import beta_notice
 from utils.website import site_link
 
 SUPPORT_FALLBACK_MESSAGE = "No support server has been configured for this bot yet."
@@ -83,7 +84,8 @@ class Info(commands.Cog):
 
         embed = self.bot.embeds.create(
             title=f"About {self.bot.user.name}",
-            description="Use `/help` for a categorized list of everything I can do."
+            description=(f"{beta_notice(self.bot.config)}\n\n" if beta_notice(self.bot.config) else "")
+            + "Use `/help` for a categorized list of everything I can do."
             + (f"\nOn the {site_link(self.bot, 'website')} you can control music from your browser, manage playlists, "
                "and (as an admin) change every server setting." if website else ""),
             color=discord.Color.blurple(),
