@@ -1168,13 +1168,13 @@ class Settings(commands.Cog):
 
     def _intro_text(self, guild: discord.Guild, *, dm: bool) -> str:
         thanks = f"Thanks for adding me to **{guild.name}**!" if dm else "Thanks for adding me!"
-        settings_page = site_link(self.bot, "settings page", f"/app/{guild.id}/settings")
-        if not settings_page:
+        start = site_link(self.bot, "getting started page", f"/app/{guild.id}/start")
+        if not start:
             return f"{thanks} Admins can set everything up with `/settings`, and `/help` lists what I can do."
         website = site_link(self.bot, "website", f"/app/{guild.id}")
         return (
-            f"{thanks} Admins can set everything up on the server's {settings_page}, or with `/settings` in Discord. "
-            f"`/help` lists what I can do.\n"
+            f"{thanks} The server's {start} walks admins through setting me up, "
+            f"and `/settings` does the same in Discord. `/help` lists what I can do.\n"
             f"The {website} also has a web music player and playlists for everyone."
         )
 

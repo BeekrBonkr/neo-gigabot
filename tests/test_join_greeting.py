@@ -70,13 +70,13 @@ def _join(cog, guild):
     asyncio.run(cog.on_guild_join(guild))
 
 
-def test_the_person_who_added_the_bot_gets_a_dm_with_the_settings_page(storage):
+def test_the_person_who_added_the_bot_gets_a_dm_with_the_getting_started_page(storage):
     inviter, general = _Sink(), _channel("general", 0)
     other_bot = _added_by(_Sink(), target_id=5)
     guild = _guild(entries=[other_bot, _added_by(inviter)], channels=[general], system=general)
     _join(_cog(storage), guild)
     assert guild_settings_exists(storage, guild.id)
-    assert len(inviter.sent) == 1 and "https://example.com/app/1234/settings" in inviter.sent[0]
+    assert len(inviter.sent) == 1 and "https://example.com/app/1234/start" in inviter.sent[0]
     assert "Test Server" in inviter.sent[0]
     assert general.sent == [] and other_bot.user.sent == []
 
@@ -85,7 +85,7 @@ def test_a_closed_dm_falls_back_to_the_system_channel(storage):
     inviter, system = _Sink(fails=True), _channel("lobby", 3)
     guild = _guild(entries=[_added_by(inviter)], channels=[_channel("general", 0), system], system=system)
     _join(_cog(storage), guild)
-    assert len(system.sent) == 1 and "https://example.com/app/1234/settings" in system.sent[0]
+    assert len(system.sent) == 1 and "https://example.com/app/1234/start" in system.sent[0]
 
 
 def test_an_unknown_inviter_falls_back_to_the_channel(storage):
