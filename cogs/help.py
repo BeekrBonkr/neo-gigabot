@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import command_dates
 from utils.config import beta_notice
 from utils.website import site_link, site_url
 
@@ -53,6 +54,9 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
     ("settings", "⚙️", "Server Settings", ["settings"]),
     ("info", "ℹ️", "Info & Support", ["about", "userinfo", "feedback"]),
 ]
+# Not a category of its own: every command from the categories above that was
+# added recently, newest first. It is only offered while there are some.
+NEW_KEY, NEW_EMOJI, NEW_LABEL = "new", "🆕", "What's New"
 
 
 class HelpCategorySelect(discord.ui.Select["HelpView"]):
@@ -61,6 +65,8 @@ class HelpCategorySelect(discord.ui.Select["HelpView"]):
             discord.SelectOption(label=label, emoji=emoji, value=key)
             for key, emoji, label, _names in CATEGORY_DEFS
         ]
+        if cog.new_commands():
+            options.insert(0, discord.SelectOption(label=NEW_LABEL, emoji=NEW_EMOJI, value=NEW_KEY))
         super().__init__(placeholder="Choose a category...", options=options)
         self.cog = cog
 
@@ -149,7 +155,30 @@ class Help(commands.Cog):
         self._mention_cooldowns: dict[int, float] = {}
 
     def _category_lookup(self) -> dict[str, tuple[str, str, list[str]]]:
-        return {key: (emoji, label, names) for key, emoji, label, names in CATEGORY_DEFS}
+        lookup = {key: (emoji, label, names) for key, emoji, label, names in CATEGORY_DEFS}
+        lookup[NEW_KEY] = (NEW_EMOJI, NEW_LABEL, [])
+        return lookup
+
+    def _commands_in(self, names: list[str]) -> list[app_commands.Command]:
+        found: list[app_commands.Command] = []
+        for name in names:
+            node = self.bot.tree.get_command(name)
+            if isinstance(node, app_commands.Group):
+                found.extend(sub for sub in node.walk_commands() if isinstance(sub, app_commands.Command))
+            elif node is not None:
+                found.append(node)
+        return found
+
+    def new_commands(self) -> list[app_commands.Command]:
+        """Recently added commands from the help categories, newest first."""
+        listed = [command for _key, _emoji, _label, names in CATEGORY_DEFS for command in self._commands_in(names)]
+        fresh = [command for command in listed if command_dates.is_new(command.qualified_name)]
+        return sorted(fresh, key=lambda command: (command_dates.added_on(command.qualified_name), command.qualified_name), reverse=True)
+
+    @staticmethod
+    def _line(command: app_commands.Command) -> str:
+        marker = f" {NEW_EMOJI}" if command_dates.is_new(command.qualified_name) else ""
+        return f"**/{command.qualified_name}**{marker} - {command.description or 'No description.'}"
 
     def _category_command_count(self, names: list[str]) -> int:
         total = 0
@@ -168,6 +197,9 @@ class Help(commands.Cog):
             f"{emoji} **{label}** - {self._category_command_count(names)} command(s)"
             for _key, emoji, label, names in CATEGORY_DEFS
         ]
+        fresh = len(self.new_commands())
+        if fresh:
+            lines.insert(0, f"{NEW_EMOJI} **{NEW_LABEL}** - {fresh} command(s) added in the last month")
         return self.bot.embeds.create(
             title="📖 GigaBot Help",
             description=(f"{beta_notice(self.bot.config)}\n\n" if beta_notice(self.bot.config) else "")
@@ -179,19 +211,10 @@ class Help(commands.Cog):
         )
 
     def _category_lines(self, key: str) -> list[str]:
+        if key == NEW_KEY:
+            return [self._line(command) for command in self.new_commands()]
         _emoji, _label, names = self._category_lookup()[key]
-        lines: list[str] = []
-        for name in names:
-            node = self.bot.tree.get_command(name)
-            if node is None:
-                continue
-            if isinstance(node, app_commands.Group):
-                for sub in node.walk_commands():
-                    if isinstance(sub, app_commands.Command):
-                        lines.append(f"**/{sub.qualified_name}** - {sub.description or 'No description.'}")
-            else:
-                lines.append(f"**/{name}** - {node.description or 'No description.'}")
-        return lines
+        return [self._line(command) for command in self._commands_in(names)]
 
     def category_pages(self, key: str) -> list[str]:
         """The category's command list, cut into embed-sized pages."""
