@@ -151,38 +151,45 @@ def triggered(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], li
 
 # ---------- bonk ----------
 
-BONK_SPRITE = Path(__file__).resolve().parents[1] / "assets" / "images" / "bonk.png"
-BONK_CELL = (247, 285)
-BONK_FRAMES = 7
-# Where the picture sits in each frame: (left, top, width, height). It flattens under the hammer.
-BONK_BOXES = ((62, 143, 158, 113), (52, 177, 173, 105), (42, 192, 192, 92), (46, 182, 184, 100),
-              (54, 169, 174, 110), (69, 128, 144, 135), (65, 130, 152, 124))
+_IMAGES = Path(__file__).resolve().parents[1] / "assets" / "images"
+BONK_SCENE = _IMAGES / "bonk.jpg"  # the dog, without its bat or the dog it hits
+BONK_BAT = _IMAGES / "bonk_bat.png"  # the bat as it lands, on a square whose center is the paw holding it
+BONK_LABEL = _IMAGES / "bonk_label.png"
+BONK_TARGET_BOX = (301, 164, 461, 324)  # where the picture stands
+BONK_PIVOT = (225, 282)
+BONK_LABEL_AT = (258, 93)
+# How far the bat is lifted off the picture in each frame, in degrees:
+# wind back, swing, hit and hold, lift away.
+BONK_LIFTS = (30, 36, 36, 22, 8, 0, 0, 0, 6, 16, 26)
+BONK_HELD = BONK_LIFTS.index(0) + 2  # the frame that lingers on the hit
 
 
 @lru_cache(maxsize=1)
-def _bonk_cells() -> list[tuple[Image.Image, Image.Image]]:
-    """Each frame's drawing, and the part of the frame the picture may show through.
-    The sheet keeps the drawings in its top row and those masks in the row below."""
-    sheet = Image.open(BONK_SPRITE).convert("RGBA")
-    width, height = BONK_CELL
-    return [(sheet.crop((index * width, 0, (index + 1) * width, height)),
-             sheet.crop((index * width, height, (index + 1) * width, height * 2)).getchannel("A"))
-            for index in range(BONK_FRAMES)]
+def _bonk_parts() -> tuple[Image.Image, Image.Image, Image.Image]:
+    return tuple(Image.open(path).convert("RGBA") for path in (BONK_SCENE, BONK_BAT, BONK_LABEL))
 
 
 def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[int]]:
-    """A hammer comes down on the picture, which flattens under it and springs back."""
-    side = max(width for _, _, width, _ in BONK_BOXES)
-    base = ImageOps.fit(loaded.frames[0], (side, side), Image.LANCZOS)
+    """The bonk meme: the dog brings its bat down on the picture, which squashes when hit."""
+    scene, bat, label = _bonk_parts()
+    base = loaded.frames[0]
+    left, top, right, bottom = BONK_TARGET_BOX
+    box_w, box_h = right - left, bottom - top
+    scale = min(box_w / base.width, box_h / base.height)
+    target = base.resize((max(1, int(base.width * scale)), max(1, int(base.height * scale))), Image.LANCZOS)
+    squashed = target.resize((max(1, int(target.width * 1.1)), max(1, int(target.height * 0.75))), Image.LANCZOS)
     frames = []
-    for (left, top, width, height), (drawing, window) in zip(BONK_BOXES, _bonk_cells()):
-        picture = Image.new("RGBA", BONK_CELL, (0, 0, 0, 0))
-        picture.alpha_composite(base.resize((width, height), Image.LANCZOS), (left, top))
-        canvas = Image.new("RGBA", BONK_CELL, (0, 0, 0, 0))
-        canvas.paste(picture, (0, 0), window)
-        canvas.alpha_composite(drawing)
+    for lift in BONK_LIFTS:
+        hit = lift == 0
+        canvas = scene.copy()
+        shown = squashed if hit else target
+        canvas.paste(shown, (left + (box_w - shown.width) // 2, bottom - shown.height), shown)
+        swung = bat.rotate(lift, resample=Image.BICUBIC)
+        canvas.paste(swung, (BONK_PIVOT[0] - swung.width // 2, BONK_PIVOT[1] - swung.height // 2), swung)
+        if hit:
+            canvas.paste(label, BONK_LABEL_AT, label)
         frames.append(canvas)
-    return frames, [speed_ms] * BONK_FRAMES
+    return frames, [speed_ms * (4 if index == BONK_HELD else 1) for index in range(len(BONK_LIFTS))]
 
 
 # ---------- tools for existing GIFs ----------
