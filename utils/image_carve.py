@@ -123,10 +123,21 @@ def apply(image: Image.Image, carve: CarveMap) -> Image.Image:
     return Image.fromarray(np.ascontiguousarray(carved), "RGB")
 
 
-# Carving is worked out afresh on this many frames of an animation at most,
-# spread evenly through it. The frames between them are carved by a blend of
-# the plans on either side, so the melt drifts from one to the next.
-KEYFRAMES = 6
+# Carving is worked out afresh on only some frames of an animation, spread
+# evenly through it; the frames between them are carved by a blend of the plans
+# on either side, so the melt drifts from one to the next. A short animation
+# has every frame carved. Past that, the longer it is the thinner the carved
+# frames are spread, up to a ceiling that keeps the longest ones affordable.
+KEYFRAMES_ALL = 8  # animations up to this long are carved frame by frame
+KEYFRAMES_EVERY = 8  # then one more carved frame for each this many frames
+KEYFRAMES_MAX = 12
+
+
+def keyframe_count(frames: int) -> int:
+    """How many frames of an animation this long get a plan of their own."""
+    if frames <= KEYFRAMES_ALL:
+        return frames
+    return min(KEYFRAMES_MAX, KEYFRAMES_ALL + (frames - KEYFRAMES_ALL) // KEYFRAMES_EVERY)
 
 
 def blend(before: CarveMap, after: CarveMap, share: float) -> CarveMap:
@@ -146,7 +157,7 @@ def blend(before: CarveMap, after: CarveMap, share: float) -> CarveMap:
 def carve_frames(frames: list[Image.Image], target_width: int, target_height: int) -> list[Image.Image]:
     """Carve every frame of an animation to the target size."""
     last = len(frames) - 1
-    count = min(KEYFRAMES, len(frames))
+    count = keyframe_count(len(frames))
     keys = sorted({round(index * last / max(1, count - 1)) for index in range(count)})
     plans = {key: plan(frames[key], target_width, target_height) for key in keys}
     carved = []

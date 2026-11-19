@@ -80,10 +80,16 @@ def test_an_animation_is_carved_afresh_on_a_few_frames_and_blended_between():
     finally:
         ic.plan = real_plan
     assert len(carved) == 26 and {image.size for image in carved} == {(40, 40)}
-    assert len(planned) == ic.KEYFRAMES and planned[0] is frames[0] and planned[-1] is frames[-1]
+    assert len(planned) == ic.keyframe_count(26) == 10 and planned[0] is frames[0] and planned[-1] is frames[-1]
     assert busy(carved[0]) == busy(carved[-1]) == 400  # the square is spared wherever it is, not only where it started
     assert all(busy(image) > 300 for image in carved)  # and mostly spared on the frames between
     first, last = ic.plan(frames[0], 40, 40), ic.plan(frames[-1], 40, 40)
     assert ic.blend(first, last, 0) is first and ic.blend(first, last, 1) is last
     halfway = ic.blend(first, last, 0.5)
     assert (np.diff(halfway.columns, axis=1) >= 0).all() and halfway.size == (40, 40)
+
+
+def test_short_animations_are_carved_whole_and_long_ones_spread_thinner():
+    counts = [ic.keyframe_count(frames) for frames in (1, 2, 8, 9, 16, 24, 40, 55, 120)]
+    assert counts == [1, 2, 8, 8, 9, 10, 12, 12, 12]
+    assert all(ic.keyframe_count(frames) <= ic.keyframe_count(frames + 1) for frames in range(1, 130))
