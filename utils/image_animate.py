@@ -159,7 +159,7 @@ BONK_HIT_ANGLE = -43  # the bat as it lands, in degrees counterclockwise from st
 BONK_LABEL_AT = (232, 4)
 # How far the bat is lifted off the picture in each frame, in degrees:
 # wind back, swing, hit and hold, lift away.
-BONK_LIFTS = (30, 36, 36, 22, 8, 0, 0, 0, 6, 16, 26)
+BONK_LIFTS = (43, 51, 51, 31, 11, 0, 0, 0, 9, 23, 37)
 BONK_HELD = BONK_LIFTS.index(0) + 2  # the frame that lingers on the hit
 
 
