@@ -159,9 +159,9 @@ def _clip(tmp_path, name, *more) -> bytes:
     return path.read_bytes()
 
 
-def test_a_video_becomes_a_gif_on_the_way_in(tmp_path):
+def test_a_video_becomes_an_animation_on_the_way_in(tmp_path):
     import shutil
-    from utils.imaging import VIDEO_MAX_EDGE, video_container, video_to_gif
+    from utils.imaging import VIDEO_MAX_EDGE, video_container, video_to_animation
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is not installed")
     png = io.BytesIO()
@@ -170,11 +170,11 @@ def test_a_video_becomes_a_gif_on_the_way_in(tmp_path):
     for name, more, kind in (("a.mp4", ("-pix_fmt", "yuv420p"), "mov"), ("a.webm", ("-c:v", "libvpx", "-b:v", "500k"), "matroska")):
         clip = _clip(tmp_path, name, *more)
         assert video_container(clip) == kind
-        loaded = load_frames(video_to_gif(clip), "a.gif")
+        loaded = load_frames(video_to_animation(clip), "a.webp")
         assert loaded.animated and loaded.size == (VIDEO_MAX_EDGE, 270)  # shrunk, shape kept
-        assert 20 <= len(loaded.frames) <= 27 and set(loaded.durations[:-1]) == {40}  # 50 frames a second slowed to 25
+        assert 20 <= len(loaded.frames) <= 27 and set(loaded.durations) == {40}  # 50 frames a second slowed to 25
     with pytest.raises(ValueError, match="can't read that video"):
-        video_to_gif(clip[:8] + b"junk" * 50)
+        video_to_animation(clip[:8] + b"junk" * 50)
 
     tools = ImageToolkit(bot=None)
 
@@ -183,4 +183,4 @@ def test_a_video_becomes_a_gif_on_the_way_in(tmp_path):
 
     tools._find_source_image = find
     data, name = asyncio.run(tools.get_source_image(None))
-    assert name == "funny.gif" and data[:3] == b"GIF"
+    assert name == "funny.webp" and data[:4] == b"RIFF"

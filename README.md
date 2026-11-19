@@ -55,7 +55,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
-  as a GIF of its first few seconds (needs `ffmpeg`)
+  as an animation of its first few seconds (needs `ffmpeg`)
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,
   GIFs capped at 120 processed frames, heavy work runs off the event loop with concurrency caps
 

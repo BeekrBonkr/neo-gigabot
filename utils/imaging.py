@@ -27,7 +27,7 @@ from utils.richtext import PLACEHOLDER_BASE, RichText
 
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 # A lot of what Discord shows as a GIF is a short silent video: everything from
-# its GIF picker, and many uploads. These are turned into GIFs on the way in.
+# its GIF picker, and many uploads. These are turned into animated images on the way in.
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
 SOURCE_TTL_SECONDS = 60 * 15
 
@@ -82,10 +82,11 @@ def video_container(data: bytes) -> str | None:
     return None
 
 
-def video_to_gif(data: bytes) -> bytes:
-    """The start of a video as a GIF: at most MAX_GIF_FRAMES frames, no faster
-    than VIDEO_MAX_FPS, no larger than VIDEO_MAX_EDGE. Everything downstream
-    already knows what to do with a GIF."""
+def video_to_animation(data: bytes) -> bytes:
+    """The start of a video as an animated WebP: at most MAX_GIF_FRAMES frames,
+    no faster than VIDEO_MAX_FPS, no larger than VIDEO_MAX_EDGE. Everything
+    downstream reads it the way it reads a GIF, and WebP is several times
+    quicker to make than a GIF and keeps the video's colors."""
     container = video_container(data)
     ffmpeg = shutil.which("ffmpeg")
     if container is None or ffmpeg is None:
@@ -93,8 +94,7 @@ def video_to_gif(data: bytes) -> bytes:
     gap = 0.95 / VIDEO_MAX_FPS
     steps = (
         f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{gap:.4f})',"
-        f"scale='min({VIDEO_MAX_EDGE},iw)':'min({VIDEO_MAX_EDGE},ih)':force_original_aspect_ratio=decrease:flags=lanczos,"
-        "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5"
+        f"scale='min({VIDEO_MAX_EDGE},iw)':'min({VIDEO_MAX_EDGE},ih)':force_original_aspect_ratio=decrease"
     )
     with tempfile.NamedTemporaryFile(suffix=".video") as source:
         source.write(data)
@@ -103,7 +103,8 @@ def video_to_gif(data: bytes) -> bytes:
         # a crafted upload cannot point ffmpeg at a playlist, a URL or another file.
         command = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", VIDEO_CONTAINERS[container],
                    "-i", source.name, "-an", "-sn", "-map", "0:v:0", "-vf", steps, "-fps_mode", "vfr",
-                   "-frames:v", str(MAX_GIF_FRAMES), "-threads", "2", "-f", "gif", "pipe:1"]
+                   "-frames:v", str(MAX_GIF_FRAMES), "-threads", "2", "-c:v", "libwebp_anim", "-q:v", "90",
+                   "-compression_level", "0", "-loop", "0", "-f", "webp", "pipe:1"]
         try:
             done = subprocess.run(command, capture_output=True, timeout=VIDEO_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as exc:
@@ -199,8 +200,8 @@ def load_frames(image_bytes: bytes, filename: str | None = None, *, max_edge: in
         durations: list[int] = []
         source = itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES) if animated else [image]
         for frame in source:
+            converted = frame.convert("RGBA")  # decoded first: some formats only know a frame's timing once it is read
             durations.append(int(frame.info.get("duration", 100) or 100))
-            converted = frame.convert("RGBA")
             frames.append(fit_within(converted, max_edge) if max_edge else converted)
     return Frames(frames, durations, loop, animated and len(frames) > 1)
 
@@ -550,11 +551,11 @@ class ImageToolkit:
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
     ) -> tuple[bytes, str]:
-        """The image a command should work on. A video comes back as a GIF."""
+        """The image a command should work on. A video comes back as an animated WebP."""
         data, filename = await self._find_source_image(interaction, attachment, message_link)
         if video_container(data) is None:
             return data, filename
-        return await self.run_cpu_bound(lambda: video_to_gif(data)), f"{Path(filename).stem}.gif"
+        return await self.run_cpu_bound(lambda: video_to_animation(data)), f"{Path(filename).stem}.webp"
 
     async def _find_source_image(
         self,
