@@ -216,6 +216,64 @@ def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[in
     return frames, [speed_ms * (4 if index == BONK_HELD else 1) for index in range(len(BONK_LIFTS))]
 
 
+# ---------- boom ----------
+
+# The explosion is the Castle Bravo test film (public domain, from Wikimedia
+# Commons), thinned to thirty frames and kept as a sheet of 324x182 cells.
+BOOM_SHEET = Path(__file__).resolve().parents[1] / "assets" / "images" / "boom.jpg"
+BOOM_CELL = (324, 182)
+BOOM_COLUMNS = 6
+BOOM_FRAMES = 30
+BOOM_FRAME_MS = 80
+BOOM_HOLD_MS = 700  # the last frame of the cloud lingers before the loop starts over
+BOOM_SWELL_FRAMES = 10  # how many frames a still takes to swell; a short GIF repeats until it has this many
+BOOM_BULGE = 1.6  # how hard the middle is pushed out at the end
+BOOM_ZOOM = 0.3  # how much closer the whole picture has come by the end
+BOOM_GLOW = 0.55  # how white the last swollen frame is
+
+
+@lru_cache(maxsize=1)
+def _boom_cells() -> list[Image.Image]:
+    sheet = Image.open(BOOM_SHEET).convert("RGBA")
+    width, height = BOOM_CELL
+    return [sheet.crop((column * width, row * height, (column + 1) * width, (row + 1) * height))
+            for row, column in (divmod(index, BOOM_COLUMNS) for index in range(BOOM_FRAMES))]
+
+
+def _bulge(frame: Image.Image, amount: float) -> Image.Image:
+    """The picture swollen from its center, as if something behind it is
+    pushing out. `amount` runs from 0 (untouched) to 1."""
+    if amount <= 0:
+        return frame
+    width, height = frame.size
+    across = (np.arange(width, dtype=np.float32) - (width - 1) / 2) / (width / 2)
+    down = (np.arange(height, dtype=np.float32) - (height - 1) / 2) / (height / 2)
+    x, y = np.meshgrid(across, down)
+    radius = np.sqrt(x * x + y * y)
+    # inside the circle each point shows what was nearer the center, so the middle grows
+    pull = np.where(radius < 1.0, np.power(np.maximum(radius, 1e-6), BOOM_BULGE * amount), 1.0) / (1.0 + BOOM_ZOOM * amount)
+    map_x = (x * pull * (width / 2) + (width - 1) / 2).astype(np.float32)
+    map_y = (y * pull * (height / 2) + (height - 1) / 2).astype(np.float32)
+    swollen = Image.fromarray(cv2.remap(np.asarray(frame), map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE), "RGBA")
+    glow = BOOM_GLOW * amount ** 3
+    return Image.blend(swollen, Image.new("RGBA", frame.size, (255, 255, 255, 255)), glow) if glow > 0.01 else swollen
+
+
+def boom(loaded: Frames, speed_ms: int = 60) -> tuple[list[Image.Image], list[int]]:
+    """The picture swells faster and faster, then goes up in a nuclear
+    explosion. A GIF swells over its own frames, playing at its own speed."""
+    if loaded.animated:
+        repeats = -(-BOOM_SWELL_FRAMES // len(loaded.frames))
+        sources, durations = loaded.frames * repeats, list(loaded.durations) * repeats
+    else:
+        sources, durations = [loaded.frames[0]] * BOOM_SWELL_FRAMES, [speed_ms] * BOOM_SWELL_FRAMES
+    count = len(sources)
+    frames = [_bulge(frame, (index / (count - 1)) ** 2) for index, frame in enumerate(sources)]
+    frames.append(Image.new("RGBA", loaded.size, (255, 255, 255, 255)))  # the flash
+    frames.extend(ImageOps.fit(cell, loaded.size, Image.LANCZOS) for cell in _boom_cells())
+    return frames, durations + [BOOM_FRAME_MS] * BOOM_FRAMES + [BOOM_HOLD_MS]
+
+
 # ---------- tools for existing GIFs ----------
 
 def speed(loaded: Frames, factor: float) -> tuple[list[Image.Image], list[int]]:

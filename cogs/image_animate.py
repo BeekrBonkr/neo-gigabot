@@ -114,6 +114,15 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
     ) -> None:
         await self._animate(interaction, "bonk", "Bonk", lambda loaded: an.bonk(loaded, speed), attachment, message_link, user=user, still_only=True)
 
+    @app_commands.command(name="boom", description="An image, GIF or avatar swells up, then goes off in a nuclear explosion.")
+    @app_commands.describe(user=USER_HELP, speed="Milliseconds per frame while a still image swells. Lower is faster.", **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 5.0)
+    async def boom(
+        self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 60,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._animate(interaction, "boom", "Boom", lambda loaded: an.boom(loaded, speed), attachment, message_link, user=user)
+
     # ---------- tools for GIFs people already have ----------
 
     async def _gif_tool(self, interaction: discord.Interaction, name: str, title: str, build, attachment, message_link) -> None:

@@ -56,6 +56,28 @@ def test_pet_and_bonk_build_a_fixed_animation_around_the_picture():
     assert frames[hit].tobytes() != frames[0].tobytes() and frames[hit].tobytes() == frames[hit + 1].tobytes()
 
 
+def test_boom_swells_the_picture_then_plays_the_explosion():
+    frames, durations = an.boom(still(), 40)
+    swell = an.BOOM_SWELL_FRAMES
+    assert len(frames) == len(durations) == swell + 1 + an.BOOM_FRAMES and {frame.size for frame in frames} == {(60, 40)}
+    assert durations[:swell] == [40] * swell and durations[-1] == an.BOOM_HOLD_MS
+    assert frames[0].tobytes() == still().frames[0].tobytes()  # it starts untouched
+    assert len({frame.tobytes() for frame in frames[:swell]}) == swell  # every frame is swollen further than the last
+    assert frames[swell - 1].getpixel((5, 20))[1] > frames[0].getpixel((5, 20))[1]  # and it is whitening by the end
+    assert frames[swell].getpixel((30, 20)) == (255, 255, 255, 255)  # the flash
+    red, green, blue_part, _ = frames[swell + 8].getpixel((30, 20))  # the fireball: bright and orange
+    assert red > 200 and red > blue_part
+    data, name = encode_frames(frames, durations, "boom")
+    assert name == "boom.gif" and Image.open(io.BytesIO(data)).n_frames > an.BOOM_FRAMES
+
+
+def test_boom_swells_a_gif_over_its_own_frames():
+    frames, durations = an.boom(moving(count=12, durations=[30] * 12))
+    assert len(frames) == 12 + 1 + an.BOOM_FRAMES and durations[:12] == [30] * 12
+    frames, durations = an.boom(moving(count=4, durations=[30, 40, 50, 60]))  # too short to swell in one pass, so it repeats
+    assert len(frames) == 12 + 1 + an.BOOM_FRAMES and durations[:12] == [30, 40, 50, 60] * 3
+
+
 def test_triggered_shakes_the_picture_over_its_label():
     frames, durations = an.triggered(still(), 50)
     assert len(frames) == len(an.TRIGGERED_SHAKES) and frames[0].size == (an.TRIGGERED_SIZE, an.TRIGGERED_SIZE) and set(durations) == {50}
