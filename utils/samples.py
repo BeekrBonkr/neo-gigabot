@@ -29,7 +29,11 @@ FACE_PICTURE = Path(__file__).resolve().parents[1] / "assets" / "images" / "samp
 SAMPLE_OPTIONS: dict[str, dict[str, Any]] = {
     "filter adjust": {"contrast": 130, "saturation": 220},
     "edit resize": {"percent": 50},
+    "image transform crop": {"left": 25, "right": 25},
 }
+# Commands whose result says nothing as a picture (a change of file format), or
+# that no stock picture suits (swapping needs two faces).
+NO_SAMPLE = {"image effects convert", "image effects faceswap"}
 SAMPLE_TIMEOUT_SECONDS = 45.0
 MAX_SAMPLE_BYTES = 6 * 1024 * 1024
 
@@ -118,6 +122,8 @@ def _arguments(command: app_commands.Command, picture: _Picture) -> dict[str, An
     """Values for the command's options: the picture wherever it takes an
     attachment, and something plain for anything else it insists on. None if
     the command takes no picture at all."""
+    if command.qualified_name in NO_SAMPLE:
+        return None
     values: dict[str, Any] = {}
     takes_picture = False
     for parameter in command.parameters:

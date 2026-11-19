@@ -94,6 +94,13 @@ def test_commands_that_need_an_option_set_get_one():
     group.add_command(resize)
     assert asyncio.run(samples.render(SimpleNamespace(user=None), resize, b"PIC")) == (b"50", "r.png")
 
+    @app_commands.command(name="convert", description="Change the file format.")
+    async def convert(interaction: discord.Interaction, attachment: discord.Attachment) -> None: ...
+
+    effects = app_commands.Group(name="effects", description="x", parent=app_commands.Group(name="image", description="x"))
+    effects.add_command(convert)
+    assert convert.qualified_name in samples.NO_SAMPLE and not samples.can_sample(convert)  # nothing to see in a picture of it
+
 
 def test_the_store_makes_each_sample_once_from_the_bots_own_picture():
     echo, *_ = make_commands()
