@@ -141,7 +141,7 @@ def test_every_species_and_stage_draws_a_sharp_picture(storage):
     state = store.get_state(storage, 1, now=T0)
     empty = render.render_greenhouse(state)
     picture = Image.open(io.BytesIO(empty))
-    assert picture.format == "PNG" and picture.size == (160 * render.SCALE, 100 * render.SCALE)
+    assert picture.format == "PNG" and picture.size == tuple(edge * render.SCALE for edge in render.image("greenhouse").size) == (648, 432)
     seen = {empty}
     for species in RULES["species"]:
         for stage in range(rules.MATURE_STAGE + 1):

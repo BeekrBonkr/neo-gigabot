@@ -15,16 +15,17 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance
 
 from utils.garden import rules
 
 SPRITES_FILE = rules.ASSETS / "sprites.json"
-SCALE = 4
-SHELF_Y = 70                  # the pots stand on this row of the room picture
-POT_CENTERS = (50, 80, 110)
+SCALE = 6
+# Where things stand in the room picture (scripts/garden_placeholders.py draws it to match).
+SHELF_Y = 52                  # the pots stand on this row
+POT_CENTERS = (45, 68, 91)
 SOIL_DEPTH = 4                # how far below the pot's rim a growing plant is rooted
-BARREL_AT = (6, 96)           # left edge and floor line
+BARREL_AT = (6, 71)           # left edge and the bottom of its shadow
 BAND_HEIGHT = 32              # every species has a 32 pixel band on the flower sheet
 
 # 3x5 digits and a slash, for the two counters in the corner.
@@ -108,24 +109,26 @@ def _number(canvas: Image.Image, text: str, x: int, y: int) -> None:
 
 def _pot(canvas: Image.Image, pot: dict[str, Any], center_x: int) -> None:
     empty, plant = cut("pot"), pot.get("plant")
+    # the shadow a pot throws on the shelf
+    canvas.alpha_composite(Image.new("RGBA", (empty.width - 2, 1), (40, 24, 12, 110)), (center_x - empty.width // 2 + 1, SHELF_Y))
     if pot.get("locked"):
-        dim = ImageEnhance.Brightness(empty).enhance(0.55)
+        dim = ImageEnhance.Color(ImageEnhance.Brightness(empty).enhance(0.7)).enhance(0.35)
         _, top = _stand(canvas, dim, center_x, SHELF_Y)
-        _stand(canvas, image("lock"), center_x, top - 2)
+        _stand(canvas, image("lock"), center_x, top - 1)
         return
     if plant is None:
         _stand(canvas, empty, center_x, SHELF_Y)
         return
     if plant["mature"]:
         _, top = _stand(canvas, plant_sprite(plant["species"], "potted"), center_x, SHELF_Y)
-        canvas.alpha_composite(image("sparkle"), (center_x + 5, max(0, top - 4)))
+        canvas.alpha_composite(image("sparkle"), (center_x + 5, max(0, top - 3)))
         return
     _, top = _stand(canvas, empty, center_x, SHELF_Y)
     if plant["stage"] > 0:
         # Stage 0 is a seed under the soil, so only the pot shows.
         _, top = _stand(canvas, plant_sprite(plant["species"], "stages", plant["stage"] - 1), center_x, top + SOIL_DEPTH)
     if plant["needs_water"]:
-        _stand(canvas, image("need_water"), center_x, max(10, top - 1))
+        _stand(canvas, image("need_water"), center_x, max(12, top - 1))
 
 
 def render_greenhouse(state: dict[str, Any], *, scale: int = SCALE) -> bytes:
@@ -140,12 +143,13 @@ def render_greenhouse(state: dict[str, Any], *, scale: int = SCALE) -> bytes:
     canvas.alpha_composite(sprite, (BARREL_AT[0], BARREL_AT[1] - sprite.height))
 
     # the two counters, on a dark plate so they read against the glass
-    plate = Image.new("RGBA", (30, 21), (30, 26, 34, 170))
-    canvas.alpha_composite(plate, (3, 3))
-    canvas.alpha_composite(image("icon_water"), (5, 5))
-    _number(canvas, str(min(999, state["water"])), 16, 7)
-    canvas.alpha_composite(image("icon_sun"), (5, 15))
-    _number(canvas, str(min(999, state["sunlight"])), 16, 16)
+    plate = Image.new("RGBA", (29, 25), (0, 0, 0, 0))
+    ImageDraw.Draw(plate).rounded_rectangle([0, 0, 28, 24], radius=3, fill=(28, 32, 48, 185))
+    canvas.alpha_composite(plate, (4, 5))
+    canvas.alpha_composite(image("icon_water"), (7, 7))
+    _number(canvas, str(min(999, state["water"])), 19, 9)
+    canvas.alpha_composite(image("icon_sun"), (6, 18))
+    _number(canvas, str(min(999, state["sunlight"])), 19, 20)
 
     big = canvas.resize((canvas.width * scale, canvas.height * scale), Image.NEAREST)
     out = io.BytesIO()
