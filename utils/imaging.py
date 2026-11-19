@@ -7,6 +7,9 @@ import itertools
 import logging
 import random
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +26,9 @@ from utils.discord_links import fetch_message_from_link
 from utils.richtext import PLACEHOLDER_BASE, RichText
 
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+# A lot of what Discord shows as a GIF is a short silent video: everything from
+# its GIF picker, and many uploads. These are turned into GIFs on the way in.
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
 SOURCE_TTL_SECONDS = 60 * 15
 
 # Embed-image URLs are attacker-controlled (any user can post a link that
@@ -43,15 +49,69 @@ def is_discord_image_host(url: str | None) -> bool:
 
 
 def embed_image_url(message: discord.Message) -> str | None:
-    """The first embedded picture in the message that Discord itself serves."""
+    """The first embedded picture in the message that Discord itself serves.
+    An embedded video file (a GIF from Discord's picker is one) comes before
+    the still picture that stands in for it."""
     for embed in message.embeds:
-        for picture in (embed.image, embed.thumbnail):
-            if not picture:
+        for media, is_video in ((embed.video, True), (embed.image, False), (embed.thumbnail, False)):
+            if not media:
                 continue
-            for url in (picture.url, picture.proxy_url):
-                if url and is_discord_image_host(url):
-                    return url
+            for url in (media.url, media.proxy_url):
+                if not url or not is_discord_image_host(url):
+                    continue
+                if is_video and not urlparse(url).path.lower().endswith(VIDEO_EXTENSIONS):
+                    continue  # a player page, not a file
+                return url
     return None
+
+
+# Only so much of a video is kept: what a GIF made from it can reasonably hold.
+VIDEO_MAX_EDGE = 480
+VIDEO_MAX_FPS = 25
+VIDEO_TIMEOUT_SECONDS = 30.0
+VIDEO_CONTAINERS = {"mov": "mov,mp4,m4a,3gp,3g2,mj2", "matroska": "matroska,webm"}
+
+
+def video_container(data: bytes) -> str | None:
+    """Which kind of video file these bytes are, going by how they start, or
+    None for anything else. Names and content types are not trusted."""
+    if data[4:8] == b"ftyp":
+        return "mov"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "matroska"
+    return None
+
+
+def video_to_gif(data: bytes) -> bytes:
+    """The start of a video as a GIF: at most MAX_GIF_FRAMES frames, no faster
+    than VIDEO_MAX_FPS, no larger than VIDEO_MAX_EDGE. Everything downstream
+    already knows what to do with a GIF."""
+    container = video_container(data)
+    ffmpeg = shutil.which("ffmpeg")
+    if container is None or ffmpeg is None:
+        raise ValueError("I can't read that video.")
+    gap = 0.95 / VIDEO_MAX_FPS
+    steps = (
+        f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{gap:.4f})',"
+        f"scale='min({VIDEO_MAX_EDGE},iw)':'min({VIDEO_MAX_EDGE},ih)':force_original_aspect_ratio=decrease:flags=lanczos,"
+        "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5"
+    )
+    with tempfile.NamedTemporaryFile(suffix=".video") as source:
+        source.write(data)
+        source.flush()
+        # The container is named outright and only local files may be opened, so
+        # a crafted upload cannot point ffmpeg at a playlist, a URL or another file.
+        command = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", VIDEO_CONTAINERS[container],
+                   "-i", source.name, "-an", "-sn", "-map", "0:v:0", "-vf", steps, "-fps_mode", "vfr",
+                   "-frames:v", str(MAX_GIF_FRAMES), "-threads", "2", "-f", "gif", "pipe:1"]
+        try:
+            done = subprocess.run(command, capture_output=True, timeout=VIDEO_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("That video took too long to read. Try a shorter one.") from exc
+    if done.returncode != 0 or not done.stdout:
+        logging.getLogger(__name__).info("ffmpeg could not read a video: %s", done.stderr.decode(errors="replace")[-300:])
+        raise ValueError("I can't read that video.")
+    return done.stdout
 # Cap what we'll buffer into RAM, whether from a URL or an oversized attachment.
 MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 # Every GIF frame is expanded to RGBA in memory during processing; anything past
@@ -399,7 +459,9 @@ class ImageToolkit:
     def supported_attachment(self, attachment: discord.Attachment) -> bool:
         content_type = attachment.content_type or ""
         name = attachment.filename.lower()
-        return content_type.startswith("image/") or name.endswith(SUPPORTED_EXTENSIONS)
+        if content_type.startswith("image/") or name.endswith(SUPPORTED_EXTENSIONS):
+            return True
+        return content_type.startswith("video/") or name.endswith(VIDEO_EXTENSIONS)
 
     def message_has_image(self, message: discord.Message) -> bool:
         if any(self.supported_attachment(attachment) for attachment in message.attachments):
@@ -483,6 +545,18 @@ class ImageToolkit:
         raise ValueError("No recent image was found in the last 50 messages.")
 
     async def get_source_image(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment | None = None,
+        message_link: str | None = None,
+    ) -> tuple[bytes, str]:
+        """The image a command should work on. A video comes back as a GIF."""
+        data, filename = await self._find_source_image(interaction, attachment, message_link)
+        if video_container(data) is None:
+            return data, filename
+        return await self.run_cpu_bound(lambda: video_to_gif(data)), f"{Path(filename).stem}.gif"
+
+    async def _find_source_image(
         self,
         interaction: discord.Interaction,
         attachment: discord.Attachment | None = None,

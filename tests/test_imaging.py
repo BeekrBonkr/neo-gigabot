@@ -81,9 +81,10 @@ def test_cpu_bound_work_runs_off_the_loop_and_times_out():
     asyncio.run(scenario())
 
 
-def _embed_message(image=None, thumbnail=None, attachments=()):
+def _embed_message(image=None, thumbnail=None, attachments=(), video=None):
     import discord
-    embed = discord.Embed.from_dict({"type": "rich", **({"image": image} if image else {}), **({"thumbnail": thumbnail} if thumbnail else {})})
+    parts = {"image": image, "thumbnail": thumbnail, "video": video}
+    embed = discord.Embed.from_dict({"type": "rich", **{name: part for name, part in parts.items() if part}})
     return type("Message", (), {"attachments": list(attachments), "embeds": [embed]})()
 
 
@@ -131,3 +132,55 @@ def test_the_channel_search_skips_pictures_it_cannot_fetch_and_a_bad_selection_i
 
     assert asyncio.run(tools.get_source_image(interaction)) == (b"data", "embedded_image.png")
     assert fetched == [CDN] and tools.sources.get(9) is None
+
+
+GIF_PICKER = {
+    "url": "https://media.tenor.com/abc/cat.mp4",
+    "proxy_url": "https://images-ext-1.discordapp.net/external/abc/https/media.tenor.com/abc/cat.mp4",
+}
+
+
+def test_an_embedded_video_file_is_taken_before_its_still():
+    from utils.imaging import embed_image_url
+    assert embed_image_url(_embed_message(video=GIF_PICKER, thumbnail=ELSEWHERE)) == GIF_PICKER["proxy_url"]
+    player = {"url": "https://www.youtube.com/embed/x", "proxy_url": "https://images-ext-1.discordapp.net/external/abc/https/www.youtube.com/embed/x"}
+    assert embed_image_url(_embed_message(video=player, thumbnail=ELSEWHERE)) == ELSEWHERE["proxy_url"]  # a player page is not a file
+    tools = ImageToolkit(bot=None)
+    clip = type("Attachment", (), {"content_type": "video/mp4", "filename": "clip"})()
+    named = type("Attachment", (), {"content_type": None, "filename": "CLIP.WEBM"})()
+    text = type("Attachment", (), {"content_type": "text/plain", "filename": "notes.txt"})()
+    assert tools.supported_attachment(clip) and tools.supported_attachment(named) and not tools.supported_attachment(text)
+
+
+def _clip(tmp_path, name, *more) -> bytes:
+    import subprocess
+    path = tmp_path / name
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=50:duration=1", *more, str(path)], check=True)
+    return path.read_bytes()
+
+
+def test_a_video_becomes_a_gif_on_the_way_in(tmp_path):
+    import shutil
+    from utils.imaging import VIDEO_MAX_EDGE, video_container, video_to_gif
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    png = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(png, format="PNG")
+    assert video_container(png.getvalue()) is None
+    for name, more, kind in (("a.mp4", ("-pix_fmt", "yuv420p"), "mov"), ("a.webm", ("-c:v", "libvpx", "-b:v", "500k"), "matroska")):
+        clip = _clip(tmp_path, name, *more)
+        assert video_container(clip) == kind
+        loaded = load_frames(video_to_gif(clip), "a.gif")
+        assert loaded.animated and loaded.size == (VIDEO_MAX_EDGE, 270)  # shrunk, shape kept
+        assert 20 <= len(loaded.frames) <= 27 and set(loaded.durations[:-1]) == {40}  # 50 frames a second slowed to 25
+    with pytest.raises(ValueError, match="can't read that video"):
+        video_to_gif(clip[:8] + b"junk" * 50)
+
+    tools = ImageToolkit(bot=None)
+
+    async def find(*_):
+        return clip, "funny.webm"
+
+    tools._find_source_image = find
+    data, name = asyncio.run(tools.get_source_image(None))
+    assert name == "funny.gif" and data[:3] == b"GIF"
