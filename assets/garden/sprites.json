@@ -1,0 +1,33 @@
+{
+  "_about": "Every sprite the garden game draws, and where it comes from. Paths are relative to assets/garden/. 'generated/' is placeholder art made by scripts/garden_placeholders.py; 'packs/' is bought art that is not in git.",
+  "sheets": {
+    "flowers": "packs/pixelmoth-flowers/sheet.png"
+  },
+  "images": {
+    "greenhouse": "generated/greenhouse.png",
+    "barrel_0": "generated/barrel_0.png",
+    "barrel_1": "generated/barrel_1.png",
+    "barrel_2": "generated/barrel_2.png",
+    "barrel_3": "generated/barrel_3.png",
+    "icon_water": "generated/icon_water.png",
+    "icon_sun": "generated/icon_sun.png",
+    "lock": "generated/lock.png",
+    "sparkle": "generated/sparkle.png",
+    "need_water": "generated/need_water.png"
+  },
+  "cuts": {
+    "pot": {"sheet": "flowers", "box": [384, 32, 400, 50]}
+  },
+  "species": {
+    "_about": "One row of the flower sheet per species. 'row' is the top of its 32 pixel band; 'stages' are the left and right edges of the five growing sprites, 'potted' of the full-grown plant in its pot, 'packet' of the seed packet.",
+    "daisy": {"sheet": "flowers", "row": 0, "packet": [0, 16], "stages": [[37, 42], [51, 60], [67, 76], [81, 94], [96, 111]], "potted": [112, 127]},
+    "clematis": {"sheet": "flowers", "row": 32, "packet": [0, 16], "stages": [[38, 41], [51, 60], [67, 76], [81, 94], [96, 111]], "potted": [112, 127]},
+    "dahlia": {"sheet": "flowers", "row": 64, "packet": [0, 16], "stages": [[35, 44], [51, 60], [65, 78], [81, 94], [96, 111]], "potted": [112, 127]},
+    "sunflower": {"sheet": "flowers", "row": 96, "packet": [0, 16], "stages": [[35, 44], [51, 60], [67, 76], [80, 95], [97, 112]], "potted": [128, 143]},
+    "cornflower": {"sheet": "flowers", "row": 128, "packet": [0, 16], "stages": [[35, 44], [50, 63], [64, 79], [80, 96], [96, 112]], "potted": [127, 144]},
+    "chamomile": {"sheet": "flowers", "row": 160, "packet": [0, 16], "stages": [[35, 44], [50, 61], [65, 78], [81, 94], [95, 112]], "potted": [112, 129]},
+    "tulip": {"sheet": "flowers", "row": 192, "packet": [0, 16], "stages": [[37, 42], [51, 60], [67, 77], [82, 93], [97, 111]], "potted": [114, 128]},
+    "viola": {"sheet": "flowers", "row": 224, "packet": [0, 16], "stages": [[37, 42], [51, 60], [67, 76], [83, 92], [96, 111]], "potted": [112, 127]},
+    "iris": {"sheet": "flowers", "row": 256, "packet": [0, 16], "stages": [[36, 42], [52, 60], [67, 77], [81, 94], [95, 111]], "potted": [127, 143]}
+  }
+}

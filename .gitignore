@@ -28,3 +28,9 @@ PORTING_CHECKLIST.md
 
 # Welcome image backgrounds uploaded by servers
 storage/welcome_cards/
+
+# Garden game: bought art packs may not be republished (see assets/garden/README.md), and player data
+assets/garden/packs/
+storage/garden.db
+storage/garden.db-wal
+storage/garden.db-shm

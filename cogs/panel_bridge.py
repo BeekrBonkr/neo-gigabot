@@ -40,6 +40,7 @@ from utils import appeals as appeal_store
 from utils import cases as case_store
 from utils import command_dates
 from utils import samples
+from utils.garden import render as garden_render, rules as garden_rules, store as garden_store
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
@@ -338,6 +339,9 @@ class PanelBridge(commands.Cog):
         r.add_get("/v1/users/{user_id}/profiles/{owner_id}", self.h_profile)
         r.add_get("/v1/users/{user_id}/playlists/{owner_id}/{name}", self.h_playlist_view)
         r.add_post("/v1/users/{user_id}/playlists/action", self.h_playlist_action)
+        r.add_get("/v1/users/{user_id}/greenhouse", self.h_greenhouse)
+        r.add_get("/v1/users/{user_id}/greenhouse/image", self.h_greenhouse_image)
+        r.add_post("/v1/users/{user_id}/greenhouse/action", self.h_greenhouse_action)
         r.add_get("/v1/guilds/{guild_id}/members/{user_id}", self.h_member)
         r.add_get("/v1/guilds/{guild_id}/music", self.h_guild_music)
         r.add_get("/v1/guilds/{guild_id}/music/events", self.h_guild_music_events)
@@ -1208,6 +1212,41 @@ class PanelBridge(commands.Cog):
         data, filename = made
         kind = {"gif": "image/gif", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
         return web.Response(body=data, content_type=kind.get(filename.rsplit(".", 1)[-1].lower(), "application/octet-stream"))
+
+    # ---------- the garden game ----------
+
+    def _greenhouse_user(self, request: web.Request) -> int:
+        """The game exists only on a bot that has it switched on and has its art."""
+        if not garden_rules.enabled() or not garden_render.available():
+            raise BridgeError(404, "The greenhouse is not available on this bot.")
+        return self._user_id(request)
+
+    def _greenhouse_seen(self, user_id: int) -> None:
+        cog = self.bot.get_cog("Garden")
+        if cog is not None:
+            cog.players.add(user_id)  # so their chatting starts earning sunlight
+
+    async def h_greenhouse(self, request: web.Request) -> web.Response:
+        user_id = self._greenhouse_user(request)
+        state = garden_store.get_state(self.storage, user_id)
+        self._greenhouse_seen(user_id)
+        return web.json_response({"state": state})
+
+    async def h_greenhouse_image(self, request: web.Request) -> web.Response:
+        """The same picture Discord shows, so the website never draws its own."""
+        state = garden_store.get_state(self.storage, self._greenhouse_user(request))
+        data = await asyncio.to_thread(garden_render.render_greenhouse, state)
+        return web.Response(body=data, content_type="image/png")
+
+    async def h_greenhouse_action(self, request: web.Request) -> web.Response:
+        user_id = self._greenhouse_user(request)
+        body = await self._json(request)
+        try:
+            state, did = garden_store.act(self.storage, user_id, str(body.get("action", "")), species=str(body.get("species", "")))
+        except garden_store.GardenError as exc:
+            raise BridgeError(409, str(exc)) from exc
+        self._greenhouse_seen(user_id)
+        return web.json_response({"state": state, "did": did})
 
     async def h_users_resolve(self, request: web.Request) -> web.Response:
         """Names for user IDs out of the bot's cache (no API calls)."""

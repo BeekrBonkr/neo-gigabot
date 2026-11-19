@@ -48,6 +48,7 @@ COGS = [
     "cogs.reactionroles",
     "cogs.rolemenus",
     "cogs.starboard",
+    "cogs.garden",
     "cogs.owner",
     "cogs.panel_bridge",
 ]
