@@ -644,14 +644,24 @@ def test_command_list_names_each_commands_module(storage):
     async def ping(interaction: discord.Interaction) -> None: ...
 
     tree = SimpleNamespace(walk_commands=lambda: [snipe, kick, ping], get_commands=lambda type=None: [])
-    cog = PanelBridge(SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, tree=tree))
+
+    async def sample(name):
+        return (b"GIF89a...", "boom.gif") if name == "animate boom" else None
+
+    cog = PanelBridge(SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, tree=tree,
+                                      samples=SimpleNamespace(get=sample)))
     cog._token = TOKEN
 
     async def run():
         async with TestClient(TestServer(cog.build_app())) as client:
+            made = await client.get("/v1/samples/animate%20boom", headers=AUTH)
+            assert made.status == 200 and made.content_type == "image/gif" and await made.read() == b"GIF89a..."
+            assert (await client.get("/v1/samples/ping", headers=AUTH)).status == 404
+            assert (await client.get("/v1/samples/animate%20boom")).status == 401
             return await (await client.get("/v1/commands", headers=AUTH)).json()
 
     by_name = {c["name"]: c for c in asyncio.run(run())["commands"]}
+    assert by_name["ping"]["sample"] is False
     assert by_name["snipe"]["module"] == "snipe" and by_name["snipe"]["module_flag"] == "snipe_enabled" and by_name["snipe"]["module_solo"] is True
     assert by_name["kick"]["module"] == "moderation" and by_name["kick"]["module_solo"] is False
     assert by_name["ping"]["module"] is None

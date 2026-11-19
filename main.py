@@ -16,6 +16,7 @@ from utils.config import load_config
 from utils.embeds import EmbedManager
 from utils.imaging import ImageToolkit
 from utils.modules import disabled_module_for
+from utils.samples import SampleStore
 from utils.settings import blocking_entry, get_guild_settings, migrate_blocked_command_names
 from utils.storage import ensure_storage_layout
 from utils.website import site_link
@@ -77,6 +78,7 @@ class GigaBot(commands.Bot):
         self.logger = logging.getLogger(__name__)
         self.embeds = EmbedManager(self)
         self.image_tools = ImageToolkit(self)
+        self.samples = SampleStore(self)
         self.start_time = discord.utils.utcnow()
         self.tree.on_error = self.on_app_command_error
         self.tree.interaction_check = self.on_tree_interaction_check

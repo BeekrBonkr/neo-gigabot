@@ -38,6 +38,7 @@ from discord.ext import commands
 from utils import appeals as appeal_store
 from utils import cases as case_store
 from utils import command_dates
+from utils import samples
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
@@ -353,6 +354,7 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
         r.add_post("/v1/guilds/{guild_id}/music/action", self.h_music_action)
         r.add_get("/v1/commands", self.h_commands)
+        r.add_get("/v1/samples/{name}", self.h_sample)
         r.add_post("/v1/users/resolve", self.h_users_resolve)
         r.add_post("/v1/actions/reload", self.h_reload)
         r.add_post("/v1/actions/sync", self.h_sync)
@@ -1152,6 +1154,7 @@ class PanelBridge(commands.Cog):
                     **self._command_module(command.qualified_name),
                     "kind": "slash",
                     "added": command_dates.added_on(command.qualified_name),
+                    "sample": samples.can_sample(command),
                     "requires": self._required_permissions(command),
                     "params": [
                         {"name": p.display_name, "description": p.description if p.description != "…" else "", "required": p.required}
@@ -1169,6 +1172,15 @@ class PanelBridge(commands.Cog):
                 )
         result.sort(key=lambda c: (c["kind"] != "slash", c["name"]))
         return web.json_response({"commands": result, "categories": categories})
+
+    async def h_sample(self, request: web.Request) -> web.Response:
+        """An example of what an image command makes, as the image itself."""
+        made = await self.bot.samples.get(request.match_info["name"])
+        if made is None:
+            raise BridgeError(404, "That command has no sample.")
+        data, filename = made
+        kind = {"gif": "image/gif", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+        return web.Response(body=data, content_type=kind.get(filename.rsplit(".", 1)[-1].lower(), "application/octet-stream"))
 
     async def h_users_resolve(self, request: web.Request) -> web.Response:
         """Names for user IDs out of the bot's cache (no API calls)."""
