@@ -14,7 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequence
 
-from utils import image_faces, richtext
+from utils import image_carve, image_faces, richtext
 from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS
 
 LINE_SPACING = 6
@@ -41,19 +41,14 @@ FACE_BLOB_MEAN = (104.0, 177.0, 123.0)
 # through an executor with a timeout and a bot-wide concurrency cap (see
 # ImageToolkit.run_cpu_bound in utils/imaging.py).
 
-# /contentaware: seam carving is O(seams_removed x width x height) even with a
-# vectorized per-row DP loop, and this command now carves both axes (width, then
-# height via transpose) to get a deliberately stupid-looking squish. Benchmarked
-# locally: a 450x450 image losing 90% of its width and then 90% of its height
-# (the most extreme case this command allows) takes ~11s. Capping the working
-# resolution and the minimum target percent keeps the worst case well inside
-# CPU_BOUND_TIMEOUT_SECONDS with room to spare on a slower host.
+# /contentaware carves both axes (see utils/image_carve.py). The work grows with
+# the picture's area times the seams taken out, so the picture is shrunk to this
+# size first; the most extreme case the command allows (90% off each axis of a
+# 450x450 picture) takes about a second.
 #
-# GIF frames replay the exact seams removed from the first frame instead of
-# re-running the DP per frame - the DP is the expensive part, and every frame of
-# a short meme GIF looks close enough to the first that reusing its seams is
-# indistinguishable in practice while keeping cost roughly constant regardless
-# of frame count.
+# A GIF is carved the way its first frame was rather than frame by frame: the
+# frames of a short meme GIF are close enough that it looks the same, and the
+# cost stays about constant however many frames there are.
 CONTENTAWARE_MAX_DIMENSION = 450
 CONTENTAWARE_MIN_PERCENT = 10
 CONTENTAWARE_MAX_PERCENT = 95
@@ -298,89 +293,6 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 py = cy + distance * math.sin(angle)
                 draw.ellipse((px - pupil_radius, py - pupil_radius, px + pupil_radius, py + pupil_radius), fill=(0, 0, 0, 255))
         return result
-
-    # ---------- content-aware scale (seam carving) ----------
-
-    def _remove_seams(self, arr: np.ndarray, seams_to_remove: int) -> tuple[np.ndarray, list[np.ndarray]]:
-        """Vertical seam removal (shrinks the array's width by one column per seam).
-        Returns the reduced array plus the list of seams removed, in removal order,
-        so the identical cuts can be replayed on other frames of a GIF without
-        re-running the DP per frame (see CONTENTAWARE_MAX_DIMENSION comment)."""
-        seams: list[np.ndarray] = []
-        for _ in range(seams_to_remove):
-            gray = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float64)
-            energy = (
-                np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))
-                + np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))
-            )
-            height, width = energy.shape
-            cost = energy.copy()
-            backtrack = np.zeros((height, width), dtype=np.int64)
-
-            for row in range(1, height):
-                prev = cost[row - 1]
-                left = np.roll(prev, 1)
-                left[0] = np.inf
-                right = np.roll(prev, -1)
-                right[-1] = np.inf
-                choices = np.vstack([left, prev, right])
-                best = np.argmin(choices, axis=0)
-                backtrack[row] = best - 1
-                cost[row] = energy[row] + choices[best, np.arange(width)]
-
-            seam = np.zeros(height, dtype=np.int64)
-            seam[-1] = int(np.argmin(cost[-1]))
-            for row in range(height - 2, -1, -1):
-                next_col = seam[row + 1]
-                seam[row] = int(np.clip(next_col + backtrack[row + 1, next_col], 0, width - 1))
-
-            seams.append(seam)
-            mask = np.ones((height, width), dtype=bool)
-            mask[np.arange(height), seam] = False
-            arr = arr[mask].reshape(height, width - 1, 3)
-
-        return arr, seams
-
-    def _apply_seams(self, arr: np.ndarray, seams: list[np.ndarray]) -> np.ndarray:
-        """Replay a previously-recorded list of seam removals on a same-sized array."""
-        for seam in seams:
-            height, width = arr.shape[:2]
-            mask = np.ones((height, width), dtype=bool)
-            mask[np.arange(height), seam] = False
-            arr = arr[mask].reshape(height, width - 1, 3)
-        return arr
-
-    def _seam_carve_both_axes(
-        self, image: Image.Image, target_width: int, target_height: int
-    ) -> tuple[Image.Image, list[np.ndarray], list[np.ndarray]]:
-        """Squish both width and height via seam carving (height by transposing,
-        carving, then transposing back). Returns the carved image plus the seams
-        removed on each axis, so GIF frames can replay the same cuts."""
-        arr = np.array(image.convert("RGB")).astype(np.float64)
-        arr, width_seams = self._remove_seams(arr, max(0, arr.shape[1] - target_width))
-
-        arr = arr.transpose(1, 0, 2)
-        arr, height_seams = self._remove_seams(arr, max(0, arr.shape[1] - target_height))
-        arr = arr.transpose(1, 0, 2)
-
-        return Image.fromarray(arr.astype(np.uint8), mode="RGB"), width_seams, height_seams
-
-    def _apply_seams_both_axes(
-        self,
-        image: Image.Image,
-        working_size: tuple[int, int],
-        width_seams: list[np.ndarray],
-        height_seams: list[np.ndarray],
-    ) -> Image.Image:
-        frame = image.convert("RGB").resize(working_size, Image.LANCZOS)
-        arr = np.array(frame).astype(np.float64)
-        arr = self._apply_seams(arr, width_seams)
-
-        arr = arr.transpose(1, 0, 2)
-        arr = self._apply_seams(arr, height_seams)
-        arr = arr.transpose(1, 0, 2)
-
-        return Image.fromarray(arr.astype(np.uint8), mode="RGB")
 
     # ---------- image context menu commands ----------
 
@@ -2119,7 +2031,8 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                     )
                     target_width = max(2, int(working_size[0] * width_percent / 100))
                     target_height = max(2, int(working_size[1] * height_percent / 100))
-                    carved, width_seams, height_seams = self._seam_carve_both_axes(source, target_width, target_height)
+                    carve = image_carve.plan(source, target_width, target_height)
+                    carved = image_carve.apply(source, carve)
 
                     if not is_gif:
                         output = io.BytesIO()
@@ -2128,8 +2041,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
 
                     frames = [carved.convert("RGBA")]
                     for frame in list(self.bot.image_tools.gif_frames(image))[1:]:
-                        carved_frame = self._apply_seams_both_axes(frame, working_size, width_seams, height_seams)
-                        frames.append(carved_frame.convert("RGBA"))
+                        frames.append(image_carve.apply(frame, carve).convert("RGBA"))
 
                     output = io.BytesIO()
                     frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))

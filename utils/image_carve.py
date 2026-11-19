@@ -1,0 +1,120 @@
+"""Content-aware scaling (seam carving) for /image effects contentaware.
+
+A seam is a path of low-detail pixels running from one edge to the other, one
+pixel per row. Taking seams out narrows a picture while leaving its busy parts
+alone, which is what gives the effect its melted look.
+
+Finding the cheapest seam means scoring every pixel, so seams are taken out a
+handful at a time from one scoring pass rather than one pass each. What comes
+out of carving is a map of which source pixel each output pixel shows, so the
+frames of a GIF can all be carved the same way with two lookups each."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+from PIL import Image
+
+# One scoring pass takes out this share of the current width at most. Smaller
+# is closer to carving one seam at a time, and slower.
+SEAMS_PER_PASS = 1 / 40
+
+
+@dataclass(slots=True)
+class CarveMap:
+    """How a carved picture is read out of its source. `columns[y, x]` is the
+    source column shown at (x, y) once the width is carved; `rows[x, y]` is then
+    the row of that narrowed picture shown at (x, y) of the result."""
+
+    source_size: tuple[int, int]
+    columns: np.ndarray
+    rows: np.ndarray
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return self.rows.shape[0], self.rows.shape[1]
+
+
+def _energy(pixels: np.ndarray) -> np.ndarray:
+    """How much detail is at each pixel: the strength of the edges through it."""
+    gray = cv2.cvtColor(pixels, cv2.COLOR_RGB2GRAY)
+    return np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)) + np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+
+
+def _path_costs(energy: np.ndarray) -> np.ndarray:
+    """For each pixel, the cost of the cheapest path down to it from the top row."""
+    cost = energy.copy()
+    for row in range(1, cost.shape[0]):
+        above = cost[row - 1]
+        cheapest = above.copy()
+        np.minimum(cheapest[1:], above[:-1], out=cheapest[1:])
+        np.minimum(cheapest[:-1], above[1:], out=cheapest[:-1])
+        cost[row] += cheapest
+    return cost
+
+
+def _pick_seams(cost: np.ndarray, wanted: int) -> np.ndarray:
+    """`wanted` seams that share no pixel, cheapest first, as a mask of the
+    pixels to keep. Each is traced up from the bottom row, stepping around
+    pixels an earlier seam has taken; one that gets boxed in jumps to the
+    nearest free pixel in the row rather than being thrown away."""
+    height, width = cost.shape
+    rows = cost.tolist()
+    taken = [bytearray(width) for _ in range(height)]
+    for column in np.argsort(cost[-1], kind="stable")[:wanted].tolist():
+        taken[-1][column] = 1
+        for row in range(height - 2, -1, -1):
+            costs, used = rows[row], taken[row]
+            best, best_cost = -1, float("inf")
+            for candidate in (column, column - 1, column + 1):
+                if 0 <= candidate < width and not used[candidate] and costs[candidate] < best_cost:
+                    best, best_cost = candidate, costs[candidate]
+            reach = 2
+            while best < 0:
+                for candidate in (column - reach, column + reach):
+                    if 0 <= candidate < width and not used[candidate] and costs[candidate] < best_cost:
+                        best, best_cost = candidate, costs[candidate]
+                reach += 1
+            column = best
+            used[column] = 1
+    return np.frombuffer(b"".join(taken), dtype=np.uint8).reshape(height, width) == 0
+
+
+def _narrow(pixels: np.ndarray, target_width: int) -> np.ndarray:
+    """Carve columns out of `pixels` (height x width x 3, uint8) until it is
+    `target_width` wide. Returns which source column each remaining pixel is."""
+    height, width = pixels.shape[:2]
+    columns = np.tile(np.arange(width, dtype=np.int32), (height, 1))
+    while width > target_width:
+        wanted = min(width - target_width, max(1, int(width * SEAMS_PER_PASS)))
+        keep = _pick_seams(_path_costs(_energy(pixels)), wanted)
+        width = int(keep[0].sum())  # every seam crosses every row once, so each row loses the same number
+        pixels = pixels[keep].reshape(height, width, 3)
+        columns = columns[keep].reshape(height, width)
+    return columns
+
+
+def _read(pixels: np.ndarray, picks: np.ndarray) -> np.ndarray:
+    return np.take_along_axis(pixels, picks[:, :, None], axis=1)
+
+
+def plan(image: Image.Image, target_width: int, target_height: int) -> CarveMap:
+    """Work out how to carve the picture down to the target size."""
+    pixels = np.ascontiguousarray(np.asarray(image.convert("RGB")))
+    columns = _narrow(pixels, max(1, min(target_width, image.width)))
+    turned = np.ascontiguousarray(_read(pixels, columns).transpose(1, 0, 2))  # the height is carved as a width
+    rows = _narrow(turned, max(1, min(target_height, image.height)))
+    return CarveMap(image.size, columns, rows)
+
+
+def apply(image: Image.Image, carve: CarveMap) -> Image.Image:
+    """Carve a picture the way `plan` worked out. It is resized to the planned
+    picture's size first, so every frame of a GIF can go through the same plan."""
+    frame = image.convert("RGB")
+    if frame.size != carve.source_size:
+        frame = frame.resize(carve.source_size, Image.LANCZOS)
+    narrowed = _read(np.asarray(frame), carve.columns)
+    carved = _read(narrowed.transpose(1, 0, 2), carve.rows).transpose(1, 0, 2)
+    return Image.fromarray(np.ascontiguousarray(carved), "RGB")
