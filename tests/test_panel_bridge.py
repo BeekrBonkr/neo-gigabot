@@ -186,7 +186,7 @@ def _music_world(storage, *, dj_mode=False, blocked=()):
         return SimpleNamespace(
             id=uid, bot=False, display_name=f"m{uid}", roles=list(roles),
             voice=SimpleNamespace(channel=voice_channel) if voice_channel else None,
-            guild_permissions=SimpleNamespace(administrator=admin),
+            guild_permissions=SimpleNamespace(administrator=admin, manage_guild=admin),
         )
 
     members = {
@@ -484,6 +484,28 @@ def test_music_actions_do_what_the_commands_do(storage):
             assert (await _act(client, 1, "skip")).status == 200 and state.skip_requested and voice.stopped == 1
             assert (await _act(client, 1, "stop")).status == 200 and not state.queue
             assert (await _act(client, 1, "dance")).status == 400
+
+    asyncio.run(run())
+
+
+def test_autoplay_is_switched_from_the_web_by_those_who_manage_the_server(storage):
+    from utils.settings import get_guild_settings
+
+    make_client, _, _ = _music_world(storage)
+
+    async def run():
+        async with make_client() as client:
+            listener = await (await client.get("/v1/guilds/77/music?user_id=1", headers=AUTH)).json()
+            admin = await (await client.get("/v1/guilds/77/music?user_id=4", headers=AUTH)).json()
+            assert listener["can_autoplay"] is False and admin["can_autoplay"] is True and admin["session"]["autoplay"] is False
+            refused = await _act(client, 1, "autoplay", enabled="true")  # in the call, but it is a server setting
+            assert refused.status == 403 and "manage the server" in (await refused.json())["error"]
+            done = await (await _act(client, 4, "autoplay", enabled="true")).json()  # an admin need not be in the call
+            assert done["session"]["autoplay"] is True and done["detail"].startswith("Autoplay on")
+            assert get_guild_settings(storage, 77)["music_autoplay"] is True
+            done = await (await _act(client, 4, "autoplay", enabled="false")).json()
+            assert done["session"]["autoplay"] is False and get_guild_settings(storage, 77)["music_autoplay"] is False
+            assert (await _act(client, 999, "autoplay", enabled="true")).status == 403
 
     asyncio.run(run())
 

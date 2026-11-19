@@ -710,6 +710,21 @@ class PanelBridge(commands.Cog):
         refusal = self._command_refusal(guild, member, command)
         return not refusal, refusal
 
+    def _autoplay_access(self, guild: discord.Guild, user_id: int) -> tuple[bool, str]:
+        """Whether this user may switch autoplay from the website: the same
+        people /music autoplay answers to, those who can manage the server."""
+        member = guild.get_member(user_id)
+        if member is None:
+            return False, "You are not a member of this server."
+        if not self._web_enabled(guild, "web_player_enabled"):
+            return False, WEB_PLAYER_OFF
+        if not member.guild_permissions.manage_guild:
+            return False, "Only people who can manage the server can change autoplay."
+        # DJ mode gates playback, not settings, so only a disabled command stands in the way.
+        if blocking_entry("music autoplay", get_guild_settings(self.storage, guild.id).get("blocked_commands")) is not None:
+            return False, "/music autoplay is disabled in this server."
+        return True, ""
+
     def _web_enabled(self, guild: discord.Guild, key: str) -> bool:
         """A server's website switches: web_player_enabled, web_join_enabled,
         web_discovery_enabled. All default to on."""
@@ -849,6 +864,7 @@ class PanelBridge(commands.Cog):
         return {
             "session": self._music_session(guild),
             "can_control": can_control,
+            "can_autoplay": self._autoplay_access(guild, user_id)[0],
             "reason": reason,
             "join_channel": getattr(self._join_target(guild, user_id)[0], "name", None),
             "queue_limit": self._queue_limit(guild.id),
@@ -924,6 +940,14 @@ class PanelBridge(commands.Cog):
             raise BridgeError(503, "Music is not available right now.")
         if action == "join":  # the one action that doesn't need the bot in voice already
             return await self._music_join(guild, user_id, music)
+        if action == "autoplay":  # a server setting, not a playback control: who may change it is the command's own rule
+            allowed, reason = self._autoplay_access(guild, user_id)
+            if not allowed:
+                raise BridgeError(403, reason)
+            enabled = str(body.get("enabled", "")).lower() in ("true", "1", "on")
+            update_guild_settings(self.storage, guild.id, {"music_autoplay": enabled})
+            detail = "Autoplay on: similar tracks keep playing when the queue runs out" if enabled else "Autoplay off"
+            return web.json_response({"ok": True, "detail": detail, "session": self._music_session(guild)})
 
         voice_client = guild.voice_client
         command = {
