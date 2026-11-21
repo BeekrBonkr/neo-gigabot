@@ -63,3 +63,24 @@ def test_an_overlay_cannot_stretch_the_result_past_the_limit():
     with pytest.raises(ValueError, match="too large"):
         check_canvas(7000, 7000)
     check_canvas(6000, 5000)
+
+
+def test_the_line_for_image_work_is_short_and_says_so_when_full():
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    async def scenario():
+        toolkit = ImageToolkit(SimpleNamespace())
+        release = threading.Event()
+        jobs = [asyncio.ensure_future(toolkit.run_cpu_bound(release.wait)) for _ in range(imaging.MAX_CONCURRENT_CPU_BOUND + imaging.MAX_QUEUED_JOBS)]
+        await asyncio.sleep(0.05)
+        assert toolkit._cpu_waiting == imaging.MAX_QUEUED_JOBS
+        with pytest.raises(RuntimeError, match="busy with other pictures"):
+            await toolkit.run_cpu_bound(release.wait)
+        release.set()
+        assert all(await asyncio.gather(*jobs))
+        assert toolkit._cpu_waiting == 0
+        assert await toolkit.run_cpu_bound(lambda: 7) == 7
+
+    asyncio.run(scenario())
