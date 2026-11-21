@@ -830,3 +830,12 @@ def test_an_announcement_is_posted_with_its_sample_and_published(storage):
             assert len(sent) == 2
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("key, value", [
+    ("logging_channel_id", "9" * 100_000), ("verify_role_id", "²"), ("bot_channels", ["²"]), ("bot_channels", [int("9" * 4000)]),
+    ("warn_mute_duration", "1s" * 50_000), ("blocked_commands", ["x" * 20_000]),
+])
+def test_oversized_and_lookalike_values_are_refused_not_stored(key, value):
+    with pytest.raises(SettingsValidationError):
+        validate_settings({**DEFAULT_GUILD_SETTINGS, key: value}, DEFAULT_GUILD_SETTINGS)

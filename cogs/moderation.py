@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils.numbers import is_digits
 from utils.checks import may_manage_channel, server_permissions
 from utils.cases import add_case
 from utils.website import site_link
@@ -189,7 +190,7 @@ def parse_slowmode(value: str) -> int | None:
     text = (value or "").strip().lower()
     if text in ("off", "none", "0"):
         return 0
-    if text.isdigit():
+    if is_digits(text):
         seconds = int(text)
     else:
         delta = parse_duration(text)
@@ -602,7 +603,7 @@ class Moderation(commands.Cog):
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
     async def unban(self, interaction: discord.Interaction, user_id: str, reason: str | None = None) -> None:
-        if not user_id.isdigit():
+        if not is_digits(user_id):
             await self.bot.embeds.error_interaction(interaction, "Invalid ID", "That doesn't look like a valid user ID.", ephemeral=True)
             return
 

@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils.durations import parse_duration
 from utils.website import site_link
 from utils.settings import (
@@ -177,7 +178,7 @@ class WarnEscalationModal(discord.ui.Modal, title="Warning Escalation"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         threshold_text = self.threshold_input.value.strip()
-        if not threshold_text.isdigit():
+        if not is_digits(threshold_text):
             await interaction.response.send_message("Threshold must be a whole number (0 or more).", ephemeral=True)
             return
 
@@ -187,7 +188,7 @@ class WarnEscalationModal(discord.ui.Modal, title="Warning Escalation"):
             return
 
         window_text = self.window_input.value.strip()
-        if not window_text.isdigit():
+        if not is_digits(window_text):
             await interaction.response.send_message("The warning window must be a whole number of days (0 or more).", ephemeral=True)
             return
 
@@ -214,7 +215,7 @@ class StarboardThresholdModal(discord.ui.Modal, title="Starboard Threshold"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         text = self.threshold_input.value.strip()
-        if not text.isdigit() or int(text) < 1:
+        if not is_digits(text) or int(text) < 1:
             await interaction.response.send_message("The threshold must be a whole number of 1 or more.", ephemeral=True)
             return
 
@@ -864,7 +865,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 100):
+            if not is_digits(value) or not (0 <= int(value) <= 100):
                 return "Volume must be a whole number between 0 and 100."
             return None
 
@@ -926,7 +927,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 3600):
+            if not is_digits(value) or not (0 <= int(value) <= 3600):
                 return "Give a whole number of seconds between 0 and 3600 (0 keeps messages forever)."
             return None
 
@@ -972,7 +973,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 100):
+            if not is_digits(value) or not (0 <= int(value) <= 100):
                 return "Give a whole number between 0 and 100 (0 = the default cap of 100)."
             return None
 
@@ -993,7 +994,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 180):
+            if not is_digits(value) or not (0 <= int(value) <= 180):
                 return "Give a whole number of minutes between 0 and 180 (0 = the default cap of 3 hours)."
             return None
 
