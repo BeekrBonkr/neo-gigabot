@@ -138,7 +138,7 @@ COMMAND_MODULE_FLAGS: dict[str, str] = {"snipe": "snipe_enabled"}
 # it on (update_guild_settings).
 MODULE_TRIGGERS: dict[str, tuple[str, ...]] = {
     "welcome_enabled": ("welcome_channel_ids", "welcome_dm_message"),
-    "leave_enabled": ("leave_channel_ids",),
+    "leave_enabled": ("leave_channel_ids", "leave_message"),
     "member_roles_enabled": ("autoroles", "sticky_roles"),
     "automod_enabled": ("automod_invites_action", "automod_words_action", "automod_mentions_action", "automod_spam_action"),
     "raid_protection_enabled": ("antiraid_enabled", "antiraid_min_account_age_days"),

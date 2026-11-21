@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.checks import server_permissions
 from utils.website import site_link
 from utils.discord_links import fetch_message_from_link
 from utils.settings import parse_hex_color
@@ -171,7 +172,7 @@ class ReactionRoles(
 
     async def _resolve_target_message(self, interaction: discord.Interaction, message_link: str) -> discord.Message | None:
         try:
-            message = await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild)
+            message = await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild, viewer=interaction.user)
         except ValueError as exc:
             await self.bot.embeds.error_interaction(interaction, "Invalid Message Link", str(exc), ephemeral=True)
             return None
@@ -227,7 +228,7 @@ class ReactionRoles(
         description="Embed description",
         color="Optional hex color, e.g. #5865F2",
     )
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True, add_reactions=True)
     @app_commands.guild_only()
     async def create(
@@ -268,7 +269,7 @@ class ReactionRoles(
 
     @app_commands.command(name="add", description="Map an emoji reaction on a message to a role.")
     @app_commands.describe(message_link="Link to the message", emoji="The emoji to react with", role="Role to grant")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True, add_reactions=True)
     @app_commands.guild_only()
     async def add(self, interaction: discord.Interaction, message_link: str, emoji: str, role: discord.Role) -> None:
@@ -282,7 +283,7 @@ class ReactionRoles(
 
     @app_commands.command(name="batch", description="Add multiple emoji->role mappings to one message at once.")
     @app_commands.describe(message_link="Link to the message", pairs="e.g. 👍=@Role1, 🎮=@Role2 (max 10, comma-separated)")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True, add_reactions=True)
     @app_commands.guild_only()
     async def batch(self, interaction: discord.Interaction, message_link: str, pairs: str) -> None:
@@ -315,7 +316,7 @@ class ReactionRoles(
 
     @app_commands.command(name="remove", description="Remove one emoji->role mapping from a message.")
     @app_commands.describe(message_link="Link to the message", emoji="The emoji to unmap")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def remove(self, interaction: discord.Interaction, message_link: str, emoji: str) -> None:
@@ -339,7 +340,7 @@ class ReactionRoles(
 
     @app_commands.command(name="clear", description="Remove every reaction-role mapping from a message.")
     @app_commands.describe(message_link="Link to the message")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def clear(self, interaction: discord.Interaction, message_link: str) -> None:
@@ -363,7 +364,7 @@ class ReactionRoles(
 
     @app_commands.command(name="list", description="List reaction-role mappings for this server, or one message.")
     @app_commands.describe(message_link="Optional: limit to one message")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def list_mappings(self, interaction: discord.Interaction, message_link: str | None = None) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)

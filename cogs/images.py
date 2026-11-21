@@ -14,8 +14,11 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequence
 
-from utils import image_faces, richtext
-from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS
+from utils import image_carve, image_faces, richtext
+from utils.imaging import (
+    CPU_BOUND_TIMEOUT_SECONDS, MAX_GIF_FRAMES, MIN_GIF_FRAME_MS, current_video_source, encode_frames, frames_to_video, gif_durations,
+    load_frames, thin_frames,
+)
 
 LINE_SPACING = 6
 
@@ -41,19 +44,14 @@ FACE_BLOB_MEAN = (104.0, 177.0, 123.0)
 # through an executor with a timeout and a bot-wide concurrency cap (see
 # ImageToolkit.run_cpu_bound in utils/imaging.py).
 
-# /contentaware: seam carving is O(seams_removed x width x height) even with a
-# vectorized per-row DP loop, and this command now carves both axes (width, then
-# height via transpose) to get a deliberately stupid-looking squish. Benchmarked
-# locally: a 450x450 image losing 90% of its width and then 90% of its height
-# (the most extreme case this command allows) takes ~11s. Capping the working
-# resolution and the minimum target percent keeps the worst case well inside
-# CPU_BOUND_TIMEOUT_SECONDS with room to spare on a slower host.
+# /contentaware carves both axes (see utils/image_carve.py). The work grows with
+# the picture's area times the seams taken out, so the picture is shrunk to this
+# size first; the most extreme case the command allows (90% off each axis of a
+# 450x450 picture) takes about a second.
 #
-# GIF frames replay the exact seams removed from the first frame instead of
-# re-running the DP per frame - the DP is the expensive part, and every frame of
-# a short meme GIF looks close enough to the first that reusing its seams is
-# indistinguishable in practice while keeping cost roughly constant regardless
-# of frame count.
+# A GIF is carved the way its first frame was rather than frame by frame: the
+# frames of a short meme GIF are close enough that it looks the same, and the
+# cost stays about constant however many frames there are.
 CONTENTAWARE_MAX_DIMENSION = 450
 CONTENTAWARE_MIN_PERCENT = 10
 CONTENTAWARE_MAX_PERCENT = 95
@@ -245,10 +243,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
 
             output = io.BytesIO()
             if is_gif:
-                processed[0].save(
-                    output, format="GIF", append_images=processed[1:], **self.bot.image_tools.gif_save_kwargs(image)
-                )
-                return output.getvalue(), gif_name
+                return self.bot.image_tools.encode_gif(processed, image), gif_name
             processed[0].save(output, format="PNG")
             return output.getvalue(), static_name
 
@@ -299,89 +294,6 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 draw.ellipse((px - pupil_radius, py - pupil_radius, px + pupil_radius, py + pupil_radius), fill=(0, 0, 0, 255))
         return result
 
-    # ---------- content-aware scale (seam carving) ----------
-
-    def _remove_seams(self, arr: np.ndarray, seams_to_remove: int) -> tuple[np.ndarray, list[np.ndarray]]:
-        """Vertical seam removal (shrinks the array's width by one column per seam).
-        Returns the reduced array plus the list of seams removed, in removal order,
-        so the identical cuts can be replayed on other frames of a GIF without
-        re-running the DP per frame (see CONTENTAWARE_MAX_DIMENSION comment)."""
-        seams: list[np.ndarray] = []
-        for _ in range(seams_to_remove):
-            gray = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float64)
-            energy = (
-                np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))
-                + np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))
-            )
-            height, width = energy.shape
-            cost = energy.copy()
-            backtrack = np.zeros((height, width), dtype=np.int64)
-
-            for row in range(1, height):
-                prev = cost[row - 1]
-                left = np.roll(prev, 1)
-                left[0] = np.inf
-                right = np.roll(prev, -1)
-                right[-1] = np.inf
-                choices = np.vstack([left, prev, right])
-                best = np.argmin(choices, axis=0)
-                backtrack[row] = best - 1
-                cost[row] = energy[row] + choices[best, np.arange(width)]
-
-            seam = np.zeros(height, dtype=np.int64)
-            seam[-1] = int(np.argmin(cost[-1]))
-            for row in range(height - 2, -1, -1):
-                next_col = seam[row + 1]
-                seam[row] = int(np.clip(next_col + backtrack[row + 1, next_col], 0, width - 1))
-
-            seams.append(seam)
-            mask = np.ones((height, width), dtype=bool)
-            mask[np.arange(height), seam] = False
-            arr = arr[mask].reshape(height, width - 1, 3)
-
-        return arr, seams
-
-    def _apply_seams(self, arr: np.ndarray, seams: list[np.ndarray]) -> np.ndarray:
-        """Replay a previously-recorded list of seam removals on a same-sized array."""
-        for seam in seams:
-            height, width = arr.shape[:2]
-            mask = np.ones((height, width), dtype=bool)
-            mask[np.arange(height), seam] = False
-            arr = arr[mask].reshape(height, width - 1, 3)
-        return arr
-
-    def _seam_carve_both_axes(
-        self, image: Image.Image, target_width: int, target_height: int
-    ) -> tuple[Image.Image, list[np.ndarray], list[np.ndarray]]:
-        """Squish both width and height via seam carving (height by transposing,
-        carving, then transposing back). Returns the carved image plus the seams
-        removed on each axis, so GIF frames can replay the same cuts."""
-        arr = np.array(image.convert("RGB")).astype(np.float64)
-        arr, width_seams = self._remove_seams(arr, max(0, arr.shape[1] - target_width))
-
-        arr = arr.transpose(1, 0, 2)
-        arr, height_seams = self._remove_seams(arr, max(0, arr.shape[1] - target_height))
-        arr = arr.transpose(1, 0, 2)
-
-        return Image.fromarray(arr.astype(np.uint8), mode="RGB"), width_seams, height_seams
-
-    def _apply_seams_both_axes(
-        self,
-        image: Image.Image,
-        working_size: tuple[int, int],
-        width_seams: list[np.ndarray],
-        height_seams: list[np.ndarray],
-    ) -> Image.Image:
-        frame = image.convert("RGB").resize(working_size, Image.LANCZOS)
-        arr = np.array(frame).astype(np.float64)
-        arr = self._apply_seams(arr, width_seams)
-
-        arr = arr.transpose(1, 0, 2)
-        arr = self._apply_seams(arr, height_seams)
-        arr = arr.transpose(1, 0, 2)
-
-        return Image.fromarray(arr.astype(np.uint8), mode="RGB")
-
     # ---------- image context menu commands ----------
 
     async def set_image_source_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
@@ -397,7 +309,8 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             )
             return
 
-        self.bot.image_tools.sources.remember(interaction.user.id, message.channel.id, message.id)
+        url, filename = self.bot.image_tools.message_image_link(message) or (None, None)
+        self.bot.image_tools.sources.remember(interaction.user.id, message.channel.id, message.id, url=url, filename=filename)
         await self.bot.image_tools.send_success(
             interaction,
             "Image Source Set",
@@ -558,18 +471,21 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         speed: int,
         frame_count: int = 10,
     ) -> tuple[bytes, str]:
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            base = next(ImageSequence.Iterator(image)).convert("RGBA") if self.bot.image_tools.is_gif(image, filename) else image.convert("RGBA")
-            frames: list[Image.Image] = []
-            for _ in range(frame_count):
-                x_shift = random.randint(-10, 10)
-                y_shift = random.randint(-10, 10)
-                shifted = Image.new("RGBA", base.size, (0, 0, 0, 0))
-                shifted.paste(base, (x_shift, y_shift), base)
-                frames.append(shifted)
-            output = io.BytesIO()
-            frames[0].save(output, format="GIF", append_images=frames[1:], save_all=True, duration=max(10, speed), loop=0, disposal=2)
-            return output.getvalue(), "shaky.gif"
+        # A still is shaken for `frame_count` frames of `speed` ms. A GIF or a
+        # video keeps playing, at its own pace, with every frame knocked about.
+        loaded = load_frames(image_bytes, filename)
+        if loaded.animated:
+            bases, durations = loaded.frames, loaded.durations
+        else:
+            bases, durations = loaded.frames * frame_count, [max(MIN_GIF_FRAME_MS, speed)] * frame_count
+        frames: list[Image.Image] = []
+        for base in bases:
+            x_shift = random.randint(-10, 10)
+            y_shift = random.randint(-10, 10)
+            shifted = Image.new("RGBA", base.size, (0, 0, 0, 0))
+            shifted.paste(base, (x_shift, y_shift), base)
+            frames.append(shifted)
+        return encode_frames(frames, durations, "shaky", loop=loaded.loop)
 
     def _convert_bytes(
         self,
@@ -577,25 +493,32 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         target_format: str,
     ) -> tuple[bytes, str]:
         target_format = target_format.lower()
-        allowed_types = {"jpg", "jpeg", "png", "bmp", "gif", "webp"}
+        allowed_types = {"jpg", "jpeg", "png", "bmp", "gif", "webp", "mp4"}
         if target_format not in allowed_types:
             raise ValueError(f"Invalid format. Allowed formats: {', '.join(sorted(allowed_types))}")
 
+        # GIF and WebP can hold an animation, so a GIF or a video stays one in
+        # them. The other formats are stills: they get the first frame.
+        if target_format == "mp4":
+            loaded = load_frames(image_bytes)
+            if not loaded.animated:
+                raise ValueError("Only a GIF or a video can be made into an MP4.")
+            return frames_to_video(loaded.frames, loaded.durations, sound_from=current_video_source()), "converted.mp4"
+        if target_format in {"gif", "webp"}:
+            loaded = load_frames(image_bytes)
+            if loaded.animated or target_format == "gif":
+                output = io.BytesIO()
+                frames = loaded.frames
+                if target_format == "webp":
+                    frames[0].save(output, format="WEBP", save_all=True, append_images=frames[1:], duration=loaded.durations, loop=loaded.loop)
+                else:
+                    frames, times = thin_frames(frames, loaded.durations, MAX_GIF_FRAMES)  # a video's frames are more than a GIF should hold
+                    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loaded.loop,
+                                   duration=gif_durations(times), disposal=2)
+                return output.getvalue(), f"converted.{target_format}"
+
         with Image.open(io.BytesIO(image_bytes)) as image:
             output = io.BytesIO()
-            if target_format == "gif":
-                frames = [frame.convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)] if getattr(image, "is_animated", False) else [image.convert("RGBA")]
-                frames[0].save(
-                    output,
-                    format="GIF",
-                    append_images=frames[1:],
-                    save_all=True,
-                    loop=image.info.get("loop", 0),
-                    duration=image.info.get("duration", 100),
-                    disposal=2,
-                )
-                return output.getvalue(), "converted.gif"
-
             converted = image.convert("RGB") if target_format in {"jpg", "jpeg", "bmp"} else image.convert("RGBA")
             converted.save(output, format="JPEG" if target_format in {"jpg", "jpeg"} else target_format.upper())
             ext = "jpg" if target_format == "jpeg" else target_format
@@ -606,8 +529,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             output = io.BytesIO()
             if self.bot.image_tools.is_gif(image, filename):
                 frames = [frame.copy().convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)]
-                frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                return output.getvalue(), "extracted.gif"
+                return self.bot.image_tools.encode_gif(frames, image), "extracted.gif"
 
             image.save(output, format=image.format or "PNG")
             ext = (image.format or "PNG").lower()
@@ -621,7 +543,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             raise FileNotFoundError(f"Missing asset: {filename}. Put the legacy overlay PNGs in `assets/images/`.")
         return path
 
-    async def _build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
+    async def build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
         raw = (message.content or "").strip()
         if not raw:
             raise ValueError("That message does not have any text to quote.")
@@ -714,18 +636,26 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 "Face & Compositing",
                 "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/joy/clown/forehead/contentaware`",
             ),
-            self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
-            self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
+            self.bot.embeds.field(
+                "Source Priority",
+                "Attachment → message link → selected source → latest image in channel. "
+                "Or right-click a message, then Apps → Edit Image, to pick an effect for its image.",
+            ),
+            self.bot.embeds.field(
+                "Quote",
+                "`/image text quote <message_link>` only uses a Discord message link. "
+                "Or right-click the message, then Apps → Quote Message.",
+            ),
             self.bot.embeds.field("Other", "`/image effects deepfry` `/image misc pfp` `/image misc clearimagesource`"),
             self.bot.embeds.field("Color Filters", "`/filter invert/grayscale/sepia/hue/adjust/posterize/edges/emboss/vaporwave`"),
             self.bot.embeds.field(
                 "Animations & GIF Tools",
-                "`/animate spin/rainbow/wave/zoom/pet/bonk/triggered` • `/animate speed/reverse/frames/togif`",
+                "`/animate spin/rainbow/wave/zoom/pet/bonk/boom/triggered` • `/animate speed/reverse/frames/togif/datamosh/bitcrush`",
             ),
             self.bot.embeds.field("More Meme Formats", "`/memegen speechbubble/wanted/drake/changemymind/jail/wasted`"),
             self.bot.embeds.field(
                 "Meme Templates",
-                "`/memegen respects/whodidthis/wheeze/keepitem/achievement/rip/rtx/news"
+                "`/memegen respects/whodidthis/beautiful/wheeze/keepitem/achievement/rip/rtx/news"
                 "/presidential/notification/einstein/sonic/watchmojo/watermark/kirby/excuse"
                 "/perfection/scene`"
             ),
@@ -743,7 +673,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         await self.bot.image_tools.defer(interaction)
         try:
             message = await self.bot.image_tools.fetch_message_from_link(interaction, message_link)
-            data, filename = await self._build_quote_image(message)
+            data, filename = await self.build_quote_image(message)
             await self.bot.image_tools.send_processed_file(
                 interaction,
                 data=data,
@@ -999,7 +929,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
 
     @effects.command(name="convert", description="Convert an image into another format.")
     @app_commands.describe(
-        format="Target format: png, jpg, jpeg, bmp, gif, or webp.",
+        format="Target format: png, jpg, jpeg, bmp, gif, webp, or mp4. A video made into a GIF loses its sound.",
         attachment="Optional image attachment.",
         message_link="Optional Discord message link containing the image.",
     )
@@ -1190,9 +1120,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                     self._caption_frame(frame, arranged, box_height, margin_x, position=position)
                     for frame in self.bot.image_tools.gif_frames(image)
                 ]
-                output = io.BytesIO()
-                frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                return output.getvalue(), "caption.gif"
+                return self.bot.image_tools.encode_gif(frames, image), "caption.gif"
 
             output = io.BytesIO()
             rendered = self._caption_frame(first_frame, arranged, box_height, margin_x, position=position)
@@ -1309,11 +1237,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 return output.getvalue(), "motivate.png"
 
             frames = [render(frame) for frame in self.bot.image_tools.gif_frames(image)]
-            output = io.BytesIO()
-            frames[0].save(
-                output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image)
-            )
-            return output.getvalue(), "motivate.gif"
+            return self.bot.image_tools.encode_gif(frames, image), "motivate.gif"
 
     @text.command(
         name="motivate",
@@ -2096,44 +2020,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             image_bytes, filename = await self.bot.image_tools.get_source_image(interaction, attachment, message_link)
 
             def work() -> tuple[bytes, str]:
-                with Image.open(io.BytesIO(image_bytes)) as image:
-                    is_gif = self.bot.image_tools.is_gif(image, filename)
-                    first_frame = (
-                        next(ImageSequence.Iterator(image)).convert("RGB") if is_gif else image.convert("RGB")
-                    )
-
-                    longest_edge = max(first_frame.width, first_frame.height)
-                    if longest_edge > CONTENTAWARE_MAX_DIMENSION:
-                        scale = CONTENTAWARE_MAX_DIMENSION / longest_edge
-                        working_size = (
-                            max(1, int(first_frame.width * scale)),
-                            max(1, int(first_frame.height * scale)),
-                        )
-                    else:
-                        working_size = first_frame.size
-
-                    source = (
-                        first_frame.resize(working_size, Image.LANCZOS)
-                        if working_size != first_frame.size
-                        else first_frame
-                    )
-                    target_width = max(2, int(working_size[0] * width_percent / 100))
-                    target_height = max(2, int(working_size[1] * height_percent / 100))
-                    carved, width_seams, height_seams = self._seam_carve_both_axes(source, target_width, target_height)
-
-                    if not is_gif:
-                        output = io.BytesIO()
-                        carved.save(output, format="PNG")
-                        return output.getvalue(), "contentaware.png"
-
-                    frames = [carved.convert("RGBA")]
-                    for frame in list(self.bot.image_tools.gif_frames(image))[1:]:
-                        carved_frame = self._apply_seams_both_axes(frame, working_size, width_seams, height_seams)
-                        frames.append(carved_frame.convert("RGBA"))
-
-                    output = io.BytesIO()
-                    frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                    return output.getvalue(), "contentaware.gif"
+                return image_carve.carve_bytes(image_bytes, filename, width_percent, height_percent, CONTENTAWARE_MAX_DIMENSION)
 
             data, out_name = await self._run_cpu_bound(work, timeout=CPU_BOUND_TIMEOUT_SECONDS)
             await self.bot.image_tools.send_processed_file(

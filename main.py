@@ -11,11 +11,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import user_app
 from utils.command_log import record_command
 from utils.config import load_config
 from utils.embeds import EmbedManager
 from utils.imaging import ImageToolkit
 from utils.modules import disabled_module_for
+from utils.samples import SampleStore
 from utils.settings import blocking_entry, get_guild_settings, migrate_blocked_command_names
 from utils.storage import ensure_storage_layout
 from utils.website import site_link
@@ -29,6 +31,7 @@ COGS = [
     "cogs.image_animate",
     "cogs.image_memes",
     "cogs.image_edit",
+    "cogs.image_menu",
     "cogs.logging",
     "cogs.moderation",
     "cogs.cases",
@@ -47,9 +50,37 @@ COGS = [
     "cogs.reactionroles",
     "cogs.rolemenus",
     "cogs.starboard",
+    "cogs.garden",
     "cogs.owner",
     "cogs.panel_bridge",
 ]
+
+
+# Discord's own names for permissions, where they differ from the code name.
+PERMISSION_NAMES = {
+    "moderate_members": "Timeout Members", "manage_guild": "Manage Server", "manage_roles": "Manage Roles",
+    "manage_channels": "Manage Channels", "manage_emojis_and_stickers": "Manage Expressions", "manage_expressions": "Manage Expressions",
+    "view_audit_log": "View Audit Log", "read_message_history": "Read Message History", "external_emojis": "Use External Emojis",
+    "use_external_emojis": "Use External Emojis", "manage_nicknames": "Manage Nicknames", "mention_everyone": "Mention @everyone",
+}
+
+
+def permission_names(names: list[str]) -> str:
+    """Permissions as Discord's settings show them: "**Kick Members** and **Timeout Members**"."""
+    shown = [f"**{PERMISSION_NAMES.get(name, name.replace('_', ' ').title())}**" for name in names]
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+def invalid_value_message(error: app_commands.TransformerError) -> str:
+    """Which value was wrong, and what was expected there."""
+    kind = getattr(getattr(error, "type", None), "name", "") or ""
+    expected = {"user": "a member of this server", "channel": "a channel I can see", "role": "a role", "integer": "a whole number", "number": "a number"}.get(kind)
+    value = str(getattr(error, "value", "") or "")[:80]
+    if expected and kind == "user":
+        return "That person is not in this server, and this command needs a member."
+    if expected:
+        return f"`{value}` is not {expected}." if value else f"One value should have been {expected}."
+    return "One of the values you entered was invalid."
 
 
 class GigaBot(commands.Bot):
@@ -68,6 +99,9 @@ class GigaBot(commands.Bot):
         super().__init__(
             command_prefix=commands.when_mentioned,
             intents=intents,
+            # A message that does not say otherwise can ping the people it names and nobody else:
+            # never @everyone, @here or a role. The few places meant to (scheduled messages) say so.
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
             help_command=None,
             case_insensitive=True,
         )
@@ -77,6 +111,7 @@ class GigaBot(commands.Bot):
         self.logger = logging.getLogger(__name__)
         self.embeds = EmbedManager(self)
         self.image_tools = ImageToolkit(self)
+        self.samples = SampleStore(self)
         self.start_time = discord.utils.utcnow()
         self.tree.on_error = self.on_app_command_error
         self.tree.interaction_check = self.on_tree_interaction_check
@@ -121,6 +156,7 @@ class GigaBot(commands.Bot):
         """Sync the command tree if its fingerprint differs from the last
         synced one (or always, with force=True). Returns the number of synced
         commands, or None when the sync was skipped."""
+        user_app.mark_tree(self.tree)  # here, so commands from a reloaded cog are opened again too
         fingerprint = self.tree_fingerprint()
         path = self._fingerprint_path()
         stored = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
@@ -139,26 +175,47 @@ class GigaBot(commands.Bot):
         is exempt so a server can never lock itself out of unblocking."""
         if interaction.type is not discord.InteractionType.application_command:
             return True
-        if interaction.guild is None:
-            return True
 
         command = interaction.command
-        if command is None or command.qualified_name == "settings":
+        if command is None:
+            return True
+        if not await user_app.gate(self, interaction, command):
+            return False
+        if command.qualified_name == "settings":
+            return True
+        # A menu's name is not a path of groups: "Edit Image" must not be
+        # switched off by a block on the /edit group, so only its own name counts.
+        return await self.command_gate(interaction, command.qualified_name, exact=isinstance(command, app_commands.ContextMenu))
+
+    async def command_gate(self, interaction: discord.Interaction, qualified_name: str, *, exact: bool = False) -> bool:
+        """Whether this server lets `qualified_name` run: not on its blocked
+        list and not part of a module that is turned off. Sends the refusal
+        itself. With `exact`, a block on a group of the same first word does
+        not count. Also used for commands started some other way than by
+        typing them, such as from the Edit Image menu. A server that has not
+        added the bot has no say."""
+        guild = user_app.home_guild(interaction)
+        if guild is None:
             return True
 
-        settings = get_guild_settings(self.storage_path, interaction.guild.id)
-        if blocking_entry(command.qualified_name, settings.get("blocked_commands")) is not None:
+        settings = get_guild_settings(self.storage_path, guild.id)
+        blocked = settings.get("blocked_commands")
+        if exact:
+            is_blocked = qualified_name.lower() in {str(name).lower() for name in (blocked or [])}
+        else:
+            is_blocked = blocking_entry(qualified_name, blocked) is not None
+        if is_blocked:
             await self.embeds.error_interaction(
                 interaction,
                 "Command Disabled",
-                f"`/{command.qualified_name}` is disabled in this server.",
+                f"`/{qualified_name}` is disabled in this server.",
                 ephemeral=True,
             )
             return False
 
-        module = disabled_module_for(command.qualified_name, settings)
+        module = disabled_module_for(qualified_name, settings)
         if module is not None:
-            where = site_link(self, "the website", f"/app/{interaction.guild.id}/settings")
+            where = site_link(self, "the website", f"/app/{guild.id}/settings")
             await self.embeds.error_interaction(
                 interaction,
                 "Turned Off",
@@ -174,10 +231,11 @@ class GigaBot(commands.Bot):
         """Shared per-guild gate for opt-in-restricted commands: the blocked-command
         list and the bot-channel allowlist, in one settings read. Sends the
         rejection message itself and returns False if the command shouldn't run."""
-        if interaction.guild is None or interaction.channel is None:
+        guild = user_app.home_guild(interaction)
+        if guild is None or interaction.channel is None:
             return True
 
-        settings = get_guild_settings(self.storage_path, interaction.guild.id)
+        settings = get_guild_settings(self.storage_path, guild.id)
 
         # Blocks are stored by qualified name; the caller-supplied name is the
         # leaf ("jpegify"), so prefer the interaction's own command identity.
@@ -246,9 +304,27 @@ class GigaBot(commands.Bot):
             await self.embeds.error_interaction(
                 interaction,
                 "Missing Permissions",
-                f"You are missing: `{missing}`.",
+                f"You need the {permission_names(error.missing_permissions)} permission to use this command.",
                 ephemeral=True,
             )
+            return
+
+        if isinstance(error, app_commands.BotMissingPermissions):
+            # a CheckFailure, but not the person's doing: say that it is the bot that needs something
+            missing = ", ".join(error.missing_permissions)
+            await record_command(self.storage_path, interaction, command, status="BOT_MISSING_PERMISSIONS", error=missing)
+            await self.embeds.error_interaction(
+                interaction,
+                "I Need More Permissions",
+                f"I am missing the {permission_names(error.missing_permissions)} permission here. "
+                "Give it to my role in Server Settings > Roles (or check this channel's permissions), then try again.",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(error, app_commands.NoPrivateMessage):
+            await record_command(self.storage_path, interaction, command, status="CHECK_FAILED", error="guild only")
+            await self.embeds.error_interaction(interaction, "Server Only", "This command only works in a server.", ephemeral=True)
             return
 
         if isinstance(error, app_commands.TransformerError):
@@ -256,7 +332,7 @@ class GigaBot(commands.Bot):
             await self.embeds.error_interaction(
                 interaction,
                 "Invalid Value",
-                "One of the values you entered was invalid.",
+                invalid_value_message(error),
                 ephemeral=True,
             )
             return

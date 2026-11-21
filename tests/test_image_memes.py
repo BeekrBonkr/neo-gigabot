@@ -76,6 +76,16 @@ def test_who_did_this_fills_the_gap_between_the_title_and_the_faces():
     assert scene.getpixel((360, 20)) == mm._template("whodidthis.png").getpixel((360, 20))
 
 
+def test_beautiful_hangs_the_picture_in_both_panels_behind_the_hand():
+    scene, plain = mm.beautiful(picture()), mm._template("beautiful.png")
+    assert scene.size == plain.size == (488, 556) and scene.getextrema()[3] == (255, 255)  # no hole is left open
+    for left, top, right, bottom in mm.BEAUTIFUL_FRAMES:
+        middle = (top + bottom) // 2
+        assert scene.getpixel((left + 20, middle))[:3] == (40, 60, 200) and scene.getpixel((right - 20, middle))[:3] == (200, 60, 40)
+    assert scene.getpixel((330, 440)) == plain.getpixel((330, 440))  # his pointing hand stays in front
+    assert scene.getpixel((100, 100)) == plain.getpixel((100, 100))
+
+
 def test_wheeze_swaps_the_bubble_words_for_the_picture():
     scene = mm.wheeze(picture())
     left, top, right, bottom = mm.WHEEZE_PICTURE

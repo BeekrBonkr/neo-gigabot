@@ -8,6 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils.numbers import is_digits
+from utils.checks import may_manage_channel, server_permissions
 from utils.cases import add_case
 from utils.website import site_link
 from utils.durations import parse_duration
@@ -32,6 +34,9 @@ MAX_TIMEOUT = timedelta(days=28)
 MASS_ACTION_DELAY_SECONDS = 0.5
 MASS_ACTION_PROGRESS_INTERVAL = 10
 MAX_MASS_ACTION_TARGETS = 300
+# A reason goes into an embed and into Discord's audit log, which keeps 512 characters
+# including the moderator's name in front of it.
+MAX_REASON_LENGTH = 400
 
 PRUNE_MODE_CHOICES = [
     app_commands.Choice(name="default", value="default"),
@@ -188,7 +193,7 @@ def parse_slowmode(value: str) -> int | None:
     text = (value or "").strip().lower()
     if text in ("off", "none", "0"):
         return 0
-    if text.isdigit():
+    if is_digits(text):
         seconds = int(text)
     else:
         delta = parse_duration(text)
@@ -218,36 +223,49 @@ class Moderation(commands.Cog):
 
     @tasks.loop(seconds=60)
     async def _process_due_tempbans(self) -> None:
-        for entry in due_tempbans(self.bot.storage_path):
-            guild = self.bot.get_guild(entry["guild_id"])
-            if guild is None:
-                # Bot is no longer in that guild - the schedule can't be honored.
-                remove_tempban(self.bot.storage_path, entry["guild_id"], entry["user_id"])
-                continue
-
+        # tasks.loop stops for good on any error that is not a dropped connection, and bans that
+        # should have ended would then quietly last forever: nothing may escape a pass.
+        try:
+            due = due_tempbans(self.bot.storage_path)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Could not read the tempbans that are due; trying again in a minute")
+            return
+        for entry in due:
             try:
-                await guild.unban(
-                    discord.Object(id=entry["user_id"]),
-                    reason=f"Tempban expired (banned by moderator {entry['moderator_id']})",
-                )
-            except discord.NotFound:
-                pass  # already unbanned manually - nothing left to do
-            except discord.Forbidden:
-                # Retrying every minute won't grant us the permission; drop the
-                # row and leave a trail instead of spinning forever.
-                LOGGER.warning("Cannot unban user %s in guild %s (missing permissions)", entry["user_id"], guild.id)
-            except discord.HTTPException as exc:
-                LOGGER.warning("Transient error unbanning user %s in guild %s: %s", entry["user_id"], guild.id, exc)
-                continue  # keep the row; retry next tick
+                await self._expire_tempban(entry)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Ending the tempban of user %s in guild %s failed", entry.get("user_id"), entry.get("guild_id"))
 
+    async def _expire_tempban(self, entry: dict) -> None:
+        guild = self.bot.get_guild(entry["guild_id"])
+        if guild is None:
+            # Bot is no longer in that guild - the schedule can't be honored.
             remove_tempban(self.bot.storage_path, entry["guild_id"], entry["user_id"])
+            return
 
-            target = await self._fetch_user_quiet(entry["user_id"])
-            if target is not None:
-                await self._log_mod_action(
-                    guild, event="ban", title="🔓 Tempban Expired", color=self.bot.embeds.success_color,
-                    target=target, moderator=self.bot.user, reason=entry["reason"] or None,
-                )
+        try:
+            await guild.unban(
+                discord.Object(id=entry["user_id"]),
+                reason=f"Tempban expired (banned by moderator {entry['moderator_id']})",
+            )
+        except discord.NotFound:
+            pass  # already unbanned manually - nothing left to do
+        except discord.Forbidden:
+            # Retrying every minute won't grant us the permission; drop the
+            # row and leave a trail instead of spinning forever.
+            LOGGER.warning("Cannot unban user %s in guild %s (missing permissions)", entry["user_id"], guild.id)
+        except discord.HTTPException as exc:
+            LOGGER.warning("Transient error unbanning user %s in guild %s: %s", entry["user_id"], guild.id, exc)
+            return  # keep the row; retry next tick
+
+        remove_tempban(self.bot.storage_path, entry["guild_id"], entry["user_id"])
+
+        target = await self._fetch_user_quiet(entry["user_id"])
+        if target is not None:
+            await self._log_mod_action(
+                guild, event="ban", title="🔓 Tempban Expired", color=self.bot.embeds.success_color,
+                target=target, moderator=self.bot.user, reason=entry["reason"] or None,
+            )
 
     @_process_due_tempbans.before_loop
     async def _before_tempban_loop(self) -> None:
@@ -262,9 +280,26 @@ class Moderation(commands.Cog):
         *bot's* top role."""
         if interaction.guild.owner_id == interaction.user.id:
             return True
-        if not isinstance(interaction.user, discord.Member):
-            return False
-        return interaction.user.top_role > target.top_role
+        if target.id == interaction.guild.owner_id:
+            return False  # nobody outranks the owner, whatever roles the owner does or does not hold
+        own_top = getattr(interaction.user, "top_role", None)  # a plain User (no roles) outranks nobody
+        return own_top is not None and own_top > target.top_role
+
+    def _role_problem(self, interaction: discord.Interaction, role: discord.Role, *, automatic: bool = False) -> str | None:
+        """Why the invoker may not have the bot hand out (or take away) `role`,
+        or None when they may. Discord never lets someone with Manage Roles
+        touch a role at or above their own; the bot must not do it for them.
+        `automatic` is for roles given without anyone choosing each time
+        (autoroles): those may not carry moderation permissions at all."""
+        if role.is_default() or role.managed:
+            return "That role can't be given or removed by a bot."
+        if role >= interaction.guild.me.top_role:
+            return "That role is above (or equal to) my highest role."
+        if interaction.guild.owner_id != interaction.user.id and role >= interaction.user.top_role:
+            return "That role is above (or equal to) your highest role."
+        if automatic and self._role_is_elevated(role):
+            return "That role carries moderation permissions, so it can't be given out automatically."
+        return None
 
     def _appeal_note(self, guild: discord.Guild) -> str:
         """A line for ban DMs pointing at the appeal form, when this server
@@ -408,7 +443,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="say", description="Send an embed containing your message.")
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.guild_only()
-    async def say(self, interaction: discord.Interaction, message: str) -> None:
+    async def say(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 4000]) -> None:
         embed = self.bot.embeds.create(
             title="Message",
             description=message,
@@ -422,7 +457,7 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(kick_members=True)
     @app_commands.checks.bot_has_permissions(kick_members=True)
     @app_commands.guild_only()
-    async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+    async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         if user.id == interaction.user.id:
             await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't kick yourself.", ephemeral=True)
             return
@@ -468,7 +503,7 @@ class Moderation(commands.Cog):
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        reason: str | None = None,
+        reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None,
         delete_message_days: app_commands.Range[int, 0, 7] = 0,
     ) -> None:
         if user.id == interaction.user.id:
@@ -524,7 +559,7 @@ class Moderation(commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member,
         duration: str,
-        reason: str | None = None,
+        reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None,
         delete_message_days: app_commands.Range[int, 0, 7] = 0,
     ) -> None:
         delta = parse_duration(duration)
@@ -585,8 +620,8 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(ban_members=True)
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
-    async def unban(self, interaction: discord.Interaction, user_id: str, reason: str | None = None) -> None:
-        if not user_id.isdigit():
+    async def unban(self, interaction: discord.Interaction, user_id: str, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
+        if not is_digits(user_id):
             await self.bot.embeds.error_interaction(interaction, "Invalid ID", "That doesn't look like a valid user ID.", ephemeral=True)
             return
 
@@ -627,7 +662,7 @@ class Moderation(commands.Cog):
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        reason: str | None = None,
+        reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None,
         delete_message_days: app_commands.Range[int, 1, 7] = 1,
     ) -> None:
         if user.id == interaction.user.id:
@@ -690,6 +725,9 @@ class Moderation(commands.Cog):
         if not hasattr(target, "slowmode_delay"):
             await self.bot.embeds.error_interaction(interaction, "Not Supported", "Slowmode can't be set on this kind of channel.", ephemeral=True)
             return
+        if not may_manage_channel(interaction, target):
+            await self.bot.embeds.error_interaction(interaction, "Missing Permissions", f"You need Manage Channel in {target.mention} to do that.", ephemeral=True)
+            return
         seconds = parse_slowmode(delay)
         if seconds is None:
             await self.bot.embeds.error_interaction(
@@ -711,7 +749,7 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.checks.bot_has_permissions(moderate_members=True)
     @app_commands.guild_only()
-    async def mute(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: str | None = None) -> None:
+    async def mute(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         delta = parse_duration(duration)
         if delta is None:
             await self.bot.embeds.error_interaction(
@@ -756,9 +794,12 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.checks.bot_has_permissions(moderate_members=True)
     @app_commands.guild_only()
-    async def unmute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+    async def unmute(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         if not user.is_timed_out():
             await self.bot.embeds.info_interaction(interaction, "Not Muted", f"{user.mention} isn't currently muted.")
+            return
+        if user.id != interaction.user.id and not self._invoker_outranks(interaction, user):
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't unmute someone at or above your highest role.", ephemeral=True)
             return
 
         try:
@@ -777,7 +818,7 @@ class Moderation(commands.Cog):
     @app_commands.describe(user="Member to warn", reason="Reason for the warning")
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.guild_only()
-    async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: str) -> None:
+    async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH]) -> None:
         if user.id == interaction.user.id:
             await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't warn yourself.", ephemeral=True)
             return
@@ -869,6 +910,12 @@ class Moderation(commands.Cog):
     @app_commands.describe(user="Member whose warnings should be cleared")
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warnings_clear(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        if user.id == interaction.user.id and interaction.guild.owner_id != interaction.user.id:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't clear your own warnings.", ephemeral=True)
+            return
+        if not self._invoker_outranks(interaction, user):
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't clear the warnings of someone at or above your highest role.", ephemeral=True)
+            return
         removed_count = clear_warnings(self.bot.storage_path, interaction.guild.id, user.id)
         if removed_count == 0:
             await self.bot.embeds.info_interaction(interaction, "No Warnings", f"{user.mention} has no warnings on record.", ephemeral=True)
@@ -975,6 +1022,9 @@ class Moderation(commands.Cog):
                 interaction, "Not Lockable", "This only works on regular text channels - run it there or pass one explicitly.", ephemeral=True
             )
             return
+        if not may_manage_channel(interaction, target):
+            await self.bot.embeds.error_interaction(interaction, "Missing Permissions", f"You need Manage Channel in {target.mention} to do that.", ephemeral=True)
+            return
         everyone = interaction.guild.default_role
         overwrite = target.overwrites_for(everyone)
 
@@ -997,6 +1047,9 @@ class Moderation(commands.Cog):
             await self.bot.embeds.error_interaction(
                 interaction, "Not Unlockable", "This only works on regular text channels - run it there or pass one explicitly.", ephemeral=True
             )
+            return
+        if not may_manage_channel(interaction, target):
+            await self.bot.embeds.error_interaction(interaction, "Missing Permissions", f"You need Manage Channel in {target.mention} to do that.", ephemeral=True)
             return
         everyone = interaction.guild.default_role
         overwrite = target.overwrites_for(everyone)
@@ -1042,12 +1095,13 @@ class Moderation(commands.Cog):
     @app_commands.command(name="role", description="Add or remove a role for every non-bot member.")
     @app_commands.describe(action="add or remove", role="The role to apply")
     @app_commands.choices(action=ROLE_ACTION_CHOICES)
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def role(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role) -> None:
-        if role >= interaction.guild.me.top_role:
-            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "That role is above (or equal to) my highest role.", ephemeral=True)
+        problem = self._role_problem(interaction, role)
+        if problem:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", problem, ephemeral=True)
             return
 
         adding = action.value == "add"
@@ -1076,7 +1130,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="autorole", description="Manage roles automatically assigned to new members.")
     @app_commands.describe(action="add, remove, or apply to everyone right now", role="The role (not needed for 'apply')")
     @app_commands.choices(action=AUTOROLE_ACTION_CHOICES)
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def autorole(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role | None = None) -> None:
@@ -1089,6 +1143,10 @@ class Moderation(commands.Cog):
                 return
             if role.id in autoroles:
                 await self.bot.embeds.warning_interaction(interaction, "Already An Autorole", f"{role.mention} is already an autorole.", ephemeral=True)
+                return
+            problem = self._role_problem(interaction, role, automatic=True)
+            if problem:
+                await self.bot.embeds.error_interaction(interaction, "Not Allowed", problem, ephemeral=True)
                 return
             autoroles.append(role.id)
             update_guild_settings(self.bot.storage_path, interaction.guild.id, {"autoroles": autoroles})
@@ -1113,9 +1171,9 @@ class Moderation(commands.Cog):
             return
 
         roles = [interaction.guild.get_role(rid) for rid in autoroles]
-        roles = [r for r in roles if r is not None and r < interaction.guild.me.top_role]
+        roles = [r for r in roles if r is not None and self._role_problem(interaction, r, automatic=True) is None]
         if not roles:
-            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "None of the configured autoroles are below my highest role.", ephemeral=True)
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "None of the configured autoroles are ones I can give out for you.", ephemeral=True)
             return
 
         targets = [m for m in interaction.guild.members if not m.bot and any(r not in m.roles for r in roles)]
@@ -1166,6 +1224,19 @@ class Moderation(commands.Cog):
             await self.bot.embeds.info_interaction(interaction, "Nothing To Do", "No members matched that criteria.", ephemeral=True)
             return
 
+        # the same rank rules as /kick: nobody at or above the moderator, nobody the bot can't kick
+        matched = len(kick_list)
+        kick_list = [
+            m for m in kick_list
+            if m.id != interaction.guild.owner_id and m.top_role < interaction.guild.me.top_role and self._invoker_outranks(interaction, m)
+        ]
+        skipped = matched - len(kick_list)
+        if not kick_list:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", f"All {matched} matching member(s) are at or above your highest role, or mine.", ephemeral=True
+            )
+            return
+
         capped = kick_list[:MAX_MASS_ACTION_TARGETS]
         view = ConfirmView(author_id=interaction.user.id)
         await interaction.response.send_message(
@@ -1173,7 +1244,9 @@ class Moderation(commands.Cog):
                 "Confirm Prune",
                 f"About to kick **{len(capped)}** member(s) for {reason_label}"
                 + (f" (of {len(kick_list)} matched, capped at {MAX_MASS_ACTION_TARGETS})" if len(kick_list) > MAX_MASS_ACTION_TARGETS else "")
-                + ".\n\nThis cannot be undone.",
+                + "."
+                + (f"\n{skipped} more matched but are at or above your highest role, or mine, and will be left alone." if skipped else "")
+                + "\n\nThis cannot be undone.",
             ),
             view=view,
         )
@@ -1221,7 +1294,13 @@ class Moderation(commands.Cog):
 
         for role_id in settings.get("autoroles", []) or []:
             role = member.guild.get_role(role_id)
-            if role is not None and role < member.guild.me.top_role and role not in roles_to_add:
+            if (
+                role is not None
+                and role < member.guild.me.top_role
+                and not role.managed
+                and not self._role_is_elevated(role)  # an autorole saved before this was refused, or set from the website
+                and role not in roles_to_add
+            ):
                 roles_to_add.append(role)
 
         if not roles_to_add:

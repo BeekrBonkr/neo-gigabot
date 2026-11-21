@@ -20,6 +20,7 @@ class Config:
     support_server_invite: str = ""
     website_url: str = ""
     legacy_data_path: str = ""
+    beta: bool = False
 
     @property
     def weather_enabled(self) -> bool:
@@ -33,6 +34,17 @@ class Config:
     def reddit_api_enabled(self) -> bool:
         return bool(self.reddit_client_id.strip() and self.reddit_client_secret.strip())
 
+
+
+BETA_NOTICE = (
+    "⚠️ **This is a beta test build.** Features can change or break without warning, "
+    "and saved data may be reset."
+)
+
+
+def beta_notice(config: object) -> str:
+    """The warning shown in /about and /help on a beta build; empty otherwise."""
+    return BETA_NOTICE if getattr(config, "beta", False) else ""
 
 
 def _http_url(value: str) -> str:
@@ -67,4 +79,5 @@ def load_config() -> Config:
         support_server_invite=os.getenv("SUPPORT_SERVER_INVITE", ""),
         website_url=_http_url(os.getenv("WEBSITE_URL", "")),
         legacy_data_path=os.getenv("LEGACY_DATA_PATH", ""),
+        beta=os.getenv("BETA_BUILD", "").strip() == "1",
     )

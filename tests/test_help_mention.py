@@ -21,6 +21,7 @@ def _make_cog() -> Help:
     cog = Help.__new__(Help)
     cog._mention_cooldowns = {}
     cog.build_home_embed = lambda: discord.Embed(title="help")  # type: ignore[method-assign]
+    cog.new_commands = lambda: []  # type: ignore[method-assign]
     return cog
 
 

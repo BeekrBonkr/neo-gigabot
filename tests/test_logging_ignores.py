@@ -161,6 +161,7 @@ def test_tree_check_blocks_disabled_command(storage: Path) -> None:
     stub = MagicMock()
     stub.storage_path = storage
     stub.embeds.error_interaction = AsyncMock()
+    stub.command_gate = lambda *args, **kwargs: GigaBot.command_gate(stub, *args, **kwargs)
 
     def _interaction(command_name: str, qualified: str | None = None) -> MagicMock:
         interaction = MagicMock()
@@ -176,6 +177,13 @@ def test_tree_check_blocks_disabled_command(storage: Path) -> None:
     stub.embeds.error_interaction.assert_awaited_once()
 
     assert asyncio.run(GigaBot.on_tree_interaction_check(stub, _interaction("ping"))) is True
+    # a menu is only blocked by its own name, never by a group that shares its first word
+    update_guild_settings(storage, GUILD_ID, {"blocked_commands": ["edit"]})
+    menu = _interaction("Edit Image")
+    menu.command = MagicMock(spec=discord.app_commands.ContextMenu)
+    menu.command.qualified_name = "Edit Image"
+    assert asyncio.run(GigaBot.on_tree_interaction_check(stub, menu)) is True
+    assert asyncio.run(GigaBot.on_tree_interaction_check(stub, _interaction("resize", "edit resize"))) is False
     # /settings can never be locked out, even if it somehow lands in the list
     update_guild_settings(storage, GUILD_ID, {"blocked_commands": ["settings"]})
     assert asyncio.run(GigaBot.on_tree_interaction_check(stub, _interaction("settings"))) is True

@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly yt-dlp upgrade for neo-GigaBot Beta
+
+[Timer]
+OnCalendar=Mon *-*-* 06:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

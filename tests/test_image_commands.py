@@ -214,7 +214,7 @@ def test_quote_image_handles_markdown_mentions_and_emoji():
     )
     author = types.SimpleNamespace(display_name="Zoë 🌸", display_avatar=FakeAvatar())
     message = types.SimpleNamespace(content="**bold** claim by <@111111111111111111>: ça marche 😀 " + "long " * 150, guild=guild, author=author)
-    data, name = asyncio.run(cog._build_quote_image(message))
+    data, name = asyncio.run(cog.build_quote_image(message))
     assert name == "quote.png" and Image.open(io.BytesIO(data)).size == (400, 400)
     with pytest.raises(ValueError, match="any text"):
-        asyncio.run(cog._build_quote_image(types.SimpleNamespace(content="   ", guild=guild, author=author)))
+        asyncio.run(cog.build_quote_image(types.SimpleNamespace(content="   ", guild=guild, author=author)))

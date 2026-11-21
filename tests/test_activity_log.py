@@ -58,3 +58,16 @@ def test_the_logging_cog_keeps_a_copy_only_while_logging_is_on(storage):
     update_guild_settings(storage, 1, {"ignored_users": [], "logging_keep_days": 0})
     asyncio.run(cog._log(guild, embed, user_id=5))
     assert len(store.search(storage, 1)) == 1
+
+
+def test_every_servers_retention_is_applied_even_when_that_server_is_quiet(storage):
+    for guild_id in (1, 2, 3):
+        store.record(storage, guild_id, title="Message Deleted", description="old")
+        store.record(storage, guild_id, title="Message Deleted", description="new")
+    with connect(storage) as connection:
+        connection.execute("UPDATE activity_log SET created_at = datetime('now', '-200 days') WHERE search LIKE '%old%'")
+    removed = store.prune_all(storage, {1: 7, 2: 0, 3: 365}.get)
+    assert removed == 3
+    assert [row["body"]["description"] for row in store.search(storage, 1)] == ["new"]  # past its 7 days
+    assert store.search(storage, 2) == []                                               # keeps no copy
+    assert len(store.search(storage, 3)) == 2                                           # a year is still inside

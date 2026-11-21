@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils import honeypot as store
 from utils.modules import enabled_in
 from utils.settings import get_guild_settings, update_guild_settings
@@ -55,16 +56,16 @@ class Honeypot(commands.Cog):
 
     def _trapped(self, message: discord.Message, settings: dict) -> bool:
         raw = str(settings.get("honeypot_channel_id") or "")
-        if not enabled_in(settings, "honeypot") or not raw.isdigit() or message.channel.id != int(raw):
+        if not enabled_in(settings, "honeypot") or not is_digits(raw) or message.channel.id != int(raw):
             return False
         author = message.author
         if not isinstance(author, discord.Member) or author.bot:
             return False  # other bots are added by admins on purpose; webhooks aren't members at all
         if author.id == message.guild.owner_id:
             return False
-        if author.id in {int(u) for u in settings.get("honeypot_exempt_users") or [] if str(u).isdigit()}:
+        if author.id in {int(u) for u in settings.get("honeypot_exempt_users") or [] if is_digits(str(u))}:
             return False
-        exempt_roles = {int(r) for r in settings.get("honeypot_exempt_roles") or [] if str(r).isdigit()}
+        exempt_roles = {int(r) for r in settings.get("honeypot_exempt_roles") or [] if is_digits(str(r))}
         if exempt_roles and any(role.id in exempt_roles for role in getattr(author, "roles", [])):
             return False
         permissions = author.guild_permissions

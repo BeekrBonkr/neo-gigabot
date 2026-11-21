@@ -186,7 +186,7 @@ def _music_world(storage, *, dj_mode=False, blocked=()):
         return SimpleNamespace(
             id=uid, bot=False, display_name=f"m{uid}", roles=list(roles),
             voice=SimpleNamespace(channel=voice_channel) if voice_channel else None,
-            guild_permissions=SimpleNamespace(administrator=admin),
+            guild_permissions=SimpleNamespace(administrator=admin, manage_guild=admin),
         )
 
     members = {
@@ -488,6 +488,28 @@ def test_music_actions_do_what_the_commands_do(storage):
     asyncio.run(run())
 
 
+def test_autoplay_is_switched_from_the_web_by_those_who_manage_the_server(storage):
+    from utils.settings import get_guild_settings
+
+    make_client, _, _ = _music_world(storage)
+
+    async def run():
+        async with make_client() as client:
+            listener = await (await client.get("/v1/guilds/77/music?user_id=1", headers=AUTH)).json()
+            admin = await (await client.get("/v1/guilds/77/music?user_id=4", headers=AUTH)).json()
+            assert listener["can_autoplay"] is False and admin["can_autoplay"] is True and admin["session"]["autoplay"] is False
+            refused = await _act(client, 1, "autoplay", enabled="true")  # in the call, but it is a server setting
+            assert refused.status == 403 and "manage the server" in (await refused.json())["error"]
+            done = await (await _act(client, 4, "autoplay", enabled="true")).json()  # an admin need not be in the call
+            assert done["session"]["autoplay"] is True and done["detail"].startswith("Autoplay on")
+            assert get_guild_settings(storage, 77)["music_autoplay"] is True
+            done = await (await _act(client, 4, "autoplay", enabled="false")).json()
+            assert done["session"]["autoplay"] is False and get_guild_settings(storage, 77)["music_autoplay"] is False
+            assert (await _act(client, 999, "autoplay", enabled="true")).status == 403
+
+    asyncio.run(run())
+
+
 def test_dj_mode_and_disabled_commands_apply_on_the_web_too(storage):
     make_client, _, _ = _music_world(storage, dj_mode=True, blocked=["music shuffle"])
 
@@ -644,17 +666,28 @@ def test_command_list_names_each_commands_module(storage):
     async def ping(interaction: discord.Interaction) -> None: ...
 
     tree = SimpleNamespace(walk_commands=lambda: [snipe, kick, ping], get_commands=lambda type=None: [])
-    cog = PanelBridge(SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, tree=tree))
+
+    async def sample(name):
+        return (b"GIF89a...", "boom.gif") if name == "animate boom" else None
+
+    cog = PanelBridge(SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, tree=tree,
+                                      samples=SimpleNamespace(get=sample)))
     cog._token = TOKEN
 
     async def run():
         async with TestClient(TestServer(cog.build_app())) as client:
+            made = await client.get("/v1/samples/animate%20boom", headers=AUTH)
+            assert made.status == 200 and made.content_type == "image/gif" and await made.read() == b"GIF89a..."
+            assert (await client.get("/v1/samples/ping", headers=AUTH)).status == 404
+            assert (await client.get("/v1/samples/animate%20boom")).status == 401
             return await (await client.get("/v1/commands", headers=AUTH)).json()
 
     by_name = {c["name"]: c for c in asyncio.run(run())["commands"]}
+    assert by_name["ping"]["sample"] is False
     assert by_name["snipe"]["module"] == "snipe" and by_name["snipe"]["module_flag"] == "snipe_enabled" and by_name["snipe"]["module_solo"] is True
     assert by_name["kick"]["module"] == "moderation" and by_name["kick"]["module_solo"] is False
     assert by_name["ping"]["module"] is None
+    assert by_name["kick"]["added"] == "2026-03-28" and by_name["ping"]["added"] == "2026-03-27"  # from utils/command_dates.json
 
 
 def test_saving_settings_keeps_snipe_and_its_module_in_step(storage):
@@ -735,3 +768,74 @@ def test_welcome_background_upload_and_preview_are_for_admins(storage):
             assert status == 200 and body["settings"]["welcome_card_background"] == "gradient" and body["has_background"] is False
 
     asyncio.run(run())
+
+
+# ---------- announcements ----------
+
+def test_an_announcement_is_posted_with_its_sample_and_published(storage):
+    from unittest.mock import Mock
+
+    from utils.embeds import EmbedManager
+
+    sent, published = [], []
+
+    def channel(news=True, can_send=True, publish_error=None):
+        made = Mock(spec=discord.TextChannel)
+        made.id, made.name, made.guild = 55, "updates", SimpleNamespace(name="Home", me=object())
+        made.is_news = lambda: news
+        made.permissions_for = lambda _me: SimpleNamespace(view_channel=True, send_messages=can_send, embed_links=True, attach_files=True)
+
+        async def send(embed=None, files=None):
+            sent.append((embed, files))
+
+            async def publish():
+                if publish_error:
+                    raise publish_error
+                published.append(1)
+
+            return SimpleNamespace(id=900, jump_url="https://discord.com/channels/1/55/900", publish=publish)
+
+        made.send = send
+        return made
+
+    channels = {55: channel(), 56: channel(news=False), 57: channel(can_send=False)}
+
+    async def sample(name):
+        return (b"GIF", "boom.gif") if name == "animate boom" else None
+
+    bot = SimpleNamespace(storage_path=storage, guilds=[], voice_clients=[], get_guild=lambda _id: None, embeds=EmbedManager(),
+                          get_channel=channels.get, samples=SimpleNamespace(get=sample))
+    cog = PanelBridge(bot)
+    cog._token = TOKEN
+
+    async def run():
+        async with TestClient(TestServer(cog.build_app())) as client:
+            seen = (await (await client.get("/v1/announce/channel/55", headers=AUTH)).json())["channel"]
+            assert seen == {"id": "55", "name": "updates", "guild": "Home", "news": True, "can_post": True, "can_publish": True}
+            assert (await client.get("/v1/announce/channel/1", headers=AUTH)).status == 404
+            assert (await client.get("/v1/announce/channel/abc", headers=AUTH)).status == 404
+
+            post = {"channel_id": "55", "title": "New: /animate boom", "body": "It goes boom.", "sample": "animate boom"}
+            done = await (await client.post("/v1/announce", headers=AUTH, json=post)).json()
+            assert done == {"message_id": "900", "url": "https://discord.com/channels/1/55/900", "published": True, "note": ""}
+            embed, files = sent[-1]
+            assert embed.title == "New: /animate boom" and embed.description == "It goes boom." and embed.image.url == "attachment://boom.gif"
+            assert files[0].filename == "boom.gif" and published == [1]
+
+            plain = await (await client.post("/v1/announce", headers=AUTH, json={**post, "channel_id": "56", "sample": "ping"})).json()
+            assert plain["published"] is False and "ordinary channel" in plain["note"] and sent[-1][1] == [] and published == [1]
+            refused = await client.post("/v1/announce", headers=AUTH, json={**post, "channel_id": "57"})
+            assert refused.status == 409 and "Send Messages" in (await refused.json())["error"]
+            assert (await client.post("/v1/announce", headers=AUTH, json={**post, "body": " "})).status == 400
+            assert len(sent) == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key, value", [
+    ("logging_channel_id", "9" * 100_000), ("verify_role_id", "²"), ("bot_channels", ["²"]), ("bot_channels", [int("9" * 4000)]),
+    ("warn_mute_duration", "1s" * 50_000), ("blocked_commands", ["x" * 20_000]),
+])
+def test_oversized_and_lookalike_values_are_refused_not_stored(key, value):
+    with pytest.raises(SettingsValidationError):
+        validate_settings({**DEFAULT_GUILD_SETTINGS, key: value}, DEFAULT_GUILD_SETTINGS)

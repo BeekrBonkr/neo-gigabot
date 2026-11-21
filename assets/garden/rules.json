@@ -1,0 +1,22 @@
+{
+  "_about": "Balance for the garden game. Times are in seconds at normal speed; the GARDEN_SPEED setting in .env divides every time (the beta bot uses 60, turning hours into minutes).",
+  "starting": {"water": 4, "sunlight": 3},
+  "pots": {"shown": 3, "usable": 1},
+  "barrel": {"capacity": 8, "seconds_per_water": 1800},
+  "sunlight": {"per_message": 1, "cooldown_seconds": 60, "daily_cap": 30, "storage_cap": 60},
+  "watering": {"water": 2, "sunlight": 1},
+  "stage_names": ["Seed", "Sprout", "Seedling", "Young plant", "Budding", "In bloom"],
+  "grow_seconds": [600, 1800, 3600, 7200, 14400],
+  "starters": ["chamomile", "tulip", "sunflower"],
+  "species": {
+    "daisy": {"name": "Pink Daisy"},
+    "clematis": {"name": "Clematis"},
+    "dahlia": {"name": "Dahlia"},
+    "sunflower": {"name": "Sunflower"},
+    "cornflower": {"name": "Cornflower"},
+    "chamomile": {"name": "Chamomile"},
+    "tulip": {"name": "Tulip"},
+    "viola": {"name": "Viola"},
+    "iris": {"name": "Purple Iris"}
+  }
+}

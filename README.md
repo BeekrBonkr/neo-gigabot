@@ -40,11 +40,11 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - **Content-aware scale** (seam carving), GIF-aware — effects apply to every frame
 - **Color filters** (`/filter …`): invert, grayscale, sepia, hue, adjust (brightness, contrast, saturation),
   posterize, edges (pencil sketch or neon outlines), emboss, vaporwave
-- **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet, bonk and triggered (on an image or a member's avatar),
+- **Animations** (`/animate …`): spin, rainbow, wave, zoom, pet, bonk, boom and triggered (on an image or a member's avatar),
   plus GIF tools: speed, reverse, frames (pull one frame out), togif (join images into a GIF)
 - **Meme formats** (`/memegen …`): speechbubble, wanted poster, drake, changemymind, jail, wasted, respects,
-  whodidthis, wheeze, keepitem, achievement, rip, rtx, news, presidential, notification, einstein, sonic,
-  watchmojo, watermark, kirby, excuse, perfection, scene.
+  whodidthis, beautiful, wheeze, keepitem, achievement, rip, rtx, news, presidential, notification, einstein,
+  sonic, watchmojo, watermark, kirby, excuse, perfection, scene.
   Formats built on a well-known picture use the real template, kept in `assets/images/`
 - **Layout and utility** (`/edit …`): mirror, tile, collage, border (frames and rounded corners), circle,
   resize, palette (main colors with hex codes), removebg (cuts out the main subject with a small bundled model)
@@ -54,6 +54,37 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   shows mentions as names. Fallback fonts live in `assets/fonts/`
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
+- **Edit Image menu**: right-click a message (long-press on mobile), then Apps → Edit Image, and pick an
+  effect from a private list to run it on that message's image, with no link to copy. Commands with
+  settings show them in a pop-up form first, filled in with their defaults, and datamosh opens its panel. Cooldowns and a server's blocked commands apply as usual
+- **Quote Message menu**: Apps → Quote Message makes the `/image text quote` picture from the message
+  you clicked
+- Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
+  as an animation of its first few seconds (needs `ffmpeg`)
+- **A video going in comes back as a video**: the effect is applied to its frames and the result is an MP4
+  with the original sound laid back under it (up to 480 px). Up to 45 seconds are used: fifteen seconds or less at
+  30 frames a second, longer ones at fewer frames a second down to 10. Past 45 seconds the end is left off
+  and the reply says so. A command takes as long as it takes, which for the slowest effects on a
+  full-length video is minutes. The sound is left off
+  when the result no longer runs like the original (`/animate speed`). `/image effects convert` turns a
+  video into a GIF or a GIF into an MP4 on request, and `/animate togif` always gives a GIF
+- **Datamosh** (`/animate datamosh`): breaks a GIF or a video the way a damaged file breaks. The clip is
+  encoded to MPEG-4, its stream is edited (keyframes taken out, motion frames repeated, thrown away or
+  shuffled) and decoded again, so every smear is the real thing. Settings: `melt`, `every`, `start`,
+  `end`, `skip`, `shuffle`, `blockiness`, `block_size`, `motion`, `cuts`, `length`, `reverse`, `seed`,
+  and `into`, a second clip whose motion drags the first one's picture around. Right-click a message, then
+  Apps → Datamosh, for a private panel with all of those but `into`: set it up, press Mosh, change
+  something and go again
+- **Bit crush** (`/animate bitcrush`): crushes the sound of a video or an audio file (MP3, WAV, OGG, FLAC,
+  M4A) with `bits`, `downsample`, `mix`, `shape` and `drive`. A video keeps its picture untouched, whole
+  and at full size; only the sound is made again. `/animate datamosh` has a `bitcrush` option (light,
+  heavy, destroyed) that does the same to its video's sound
+- A long GIF is not cut short either: past 120 frames, frames are left out evenly along it and the rest
+  show for longer, so it lasts as long as it did (up to the same 45 seconds)
+- A GIF going in gives a GIF coming out, for every command except the two whose result is a
+  still by nature (`/animate frames`, `/edit palette`): the meme formats, collages and cut-outs are built
+  frame by frame, a pat or a bonk plays over the moving picture, and the result lasts exactly as long as
+  the original
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,
   GIFs capped at 120 processed frames, heavy work runs off the event loop with concurrency caps
 
@@ -105,13 +136,26 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 `/meme`, `/reddit`, `/cursed`, `/trivia`, `/joke`, `/fact`, `/catfact`, `/wiki`, `/weather`,
 `/gif`, `/cute`, `/beans`, games (`/simon`, `/tictactoe`, `/hotpotato`),
 `/poll` (yes/no or up to 5 options), `/snipe`, `/ascii`, `/hug`, `/kiss`, `/kill`, `/insult`,
-`/coinflip`, `/roll`, `/ping`, `/server`, `/userinfo`, `/about`, `/feedback`
+`/coinflip`, `/roll`, `/ping`, `/server`, `/userinfo`, `/about`, `/whatsnew` (commands added in the last month, with examples), `/feedback`
 
 ### ⚙️ Per-server configuration — `/settings`
 One admin-only interactive dashboard (no memorizing subcommands) covering:
 bot channels, disabled commands, activity log, moderation (autoroles, sticky roles,
 warning escalation), mod log, welcome/leave, starboard, and music. Settings live in SQLite
 and survive the bot being kicked and re-invited.
+
+### 👤 As a personal app
+With **User Install** switched on for the application (Developer Portal → Installation), people can add the
+bot to their own account and use part of it in servers that never added it, in DMs and in group DMs:
+- Every image command (`/image`, `/filter`, `/animate`, `/memegen`, `/edit`) and the right-click menus
+  (Edit Image, Quote Message, Datamosh, Set Image Source, Clear Image Source)
+- The fun commands that need no server: `/8ball`, `/roll`, `/coinflip`, `/trivia`, `/wiki`, `/weather`,
+  `/gif`, `/meme`, `/hug`, `/tictactoe`, `/simon` and the like, plus `/about` and `/feedback`
+- A person's own playlists (`/music playlist …`, apart from `play`)
+- **Only for people who share a server with the bot**: anyone else is told to join one first
+- Everything else answers "Server Only" there. The list of what is opened lives in `utils/user_app.py`
+- Away from the bot's servers it cannot look back through a channel for an image: attach one, or use
+  Edit Image
 
 ### 🔧 Owner tooling — `/owner …` (DM-only, owner-only)
 | Command | What it does |

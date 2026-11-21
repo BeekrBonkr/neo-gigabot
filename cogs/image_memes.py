@@ -3,9 +3,10 @@ from __future__ import annotations
 import discord
 from discord import app_commands
 from discord.ext import commands
+from PIL import Image
 
 from utils import image_memes as mm
-from utils.imaging import apply_to_frames, encode_frames, load_frames
+from utils.imaging import VIDEO_MAX_FRAMES, Frames, apply_to_frames, compose_frames, encode_frames, fit_within, frame_budget, load_frames
 
 SOURCE_HELP = {
     "attachment": "Optional image attachment.",
@@ -29,6 +30,25 @@ SCENES = [
     app_commands.Choice(name="Bob Ross", value="bobross"),
 ]
 POSTER_MAX_EDGE = 1024
+# A GIF or video put into one of these formats gives a GIF, and a GIF stores
+# every frame whole: its picture goes in smaller, the result comes out smaller,
+# and it has fewer frames, so it is quick to make and fits Discord's upload cap.
+MOVING_PICTURE_MAX_EDGE = 360
+MOVING_RESULT_MAX_EDGE = 480
+MOVING_MAX_FRAMES = 60
+MOVING_VIDEO_MAX_FRAMES = VIDEO_MAX_FRAMES  # a video holds frames cheaply, so it gets all of them, however long they take to draw
+
+
+def _picture(data: bytes, filename: str | None = None) -> Frames:
+    """An input for a poster format: a still at poster size, or the frames of a GIF or video, smaller."""
+    loaded = load_frames(data, filename, max_edge=POSTER_MAX_EDGE)
+    if loaded.animated:
+        loaded.frames = [fit_within(frame, MOVING_PICTURE_MAX_EDGE) for frame in loaded.frames]
+    return loaded
+
+
+def _compose(pictures: list[Frames], build, stem: str) -> tuple[bytes, str]:
+    return compose_frames(pictures, build, stem, max_edge=MOVING_RESULT_MAX_EDGE, limit=frame_budget(MOVING_MAX_FRAMES, MOVING_VIDEO_MAX_FRAMES))
 USER_HELP = "Use this member's avatar instead of an image."
 
 
@@ -92,8 +112,7 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
             texts["reward"] = await self.bot.image_tools.prepare_text(reward, interaction.guild)
 
         def work(image_bytes: bytes, filename: str) -> tuple[bytes, str]:
-            picture = load_frames(image_bytes, filename, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0]
-            return encode_frames([mm.wanted(picture, texts["name"], texts["reward"])], [100], "wanted")
+            return _compose([_picture(image_bytes, filename)], lambda picture: mm.wanted(picture, texts["name"], texts["reward"]), "wanted")
 
         async def avatar() -> tuple[bytes, str]:
             return await user.display_avatar.replace(size=512, static_format="png").read(), "avatar.png"
@@ -125,10 +144,15 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
             texts["approve"] = await self.bot.image_tools.prepare_text(approve or "", interaction.guild)
 
         def work(_bytes: bytes, _name: str, *pictures: bytes) -> tuple[bytes, str]:
-            loaded = [load_frames(data, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0] for data in pictures]
-            top = loaded.pop(0) if reject_image is not None else None
-            bottom = loaded.pop(0) if approve_image is not None else None
-            return encode_frames([mm.drake(texts["reject"], texts["approve"], top, bottom)], [100], "drake")
+            def build(*shown: Image.Image) -> Image.Image:
+                left = list(shown)
+                top = left.pop(0) if reject_image is not None else None
+                bottom = left.pop(0) if approve_image is not None else None
+                return mm.drake(texts["reject"], texts["approve"], top, bottom)
+
+            if not pictures:
+                return encode_frames([build()], [100], "drake")
+            return _compose([_picture(data) for data in pictures], build, "drake")
 
         await self.bot.image_tools.run_image_command(
             interaction, "drake", "Drake", work, source=_no_image, extra_sources=[(image, None) for image in given], before=prepare,
@@ -153,9 +177,10 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
 
     async def _poster(self, interaction: discord.Interaction, name: str, title: str, build, attachment=None, message_link=None,
                       *, user: discord.User | None = None, texts: tuple[str, ...] = ()) -> None:
-        """A still made from one picture: `build(picture, *texts)` returns it.
-        The picture is the member's avatar if `user` is given; `texts` are
-        words typed in Discord, made ready to draw first."""
+        """A format made from one picture: `build(picture, *texts)` returns it.
+        A GIF or a video gives a GIF, built frame by frame. The picture is the
+        member's avatar if `user` is given; `texts` are words typed in
+        Discord, made ready to draw first."""
         ready: list = []
 
         async def prepare() -> None:
@@ -163,8 +188,7 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
                 ready.append(await self.bot.image_tools.prepare_text(text, interaction.guild))
 
         def work(image_bytes: bytes, filename: str) -> tuple[bytes, str]:
-            picture = load_frames(image_bytes, filename, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0]
-            return encode_frames([build(picture, *ready)], [100], name)
+            return _compose([_picture(image_bytes, filename)], lambda picture: build(picture, *ready), name)
 
         async def avatar() -> tuple[bytes, str]:
             return await user.display_avatar.replace(size=512, static_format="png").read(), "avatar.png"
@@ -191,6 +215,15 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
         await self._poster(interaction, "whodidthis", "Who Did This", mm.who_did_this, attachment, message_link, user=user)
+
+    @app_commands.command(name="beautiful", description="Grunkle Stan admires an image: \"Oh, this- this is beautiful\".")
+    @app_commands.describe(user=USER_HELP, **SOURCE_HELP)
+    @app_commands.checks.cooldown(1, 3.0)
+    async def beautiful(
+        self, interaction: discord.Interaction, user: discord.User | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        await self._poster(interaction, "beautiful", "Beautiful", mm.beautiful, attachment, message_link, user=user)
 
     @app_commands.command(name="wheeze", description="Put an image in the speech bubble of the wheeze comic.")
     @app_commands.describe(user=USER_HELP, **SOURCE_HELP)
@@ -266,8 +299,7 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
                     pictures.append(await member.display_avatar.replace(size=512, static_format="png").read())
 
         def work(_bytes: bytes, _name: str) -> tuple[bytes, str]:
-            off, on = (load_frames(data, max_edge=POSTER_MAX_EDGE, first_only=True).frames[0] for data in pictures)
-            return encode_frames([mm.rtx(off, on)], [100], "rtx")
+            return _compose([_picture(data) for data in pictures], mm.rtx, "rtx")
 
         await self.bot.image_tools.run_image_command(interaction, "rtx", "RTX", work, source=_no_image, before=prepare)
 

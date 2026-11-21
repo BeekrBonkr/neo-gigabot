@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+import io
 import time
 from typing import Final
 
@@ -7,6 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import command_dates
+from utils.config import beta_notice
 from utils.website import site_link, site_url
 
 HELP_COLOR = discord.Color.blurple()
@@ -50,8 +54,11 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
     ("community", "💬", "Community", ["suggest", "suggestion", "tag", "tags", "schedule", "stick", "stickembed", "stickslow", "stickstop", "stickstart", "stickremove", "getstickies"]),
     ("reactionroles", "🎭", "Reaction Roles & Role Menus", ["reactionrole", "rolemenu"]),
     ("settings", "⚙️", "Server Settings", ["settings"]),
-    ("info", "ℹ️", "Info & Support", ["about", "userinfo", "feedback"]),
+    ("info", "ℹ️", "Info & Support", ["about", "whatsnew", "userinfo", "feedback"]),
 ]
+# Not a category of its own: every command from the categories above that was
+# added recently, newest first. It is only offered while there are some.
+NEW_KEY, NEW_EMOJI, NEW_LABEL = "new", "🆕", "What's New"
 
 
 class HelpCategorySelect(discord.ui.Select["HelpView"]):
@@ -60,6 +67,8 @@ class HelpCategorySelect(discord.ui.Select["HelpView"]):
             discord.SelectOption(label=label, emoji=emoji, value=key)
             for key, emoji, label, _names in CATEGORY_DEFS
         ]
+        if cog.new_commands():
+            options.insert(0, discord.SelectOption(label=NEW_LABEL, emoji=NEW_EMOJI, value=NEW_KEY))
         super().__init__(placeholder="Choose a category...", options=options)
         self.cog = cog
 
@@ -139,6 +148,49 @@ class HelpView(discord.ui.View):
                 pass
 
 
+WHATS_NEW_SUMMARY_LINES = 10
+
+
+class WhatsNewButton(discord.ui.Button["WhatsNewView"]):
+    def __init__(self, *, label: str, page: int, disabled: bool) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.primary, disabled=disabled)
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        assert self.view is not None
+        await self.view.show(interaction, self.page)
+
+
+class WhatsNewView(discord.ui.View):
+    """/whatsnew: a summary, then one page per new command with its sample.
+    Only the person who ran it sees it, so the buttons need no owner check."""
+
+    def __init__(self, *, cog: "Help", page: int = 0, timeout: float = HELP_VIEW_TIMEOUT_SECONDS) -> None:
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.message: discord.Message | None = None
+        last = len(cog.new_commands())
+        self.add_item(WhatsNewButton(label="◀ Previous", page=page - 1, disabled=page <= 0))
+        self.add_item(WhatsNewButton(label="Next ▶" if page else "Browse them ▶", page=page + 1, disabled=page >= last))
+
+    async def show(self, interaction: discord.Interaction, page: int) -> None:
+        await interaction.response.defer()  # a sample that has not been made yet takes a moment
+        embed, files = await self.cog.build_whats_new(page)
+        view = WhatsNewView(cog=self.cog, page=page)
+        await interaction.edit_original_response(embed=embed, attachments=files, view=view)
+        view.message = self.message
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class Help(commands.Cog):
     """A curated, categorized help menu - Discord's own slash-command list gets
     unwieldy fast once a bot has this many commands."""
@@ -148,7 +200,30 @@ class Help(commands.Cog):
         self._mention_cooldowns: dict[int, float] = {}
 
     def _category_lookup(self) -> dict[str, tuple[str, str, list[str]]]:
-        return {key: (emoji, label, names) for key, emoji, label, names in CATEGORY_DEFS}
+        lookup = {key: (emoji, label, names) for key, emoji, label, names in CATEGORY_DEFS}
+        lookup[NEW_KEY] = (NEW_EMOJI, NEW_LABEL, [])
+        return lookup
+
+    def _commands_in(self, names: list[str]) -> list[app_commands.Command]:
+        found: list[app_commands.Command] = []
+        for name in names:
+            node = self.bot.tree.get_command(name)
+            if isinstance(node, app_commands.Group):
+                found.extend(sub for sub in node.walk_commands() if isinstance(sub, app_commands.Command))
+            elif node is not None:
+                found.append(node)
+        return found
+
+    def new_commands(self) -> list[app_commands.Command]:
+        """Recently added commands from the help categories, newest first."""
+        listed = [command for _key, _emoji, _label, names in CATEGORY_DEFS for command in self._commands_in(names)]
+        fresh = [command for command in listed if command_dates.is_new(command.qualified_name)]
+        return sorted(fresh, key=lambda command: (command_dates.added_on(command.qualified_name), command.qualified_name), reverse=True)
+
+    @staticmethod
+    def _line(command: app_commands.Command) -> str:
+        marker = f" {NEW_EMOJI}" if command_dates.is_new(command.qualified_name) else ""
+        return f"**/{command.qualified_name}**{marker} - {command.description or 'No description.'}"
 
     def _category_command_count(self, names: list[str]) -> int:
         total = 0
@@ -167,9 +242,13 @@ class Help(commands.Cog):
             f"{emoji} **{label}** - {self._category_command_count(names)} command(s)"
             for _key, emoji, label, names in CATEGORY_DEFS
         ]
+        fresh = len(self.new_commands())
+        if fresh:
+            lines.insert(0, f"{NEW_EMOJI} **{NEW_LABEL}** - {fresh} command(s) added in the last month")
         return self.bot.embeds.create(
             title="📖 GigaBot Help",
-            description="Pick a category below to see what I can do.\n\n" + "\n".join(lines)
+            description=(f"{beta_notice(self.bot.config)}\n\n" if beta_notice(self.bot.config) else "")
+            + "Pick a category below to see what I can do.\n\n" + "\n".join(lines)
             + (f"\n\n🌐 **Website** - {site_link(self.bot, 'open it')} for the web music player, playlists, the full command list, "
                "and a settings dashboard for admins." if site_url(self.bot) else ""),
             color=HELP_COLOR,
@@ -177,19 +256,10 @@ class Help(commands.Cog):
         )
 
     def _category_lines(self, key: str) -> list[str]:
+        if key == NEW_KEY:
+            return [self._line(command) for command in self.new_commands()]
         _emoji, _label, names = self._category_lookup()[key]
-        lines: list[str] = []
-        for name in names:
-            node = self.bot.tree.get_command(name)
-            if node is None:
-                continue
-            if isinstance(node, app_commands.Group):
-                for sub in node.walk_commands():
-                    if isinstance(sub, app_commands.Command):
-                        lines.append(f"**/{sub.qualified_name}** - {sub.description or 'No description.'}")
-            else:
-                lines.append(f"**/{name}** - {node.description or 'No description.'}")
-        return lines
+        return [self._line(command) for command in self._commands_in(names)]
 
     def category_pages(self, key: str) -> list[str]:
         """The category's command list, cut into embed-sized pages."""
@@ -211,6 +281,46 @@ class Help(commands.Cog):
             color=HELP_COLOR,
             footer=f"Page {page + 1} of {len(pages)}" if len(pages) > 1 else None,
         )
+
+    async def build_whats_new(self, page: int) -> tuple[discord.Embed, list[discord.File]]:
+        """Page 0 sums up what is new; each page after it is one command,
+        newest first, with a sample of what it makes when it has one."""
+        fresh = self.new_commands()
+        if not fresh:
+            return self.bot.embeds.create(title=f"{NEW_EMOJI} {NEW_LABEL}", description="Nothing new in the last month.", color=HELP_COLOR), []
+        page = max(0, min(page, len(fresh)))
+        if page == 0:
+            lines = [self._line(command).replace(f" {NEW_EMOJI}", "") for command in fresh[:WHATS_NEW_SUMMARY_LINES]]
+            if len(fresh) > len(lines):
+                lines.append(f"...and {len(fresh) - len(lines)} more.")
+            site = f"\n\n🌐 {site_link(self.bot, 'See them all with examples', '/whatsnew')}" if site_url(self.bot) else ""
+            return self.bot.embeds.create(
+                title=f"{NEW_EMOJI} {NEW_LABEL}",
+                description=f"**{len(fresh)}** command(s) added in the last month, newest first.\n\n" + "\n".join(lines) + site,
+                color=HELP_COLOR,
+            ), []
+        command = fresh[page - 1]
+        added = datetime.date.fromisoformat(command_dates.added_on(command.qualified_name))
+        embed = self.bot.embeds.create(
+            title=f"{NEW_EMOJI} /{command.qualified_name}",
+            description=f"{command.description or 'No description.'}\n\nAdded {added.strftime('%B')} {added.day}, {added.year}.",
+            color=HELP_COLOR,
+            footer=f"{page} of {len(fresh)} · Only you can see this.",
+        )
+        sample = await self.bot.samples.get(command.qualified_name)
+        if sample is None:
+            return embed, []
+        data, filename = sample
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, [discord.File(io.BytesIO(data), filename=filename)]
+
+    @app_commands.command(name="whatsnew", description="See the commands added in the last month, with examples.")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def whats_new(self, interaction: discord.Interaction) -> None:
+        embed, files = await self.build_whats_new(0)
+        view = WhatsNewView(cog=self)
+        await interaction.response.send_message(embed=embed, files=files, view=view, ephemeral=True)
+        view.message = await interaction.original_response()
 
     @app_commands.command(name="help", description="Show a categorized list of everything I can do.")
     async def help_command(self, interaction: discord.Interaction) -> None:

@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils.modules import enabled_in
 from utils.settings import get_guild_settings, update_guild_settings
 from utils.website import site_link
@@ -56,7 +57,7 @@ class Verification(commands.Cog):
     def _role(self, guild: discord.Guild, settings: dict) -> tuple[discord.Role | None, str]:
         """The role verification grants, or None and what is wrong with the setup."""
         raw = str(settings.get("verify_role_id") or "")
-        role = guild.get_role(int(raw)) if raw.isdigit() else None
+        role = guild.get_role(int(raw)) if is_digits(raw) else None
         if role is None:
             return None, "Verification isn't set up yet. An admin needs to choose the role with `/verification role`."
         if role.managed or role.is_default():
