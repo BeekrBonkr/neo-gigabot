@@ -2621,7 +2621,7 @@ class PlaylistGroup(app_commands.Group):
         if not await self._ensure_allowed(interaction):
             return
 
-        liked_playlists = playlist_store.list_liked_playlists(self.cog.bot.storage_path, interaction.user.id)
+        liked_playlists = await asyncio.to_thread(playlist_store.list_liked_playlists, self.cog.bot.storage_path, interaction.user.id)
         if not liked_playlists:
             await self.cog.bot.embeds.info_interaction(interaction, "No Liked Playlists", "You haven't liked any playlists yet.")
             return
