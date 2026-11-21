@@ -13,9 +13,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from utils.imaging import VIDEO_CONTAINERS, video_container
+from utils.imaging import MAX_CLIP_SECONDS, VIDEO_CONTAINERS, note_cut, video_container
 
-TIMEOUT_SECONDS = 60.0
+TIMEOUT_SECONDS = 300.0
 # For /animate datamosh's one option: (bits, downsample, shape). With so few bits, even
 # steps would round anything quiet down to silence, so the harshest one spaces them by loudness.
 CRUSH_PRESETS = {"light": (8, 4, "lin"), "heavy": (5, 12, "lin"), "destroyed": (3, 30, "log")}
@@ -83,7 +83,11 @@ def apply_audio_filter(data: bytes, audio_filter: str) -> tuple[bytes, str]:
     with tempfile.TemporaryDirectory() as folder:
         source = Path(folder) / "source"
         source.write_bytes(data)
-        sound = ["-map", "0:a:0", "-af", audio_filter]
+        # the same cap as the picture commands: the first MAX_CLIP_SECONDS, and the reply says when that left some off
+        seconds = _seconds(source, reader)
+        if seconds and seconds > MAX_CLIP_SECONDS + 0.5:
+            note_cut(float(MAX_CLIP_SECONDS))
+        sound = ["-map", "0:a:0", "-af", audio_filter, "-t", str(MAX_CLIP_SECONDS)]
         if container == "matroska":  # a WebM stays a WebM
             attempts = [("webm", ["-map", "0:v:0?", "-c:v", "copy", *sound, "-c:a", "libopus", "-b:a", "128k", "-f", "webm"])]
         elif container == "mov":  # MP4, MOV, and M4A, which is the same file with no picture
@@ -101,6 +105,18 @@ def apply_audio_filter(data: bytes, audio_filter: str) -> tuple[bytes, str]:
                     extension = "m4a"
                 return made, extension
     raise ValueError("I couldn't find any sound in that to work on.")
+
+
+def _seconds(source: Path, reader: str) -> float | None:
+    """How long a media file runs, or None if that cannot be told."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    command = [ffprobe, "-v", "error", "-protocol_whitelist", "file", "-f", reader, "-show_entries", "format=duration", "-of", "csv=p=0", str(source)]
+    try:
+        return float(subprocess.run(command, capture_output=True, timeout=10, text=True).stdout.strip())
+    except (ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 def has_picture(data: bytes) -> bool:

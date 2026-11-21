@@ -6,7 +6,7 @@ from discord.ext import commands
 from PIL import Image
 
 from utils import image_edit as ed
-from utils.imaging import apply_to_frames, compose_frames, encode_frames, fit_within, frame_budget, load_frames
+from utils.imaging import VIDEO_MAX_FRAMES, apply_to_frames, compose_frames, encode_frames, fit_within, frame_budget, load_frames
 
 SOURCE_HELP = {
     "attachment": "Optional image attachment.",
@@ -24,10 +24,10 @@ GIF_RESIZE_MAX_EDGE = 1024
 # every frame whole: it is kept to this size and this many frames.
 MOVING_MAX_EDGE = 480
 MOVING_MAX_FRAMES = 60
-MOVING_VIDEO_MAX_FRAMES = 150  # when the result is a video, which holds frames cheaply
+MOVING_VIDEO_MAX_FRAMES = VIDEO_MAX_FRAMES  # when the result is a video, which holds frames cheaply
 # Cutting out a subject takes close to half a second a frame.
 CUTOUT_MAX_FRAMES = 24
-CUTOUT_VIDEO_MAX_FRAMES = 48
+CUTOUT_VIDEO_MAX_FRAMES = VIDEO_MAX_FRAMES  # every frame of a video, though that takes minutes
 
 
 class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize, frame, combine and cut out images."):

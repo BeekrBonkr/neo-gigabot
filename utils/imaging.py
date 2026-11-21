@@ -73,14 +73,16 @@ def embed_image_url(message: discord.Message) -> str | None:
     return None
 
 
-# How much of a video is worked on. The whole of it is covered wherever that
-# is possible: a short one at its own pace, a longer one with fewer frames a
-# second, down to VIDEO_MIN_FPS. Only past that is the end cut off.
+# How much of a GIF or a video is worked on: its first MAX_CLIP_SECONDS. A
+# short video is taken at its own pace, a longer one with fewer frames a
+# second, down to VIDEO_MIN_FPS at the full length. Every frame is held in
+# memory, twice over while it is worked on, which is what sets the count.
+MAX_CLIP_SECONDS = 45
 VIDEO_MAX_EDGE = 480
 VIDEO_MAX_FPS = 30
 VIDEO_MIN_FPS = 10
-VIDEO_MAX_FRAMES = 300  # so thirty seconds, at the slowest
-VIDEO_TIMEOUT_SECONDS = 45.0
+VIDEO_MAX_FRAMES = MAX_CLIP_SECONDS * VIDEO_MIN_FPS
+VIDEO_TIMEOUT_SECONDS = 180.0
 VIDEO_CONTAINERS = {"mov": "mov,mp4,m4a,3gp,3g2,mj2", "matroska": "matroska,webm"}
 
 
@@ -116,7 +118,7 @@ def video_frame_rate(seconds: float | None) -> float:
     all of it fits in VIDEO_MAX_FRAMES if it can."""
     if not seconds:
         return float(VIDEO_MAX_FPS)
-    return float(min(VIDEO_MAX_FPS, max(VIDEO_MIN_FPS, VIDEO_MAX_FRAMES / seconds)))
+    return float(min(VIDEO_MAX_FPS, max(VIDEO_MIN_FPS, VIDEO_MAX_FRAMES / min(seconds, MAX_CLIP_SECONDS))))
 
 
 def video_to_animation(data: bytes) -> bytes:
@@ -139,7 +141,7 @@ def video_to_animation(data: bytes) -> bytes:
         # The container is named outright and only local files may be opened, so
         # a crafted upload cannot point ffmpeg at a playlist, a URL or another file.
         command = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", VIDEO_CONTAINERS[container],
-                   "-i", source.name, "-an", "-sn", "-map", "0:v:0", "-vf", steps, "-fps_mode", "vfr",
+                   "-t", str(MAX_CLIP_SECONDS), "-i", source.name, "-an", "-sn", "-map", "0:v:0", "-vf", steps, "-fps_mode", "vfr",
                    "-frames:v", str(VIDEO_MAX_FRAMES), "-threads", "2", "-c:v", "libwebp_anim", "-q:v", "90",
                    "-compression_level", "0", "-loop", "0", "-f", "webp", "pipe:1"]
         try:
@@ -159,12 +161,12 @@ MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 MAX_GIF_FRAMES = 120
 # A GIF is not read past this many frames, whatever is kept of them.
 MAX_SCANNED_FRAMES = 3000
-# Image work runs in executor threads; this many at once, bot-wide, each with
-# this long to finish. GIFs and videos multiply the cost by their frame count:
-# the slowest effect on the longest video takes about 40 seconds on its own,
-# and may be sharing the machine with another.
+# Image work runs in executor threads, this many at once, bot-wide. A command
+# takes as long as it takes: the slowest effects on a full-length video run for
+# minutes. The one limit is Discord's, which stops accepting a command's reply
+# fifteen minutes after it was run; work is given up a little before that.
 MAX_CONCURRENT_CPU_BOUND = 2
-CPU_BOUND_TIMEOUT_SECONDS = 120.0
+CPU_BOUND_TIMEOUT_SECONDS = 14 * 60.0
 # What a bot can upload where the server has no boosts (and in DMs).
 DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024
 # GIFs do not go faster than this in most viewers; shorter frames get slowed down instead.
@@ -239,10 +241,33 @@ def frame_budget(gif: int = MAX_GIF_FRAMES, video: int = VIDEO_MAX_FRAMES) -> in
     return video if _video_job.get() is not None else gif
 
 
+# Things a command's work wants said in its reply, such as that the clip was
+# cut. A dict the work can write to from its thread; started by defer().
+_run_notes: contextvars.ContextVar[dict | None] = contextvars.ContextVar("image_run_notes", default=None)
+
+
+def note_cut(seconds: float) -> None:
+    notes = _run_notes.get()
+    if notes is not None:
+        notes.setdefault("cut_at", seconds)
+
+
 def _frames_to_keep(image: Image.Image, limit: int) -> tuple[int, set[int] | None]:
     """(how many frames of the picture to read, which of them to keep). None
-    means all of them: only a picture with more than `limit` is thinned."""
+    means all of them: only a picture with more than `limit` is thinned. A GIF
+    that runs past MAX_CLIP_SECONDS is read up to there, which is noted for
+    the reply."""
     count = min(int(getattr(image, "n_frames", 1) or 1), MAX_SCANNED_FRAMES)
+    if image.format == "GIF" and count > 1:  # a GIF's timing can be read without decoding its pictures
+        clock = 0
+        for index in range(count):
+            image.seek(index)
+            clock += int(image.info.get("duration", 100) or 100)
+            if clock >= MAX_CLIP_SECONDS * 1000 and index + 1 < count:
+                count = index + 1
+                note_cut(clock / 1000.0)
+                break
+        image.seek(0)
     if count <= limit:
         return count, None
     return count, {round(index * count / limit) for index in range(limit)}
@@ -347,7 +372,7 @@ def write_animation(frames: list[Image.Image], durations: list[int], loop: int =
 
 VIDEO_OUT_FPS_LIMIT = 50
 VIDEO_OUT_MAX_TICKS = 1500
-VIDEO_OUT_TIMEOUT_SECONDS = 45.0
+VIDEO_OUT_TIMEOUT_SECONDS = 300.0
 
 
 def frames_to_video(frames: list[Image.Image], durations: list[int], *, sound_from: bytes | None = None,
@@ -665,6 +690,7 @@ class ImageToolkit:
 
     async def defer(self, interaction: discord.Interaction) -> None:
         _video_job.set(None)
+        _run_notes.set({})
         if not interaction.response.is_done():
             await interaction.response.defer(thinking=True)
 
@@ -681,8 +707,10 @@ class ImageToolkit:
         data, filename = await self.finish_video(interaction, data, filename)
         file = discord.File(io.BytesIO(data), filename=filename)
         description = description or f"Generated `{filename}`."
-        if job is not None and job.cut_at and job.frames is not None:
-            description += f"\nThat video was longer than I can work on, so this is its first {job.cut_at:.0f} seconds."
+        notes = _run_notes.get() or {}
+        cut_at = job.cut_at if job is not None and job.frames is not None else notes.get("cut_at")
+        if cut_at:
+            description += f"\nThat was longer than I can work on, so this is its first {cut_at:.0f} seconds."
         embed = self.bot.embeds.info_embed(title, description)
         if filename.lower().endswith(SUPPORTED_EXTENSIONS):  # video and sound cannot go inside an embed: Discord shows them under it
             embed.set_image(url=f"attachment://{filename}")

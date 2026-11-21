@@ -58,9 +58,24 @@ def test_a_command_working_on_a_video_may_use_more_frames():
 
 
 def test_frame_rate_follows_the_length_of_the_video():
-    assert video_frame_rate(None) == 30 and video_frame_rate(4) == 30  # short: as smooth as it can be
-    assert video_frame_rate(15) == 20 and video_frame_rate(30) == 10  # longer: fewer frames a second, all of it covered
-    assert video_frame_rate(300) == 10  # past thirty seconds there is a floor, and the end is left off
+    assert video_frame_rate(None) == 30 and video_frame_rate(4) == 30 and video_frame_rate(15) == 30  # short: as smooth as it can be
+    assert video_frame_rate(30) == 15 and video_frame_rate(45) == 10  # longer: fewer frames a second, all of it covered
+    assert video_frame_rate(300) == 10  # past forty-five seconds the end is left off, so the rate stops falling
+
+
+def test_a_gif_longer_than_the_cap_is_read_up_to_it_and_says_so():
+    frames = [Image.new("RGBA", (16, 16), (index * 4, 0, 0, 255)) for index in range(60)]
+    out = io.BytesIO()
+    frames[0].save(out, format="GIF", save_all=True, append_images=frames[1:], duration=1000, loop=0)  # a minute, a frame a second
+    token = imaging._run_notes.set({})
+    try:
+        loaded = load_frames(out.getvalue())
+        assert len(loaded.frames) == 45 and sum(loaded.durations) == 45000 and imaging._run_notes.get() == {"cut_at": 45.0}
+        imaging._run_notes.set({})
+        load_frames(long_gif())
+        assert imaging._run_notes.get() == {}  # nothing to say about one that fits
+    finally:
+        imaging._run_notes.reset(token)
 
 
 @pytest.mark.parametrize("name, exact", [("image transform flip", True), ("filter invert", True), ("memegen jail", True), ("animate pet", False)])
@@ -103,7 +118,7 @@ def test_a_whole_video_comes_back_and_an_overlong_one_says_so(storage, tmp_path)
         interaction.followup = Followup()
         tools.send_processed_file = types.MethodType(ImageToolkit.send_processed_file, tools)
         command = {c.qualified_name: c for c in harness.bot.tree.walk_commands()}["filter invert"]
-        for media in (clip(40, 10), twelve):
+        for media in (clip(50, 10), twelve):
             attachment = menu.FakeAttachment(media, "clip.mp4")
             attachment.content_type = "video/mp4"
             await command.callback(command.binding, interaction, attachment=attachment)
@@ -112,4 +127,4 @@ def test_a_whole_video_comes_back_and_an_overlong_one_says_so(storage, tmp_path)
 
     (long_note, long_name), (short_note, short_name) = menu.run(storage, body)
     assert long_name == short_name == "invert.mp4"
-    assert "its first 30 seconds" in long_note and "first" not in short_note
+    assert "its first 45 seconds" in long_note and "first" not in short_note
