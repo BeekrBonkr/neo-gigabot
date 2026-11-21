@@ -69,7 +69,9 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   encoded to MPEG-4, its stream is edited (keyframes taken out, motion frames repeated, thrown away or
   shuffled) and decoded again, so every smear is the real thing. Settings: `melt`, `every`, `start`,
   `end`, `skip`, `shuffle`, `blockiness`, `block_size`, `motion`, `cuts`, `length`, `reverse`, `seed`,
-  and `into`, a second clip whose motion drags the first one's picture around
+  and `into`, a second clip whose motion drags the first one's picture around. Right-click a message, then
+  Apps → Datamosh, for a private panel with all of those but `into`: set it up, press Mosh, change
+  something and go again
 - A GIF going in gives a GIF coming out, for every command except the two whose result is a
   still by nature (`/animate frames`, `/edit palette`): the meme formats, collages and cut-outs are built
   frame by frame, a pat or a bonk plays over the moving picture, and the result lasts exactly as long as
@@ -137,7 +139,7 @@ and survive the bot being kicked and re-invited.
 With **User Install** switched on for the application (Developer Portal → Installation), people can add the
 bot to their own account and use part of it in servers that never added it, in DMs and in group DMs:
 - Every image command (`/image`, `/filter`, `/animate`, `/memegen`, `/edit`) and the right-click menus
-  (Edit Image, Quote Message, Set Image Source, Clear Image Source)
+  (Edit Image, Quote Message, Datamosh, Set Image Source, Clear Image Source)
 - The fun commands that need no server: `/8ball`, `/roll`, `/coinflip`, `/trivia`, `/wiki`, `/weather`,
   `/gif`, `/meme`, `/hug`, `/tictactoe`, `/simon` and the like, plus `/about` and `/feedback`
 - A person's own playlists (`/music playlist …`, apart from `play`)

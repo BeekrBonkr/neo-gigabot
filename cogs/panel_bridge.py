@@ -1196,9 +1196,11 @@ class PanelBridge(commands.Cog):
         # Right-click ("Apps") commands live outside the slash tree.
         for kind in (discord.AppCommandType.message, discord.AppCommandType.user):
             for menu in self.bot.tree.get_commands(type=kind):
+                # a menu has no group to go by: the cog its handler belongs to says what it is for
+                owner = type(getattr(menu.callback, "__self__", None)).__name__
                 result.append(
                     {"name": menu.name, "description": f"Right-click a {kind.name}, then Apps.", "group": None,
-                     "category": "images" if "Image" in menu.name else "other", "kind": "menu", "requires": [], "params": [],
+                     "category": "images" if "Image" in menu.name or owner.startswith("Image") else "other", "kind": "menu", "requires": [], "params": [],
                      "added": command_dates.added_on(menu.name)}
                 )
         result.sort(key=lambda c: (c["kind"] != "slash", c["name"]))

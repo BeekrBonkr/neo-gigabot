@@ -34,7 +34,7 @@ PARTIAL_GROUPS = {
     }),
 }
 # Right-click menus.
-MENUS = frozenset({"Edit Image", "Quote Message", "Set Image Source", "Clear Image Source"})
+MENUS = frozenset({"Edit Image", "Quote Message", "Datamosh", "Set Image Source", "Clear Image Source"})
 
 INSTALLS = app_commands.AppInstallationType(guild=True, user=True)
 CONTEXTS = app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True)
