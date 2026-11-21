@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils import suggestions as store
 from utils.modules import enabled_in
 from utils.settings import get_guild_settings, update_guild_settings
@@ -69,7 +70,7 @@ class Suggestions(commands.Cog):
     def _channel(self, guild: discord.Guild) -> discord.TextChannel | None:
         settings = get_guild_settings(self.bot.storage_path, guild.id)
         raw = str(settings.get("suggestions_channel_id") or "") if enabled_in(settings, "suggestions") else ""
-        channel = guild.get_channel(int(raw)) if raw.isdigit() else None
+        channel = guild.get_channel(int(raw)) if is_digits(raw) else None
         return channel if isinstance(channel, discord.TextChannel) else None
 
     async def handle_vote(self, interaction: discord.Interaction, value: int) -> None:

@@ -14,6 +14,7 @@ import yt_dlp
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils import playlists as playlist_store
 from utils.playlists import PlaylistError
 from utils.user_app import home_guild
@@ -112,7 +113,7 @@ async def own_playlist_autocomplete(
 def parse_timestamp(value: str) -> int | None:
     """Seconds from "90", "1:30" or "1:02:03"; None if it isn't a time."""
     parts = (value or "").strip().split(":")
-    if not 1 <= len(parts) <= 3 or not all(part.isdigit() for part in parts):
+    if not 1 <= len(parts) <= 3 or not all(is_digits(part) for part in parts):
         return None
     if any(int(part) > 59 for part in parts[1:]):
         return None

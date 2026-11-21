@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils import rolemenus as store
 from utils.checks import server_permissions
 from utils.modules import module_enabled
@@ -222,10 +223,10 @@ class RoleMenus(commands.Cog):
             await interaction.response.send_message("This role menu is no longer active.", ephemeral=True)
             return
         if custom_id == SELECT_ID:
-            chosen, toggle = [int(v) for v in (interaction.data or {}).get("values", []) if str(v).isdigit()], False
+            chosen, toggle = [int(v) for v in (interaction.data or {}).get("values", []) if is_digits(str(v))], False
         else:
             raw = custom_id[len(BUTTON_PREFIX):]
-            chosen, toggle = ([int(raw)] if raw.isdigit() else []), True
+            chosen, toggle = ([int(raw)] if is_digits(raw) else []), True
         add_ids, remove_ids = store.plan_changes(menu["role_ids"], {role.id for role in member.roles}, chosen, mode=menu["mode"], toggle=toggle)
 
         def usable(role_id: int) -> discord.Role | None:
