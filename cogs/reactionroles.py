@@ -172,7 +172,7 @@ class ReactionRoles(
 
     async def _resolve_target_message(self, interaction: discord.Interaction, message_link: str) -> discord.Message | None:
         try:
-            message = await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild)
+            message = await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild, viewer=interaction.user)
         except ValueError as exc:
             await self.bot.embeds.error_interaction(interaction, "Invalid Message Link", str(exc), ephemeral=True)
             return None
