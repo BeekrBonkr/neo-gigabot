@@ -179,6 +179,10 @@ TOO_LARGE_MESSAGE = "That picture is too large to work on. Anything up to about 
 # minutes. The one limit is Discord's, which stops accepting a command's reply
 # fifteen minutes after it was run; work is given up a little before that.
 MAX_CONCURRENT_CPU_BOUND = 2
+# Each job waiting for a turn holds the picture it was given, so the line is
+# kept short: past this many waiting, a command is turned away at once.
+MAX_QUEUED_JOBS = 6
+BUSY_MESSAGE = "I'm busy with other pictures right now. Try again in a minute."
 CPU_BOUND_TIMEOUT_SECONDS = 14 * 60.0
 # What a bot can upload where the server has no boosts (and in DMs).
 DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024
@@ -609,6 +613,7 @@ class ImageToolkit:
         self.sources = ImageSourceStore()
         self._heavy_command_uses: dict[tuple[int, int], list[float]] = {}
         self._cpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CPU_BOUND)
+        self._cpu_waiting = 0  # jobs standing in line for a slot
 
     # ---------- running image work ----------
 
@@ -621,7 +626,17 @@ class ImageToolkit:
         # repeated timeouts. shield() keeps wait_for from cancelling the
         # executor future so the done callback fires at true completion.
         loop = asyncio.get_running_loop()
-        await self._cpu_semaphore.acquire()
+        deadline = loop.time() + timeout  # waiting for a turn counts: the reply is refused after fifteen minutes either way
+        if self._cpu_waiting >= MAX_QUEUED_JOBS:
+            raise RuntimeError(BUSY_MESSAGE)
+        self._cpu_waiting += 1
+        try:
+            await asyncio.wait_for(self._cpu_semaphore.acquire(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(BUSY_MESSAGE) from exc
+        finally:
+            self._cpu_waiting -= 1
+        timeout = max(0.01, deadline - loop.time())
         try:
             # run in a copy of this task's context, so the work can see the command's video job
             future = loop.run_in_executor(None, contextvars.copy_context().run, func)
