@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
 from utils.image_filters import hue_shift
-from utils.imaging import MAX_GIF_FRAMES, MIN_GIF_FRAME_MS, Frames, load_font, thin_frames
+from utils.imaging import MAX_GIF_FRAMES, MIN_GIF_FRAME_MS, VIDEO_MAX_FRAMES, Frames, frame_budget, load_font, thin_frames
 
 # Stills are shrunk to this before being animated: a GIF stores every frame
 # whole, so size is what decides whether the result fits Discord's upload cap.
@@ -49,7 +49,14 @@ def _steps(loaded: Frames, step_ms: list[int]) -> list[tuple[Image.Image, int, i
     total = max(1, sum(loaded.durations))
     steps: list[tuple[Image.Image, int, int]] = []
     clock = 0
-    while (clock < total or len(steps) % count) and len(steps) + (count - len(steps) % count) % count < MAX_GIF_FRAMES + 1:
+    # These are small pictures, so a video may have twice the usual frames. If the input
+    # still outlasts them, the effect is slowed just enough to reach its end.
+    most = frame_budget(MAX_GIF_FRAMES, VIDEO_MAX_FRAMES * 2)
+    loops = max(1, most // count)
+    stretch = total / (loops * sum(step_ms))
+    if stretch > 1:
+        step_ms = [math.ceil(duration * stretch) for duration in step_ms]
+    while (clock < total or len(steps) % count) and len(steps) + (count - len(steps) % count) % count < most + 1:
         at, picture = clock % total, loaded.frames[-1]
         for frame, duration in zip(loaded.frames, loaded.durations):
             if at < duration:

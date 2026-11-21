@@ -16,7 +16,8 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequ
 
 from utils import image_carve, image_faces, richtext
 from utils.imaging import (
-    CPU_BOUND_TIMEOUT_SECONDS, MIN_GIF_FRAME_MS, current_video_source, encode_frames, frames_to_video, gif_durations, load_frames,
+    CPU_BOUND_TIMEOUT_SECONDS, MAX_GIF_FRAMES, MIN_GIF_FRAME_MS, current_video_source, encode_frames, frames_to_video, gif_durations,
+    load_frames, thin_frames,
 )
 
 LINE_SPACING = 6
@@ -511,8 +512,9 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 if target_format == "webp":
                     frames[0].save(output, format="WEBP", save_all=True, append_images=frames[1:], duration=loaded.durations, loop=loaded.loop)
                 else:
+                    frames, times = thin_frames(frames, loaded.durations, MAX_GIF_FRAMES)  # a video's frames are more than a GIF should hold
                     frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loaded.loop,
-                                   duration=gif_durations(loaded.durations), disposal=2)
+                                   duration=gif_durations(times), disposal=2)
                 return output.getvalue(), f"converted.{target_format}"
 
         with Image.open(io.BytesIO(image_bytes)) as image:
