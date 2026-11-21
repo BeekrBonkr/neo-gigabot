@@ -313,3 +313,31 @@ def test_an_attachment_or_link_still_beats_the_clicked_message(storage):
             await tools.get_source_image(FakeInteraction(), None, None)
 
     run(storage, body)
+
+
+def test_quote_menu_quotes_the_clicked_message(storage):
+    class Avatar:
+        def replace(self, **_):
+            return self
+
+        async def read(self) -> bytes:
+            return png_bytes((128, 128))
+
+    author = types.SimpleNamespace(display_avatar=Avatar(), display_name="Somebody", name="somebody", mention="<@2>", id=2)
+
+    async def body(harness):
+        assert harness.bot.tree.get_command("Quote Message", type=discord.AppCommandType.message) is not None
+        await harness.cog.quote_message(FakeInteraction(), types.SimpleNamespace(content="tests are **worth** it", author=author, guild=None))
+        assert harness.errors == [] and harness.sent[0]["filename"] == "quote.png"
+        await harness.cog.quote_message(FakeInteraction(), types.SimpleNamespace(content="", author=author, guild=None))
+        assert harness.errors == [("Quote Failed", "That message does not have any text to quote.")]
+
+    run(storage, body)
+    update_guild_settings(storage, GUILD_ID, {"blocked_commands": ["image text quote"]})
+
+    async def blocked(harness):
+        interaction = FakeInteraction()
+        await harness.cog.quote_message(interaction, types.SimpleNamespace(content="hello", author=author, guild=None))
+        assert harness.sent == [] and "Command Disabled" in interaction.response.sent[0]["embed"].title
+
+    run(storage, blocked)
