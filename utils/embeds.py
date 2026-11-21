@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from utils.settings import get_embed_color_value
+from utils.user_app import home_guild
 
 
 @dataclass(slots=True)
@@ -28,6 +29,13 @@ class EmbedPayload:
     thumbnail_url: str | None = None
     image_url: str | None = None
     timestamp: bool = False
+
+
+def _home_guild_id(interaction: discord.Interaction) -> int | None:
+    """The server whose accent color applies: none where the bot is used as a
+    personal app in a server that never added it."""
+    guild = home_guild(interaction)
+    return guild.id if guild is not None else None
 
 
 class EmbedManager:
@@ -192,7 +200,7 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
-        self._apply_guild_accent(final_embed, interaction.guild_id)
+        self._apply_guild_accent(final_embed, _home_guild_id(interaction))
 
         if interaction.response.is_done():
             return await interaction.followup.send(
@@ -280,7 +288,7 @@ class EmbedManager:
             image_url=image_url,
             timestamp=timestamp,
         )
-        self._apply_guild_accent(final_embed, interaction.guild_id)
+        self._apply_guild_accent(final_embed, _home_guild_id(interaction))
         return await interaction.edit_original_response(content=content, embed=final_embed, **kwargs)
 
     async def success(self, target: commands.Context | discord.abc.Messageable, title: str, description: str, **kwargs: Any) -> discord.Message:
