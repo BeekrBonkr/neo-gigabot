@@ -50,7 +50,7 @@ def test_the_opened_commands_are_the_agreed_ones(tmp_path):
     assert len(opened) == 95 + 20 + 13 and menus == {"Edit Image", "Quote Message", "Datamosh", "Set Image Source", "Clear Image Source"}
     assert {"filter invert", "image effects deepfry", "memegen drake", "trivia", "hug", "music playlist create", "music playlist liked"} <= opened
     closed = {"image text quote", "image misc clearimagesource", "music play", "music playlist play", "music savenow", "insult", "kiss", "kill",
-              "reddit", "cursed", "help", "whatsnew", "greenhouse", "server", "snipe", "userinfo", "kick", "settings", "owner restart", "tag"}
+              "reddit", "cursed", "help", "whatsnew", "server", "snipe", "userinfo", "kick", "settings", "owner restart", "tag"}
     assert closed <= slash and not closed & opened
 
 
@@ -64,7 +64,7 @@ def test_marking_opens_whole_top_level_commands_and_nothing_else(tmp_path):
     marked = loaded_tree(tmp_path, body)
     for name in ("image", "filter", "edit", "animate", "memegen", "music", "ping", "about", "Edit Image", "Quote Message", "Set Image Source"):
         assert marked[name] == ([0, 1], [0, 1, 2]), name
-    for name in ("kick", "owner", "help", "reddit", "insult", "settings", "greenhouse", "tag"):
+    for name in ("kick", "owner", "help", "reddit", "insult", "settings", "tag"):
         assert marked[name][0] is None and 2 not in (marked[name][1] or []), name  # server installs only, as before
     assert sum(1 for installs, _ in marked.values() if installs) == 20 + 5 + 1 + 5
 
