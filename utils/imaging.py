@@ -875,7 +875,7 @@ class ImageToolkit:
             raise ValueError(f"That image is too large (max {MAX_IMAGE_DOWNLOAD_BYTES // (1024 * 1024)} MB).")
 
     async def fetch_message_from_link(self, interaction: discord.Interaction, message_link: str) -> discord.Message:
-        return await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild)
+        return await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild, viewer=interaction.user)
 
     async def get_media_source(
         self, interaction: discord.Interaction, attachment: discord.Attachment | None = None, message_link: str | None = None,

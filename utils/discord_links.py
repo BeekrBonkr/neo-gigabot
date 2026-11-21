@@ -55,14 +55,37 @@ async def resolve_channel_for_link(
     return channel
 
 
+async def can_read(channel: discord.abc.Messageable, viewer: discord.abc.User) -> bool:
+    """Whether `viewer` can read messages in `channel`."""
+    guild = getattr(channel, "guild", None)
+    if guild is None:  # a DM: only the person it is with
+        recipient = getattr(channel, "recipient", None)
+        return recipient is not None and recipient.id == viewer.id
+    member = guild.get_member(viewer.id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(viewer.id)
+        except discord.HTTPException:
+            return False
+    permissions = channel.permissions_for(member)
+    return bool(permissions.view_channel and permissions.read_message_history)
+
+
 async def fetch_message_from_link(
     bot: discord.Client,
     message_link: str,
     *,
     hint_guild: discord.Guild | None = None,
+    viewer: discord.abc.User | None = None,
 ) -> discord.Message:
+    """The message a link points at. The bot reads it with its own access, so
+    `viewer` (the person who gave the link) must be able to read that channel
+    themselves: otherwise a link is a way to have the bot fetch from a channel,
+    or a server, the person is not in."""
     guild_id, channel_id, message_id = parse_message_link(message_link)
     channel = await resolve_channel_for_link(bot, guild_id, channel_id, hint_guild=hint_guild)
+    if viewer is not None and not await can_read(channel, viewer):
+        raise ValueError("I could not fetch that message. Make sure the link is valid and that you can see that channel.")
 
     if not hasattr(channel, "fetch_message"):
         raise ValueError("That message link does not point to a fetchable text channel.")
