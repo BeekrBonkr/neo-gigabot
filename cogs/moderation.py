@@ -34,6 +34,9 @@ MAX_TIMEOUT = timedelta(days=28)
 MASS_ACTION_DELAY_SECONDS = 0.5
 MASS_ACTION_PROGRESS_INTERVAL = 10
 MAX_MASS_ACTION_TARGETS = 300
+# A reason goes into an embed and into Discord's audit log, which keeps 512 characters
+# including the moderator's name in front of it.
+MAX_REASON_LENGTH = 400
 
 PRUNE_MODE_CHOICES = [
     app_commands.Choice(name="default", value="default"),
@@ -277,6 +280,8 @@ class Moderation(commands.Cog):
         *bot's* top role."""
         if interaction.guild.owner_id == interaction.user.id:
             return True
+        if target.id == interaction.guild.owner_id:
+            return False  # nobody outranks the owner, whatever roles the owner does or does not hold
         own_top = getattr(interaction.user, "top_role", None)  # a plain User (no roles) outranks nobody
         return own_top is not None and own_top > target.top_role
 
@@ -438,7 +443,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="say", description="Send an embed containing your message.")
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.guild_only()
-    async def say(self, interaction: discord.Interaction, message: str) -> None:
+    async def say(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 4000]) -> None:
         embed = self.bot.embeds.create(
             title="Message",
             description=message,
@@ -452,7 +457,7 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(kick_members=True)
     @app_commands.checks.bot_has_permissions(kick_members=True)
     @app_commands.guild_only()
-    async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+    async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         if user.id == interaction.user.id:
             await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't kick yourself.", ephemeral=True)
             return
@@ -498,7 +503,7 @@ class Moderation(commands.Cog):
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        reason: str | None = None,
+        reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None,
         delete_message_days: app_commands.Range[int, 0, 7] = 0,
     ) -> None:
         if user.id == interaction.user.id:
@@ -554,7 +559,7 @@ class Moderation(commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member,
         duration: str,
-        reason: str | None = None,
+        reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None,
         delete_message_days: app_commands.Range[int, 0, 7] = 0,
     ) -> None:
         delta = parse_duration(duration)
@@ -615,7 +620,7 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(ban_members=True)
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
-    async def unban(self, interaction: discord.Interaction, user_id: str, reason: str | None = None) -> None:
+    async def unban(self, interaction: discord.Interaction, user_id: str, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         if not is_digits(user_id):
             await self.bot.embeds.error_interaction(interaction, "Invalid ID", "That doesn't look like a valid user ID.", ephemeral=True)
             return
@@ -657,7 +662,7 @@ class Moderation(commands.Cog):
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        reason: str | None = None,
+        reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None,
         delete_message_days: app_commands.Range[int, 1, 7] = 1,
     ) -> None:
         if user.id == interaction.user.id:
@@ -744,7 +749,7 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.checks.bot_has_permissions(moderate_members=True)
     @app_commands.guild_only()
-    async def mute(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: str | None = None) -> None:
+    async def mute(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         delta = parse_duration(duration)
         if delta is None:
             await self.bot.embeds.error_interaction(
@@ -789,9 +794,12 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.checks.bot_has_permissions(moderate_members=True)
     @app_commands.guild_only()
-    async def unmute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+    async def unmute(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
         if not user.is_timed_out():
             await self.bot.embeds.info_interaction(interaction, "Not Muted", f"{user.mention} isn't currently muted.")
+            return
+        if user.id != interaction.user.id and not self._invoker_outranks(interaction, user):
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't unmute someone at or above your highest role.", ephemeral=True)
             return
 
         try:
@@ -810,7 +818,7 @@ class Moderation(commands.Cog):
     @app_commands.describe(user="Member to warn", reason="Reason for the warning")
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.guild_only()
-    async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: str) -> None:
+    async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH]) -> None:
         if user.id == interaction.user.id:
             await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't warn yourself.", ephemeral=True)
             return
@@ -902,6 +910,12 @@ class Moderation(commands.Cog):
     @app_commands.describe(user="Member whose warnings should be cleared")
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warnings_clear(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        if user.id == interaction.user.id and interaction.guild.owner_id != interaction.user.id:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't clear your own warnings.", ephemeral=True)
+            return
+        if not self._invoker_outranks(interaction, user):
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "You can't clear the warnings of someone at or above your highest role.", ephemeral=True)
+            return
         removed_count = clear_warnings(self.bot.storage_path, interaction.guild.id, user.id)
         if removed_count == 0:
             await self.bot.embeds.info_interaction(interaction, "No Warnings", f"{user.mention} has no warnings on record.", ephemeral=True)

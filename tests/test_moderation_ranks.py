@@ -147,3 +147,31 @@ def test_lock_and_slowmode_ask_about_the_channel_being_changed(server):
     asyncio.run(Moderation.slowmode.callback(server.cog, make_interaction(server.guild, server.admin), "10s", other))
     asyncio.run(Moderation.lock.callback(server.cog, make_interaction(server.guild, server.admin), other))
     assert len(edits) == 2
+
+
+def test_nobody_outranks_the_owner_and_nobody_clears_their_own_warnings(server):
+    from utils.warnings import add_warning, list_warnings
+
+    owner = Member(77, "owner", [EVERYONE], guild=server.guild)  # holds no role at all
+    server.guild.members.append(owner)
+    assert server.cog._invoker_outranks(make_interaction(server.guild, server.helper), owner) is False
+    assert server.cog._invoker_outranks(make_interaction(server.guild, owner), server.admin) is True
+
+    add_warning(server.storage, server.guild.id, server.helper.id, server.admin.id, "spam")
+    interaction = make_interaction(server.guild, server.helper)
+    asyncio.run(Moderation.warnings_clear.callback(server.cog, interaction, server.helper))
+    assert "can't clear your own warnings" in said(interaction)
+    add_warning(server.storage, server.guild.id, server.admin.id, server.admin.id, "x")
+    interaction = make_interaction(server.guild, server.helper)
+    asyncio.run(Moderation.warnings_clear.callback(server.cog, interaction, server.admin))
+    assert "at or above your highest role" in said(interaction)
+    assert len(list_warnings(server.storage, server.guild.id, server.helper.id)) == 1
+
+
+def test_reasons_and_say_text_are_limited_to_what_discord_will_take():
+    limits = {}
+    for name in ("kick", "ban", "tempban", "softban", "mute", "unmute", "warn", "unban"):
+        command = getattr(Moderation, name)
+        limits[name] = command._params["reason"].max_value
+    assert set(limits.values()) == {moderation.MAX_REASON_LENGTH}, limits
+    assert Moderation.say._params["message"].max_value == 4000
