@@ -47,7 +47,7 @@ def test_the_opened_commands_are_the_agreed_ones(tmp_path):
         return opened, slash, {name for name in menus if user_app.works_as_user_app(name, menu=True)}
 
     opened, slash, menus = loaded_tree(tmp_path, body)
-    assert len(opened) == 93 + 20 + 13 and menus == {"Edit Image", "Quote Message", "Set Image Source", "Clear Image Source"}
+    assert len(opened) == 94 + 20 + 13 and menus == {"Edit Image", "Quote Message", "Set Image Source", "Clear Image Source"}
     assert {"filter invert", "image effects deepfry", "memegen drake", "trivia", "hug", "music playlist create", "music playlist liked"} <= opened
     closed = {"image text quote", "image misc clearimagesource", "music play", "music playlist play", "music savenow", "insult", "kiss", "kill",
               "reddit", "cursed", "help", "whatsnew", "greenhouse", "server", "snipe", "userinfo", "kick", "settings", "owner restart", "tag"}

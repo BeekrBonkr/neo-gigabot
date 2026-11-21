@@ -39,7 +39,7 @@ FORM_ANSWERS = {
     "memegen watermark": {"style": "ifunny"},
     "memegen scene": {"scene": "museum"},
 }
-NEEDS_A_GIF = {"animate frames", "animate reverse", "animate speed"}
+NEEDS_A_GIF = {"animate datamosh", "animate frames", "animate reverse", "animate speed"}
 
 
 def png_bytes(size=(96, 72)) -> bytes:
@@ -59,7 +59,11 @@ class FakeAttachment:
 
 
 def gif_bytes(count=4) -> bytes:
-    frames = [Image.new("RGBA", (64, 48), (index * 60, 120, 200, 255)) for index in range(count)]
+    frames = []
+    for index in range(count):  # something moving over a steady background, as in a real clip
+        frame = Image.new("RGBA", (64, 48), (40, 120, 200, 255))
+        frame.paste((250, 220, 40, 255), (8 * index, 12, 8 * index + 20, 36))
+        frames.append(frame)
     out = io.BytesIO()
     frames[0].save(out, format="GIF", save_all=True, append_images=frames[1:], duration=80, loop=0)
     return out.getvalue()

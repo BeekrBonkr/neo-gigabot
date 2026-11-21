@@ -65,6 +65,11 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   with the original sound laid back under it (first few seconds, up to 480 px). The sound is left off
   when the result no longer runs like the original (`/animate speed`). `/image effects convert` turns a
   video into a GIF or a GIF into an MP4 on request, and `/animate togif` always gives a GIF
+- **Datamosh** (`/animate datamosh`): breaks a GIF or a video the way a damaged file breaks. The clip is
+  encoded to MPEG-4, its stream is edited (keyframes taken out, motion frames repeated, thrown away or
+  shuffled) and decoded again, so every smear is the real thing. Settings: `melt`, `every`, `start`,
+  `end`, `skip`, `shuffle`, `blockiness`, `block_size`, `motion`, `cuts`, `length`, `reverse`, `seed`,
+  and `into`, a second clip whose motion drags the first one's picture around
 - A GIF going in gives a GIF coming out, for every command except the two whose result is a
   still by nature (`/animate frames`, `/edit palette`): the meme formats, collages and cut-outs are built
   frame by frame, a pat or a bonk plays over the moving picture, and the result lasts exactly as long as
