@@ -31,5 +31,20 @@ RestartSec=5
 User=michael
 TimeoutStartSec=30
 
+# The bot decodes pictures, GIFs and video that strangers upload. A ceiling on
+# memory keeps one bad upload from taking the whole machine down with it
+# (systemd restarts the bot instead), and it never needs new privileges.
+MemoryHigh=3G
+MemoryMax=4G
+TasksMax=512
+NoNewPrivileges=yes
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
 [Install]
 WantedBy=multi-user.target
