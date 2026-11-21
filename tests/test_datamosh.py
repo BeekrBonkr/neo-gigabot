@@ -122,3 +122,80 @@ def test_the_command_gives_a_gif_for_a_gif_and_a_video_with_sound_for_a_video(st
     data, filename = video.run_command(storage, clips["sound"], "animate datamosh", melt=20, every=6, length=stretch)
     found = video.streams(data, tmp_path)
     assert list(found) == ["video:h264"] and found["video:h264"] > 3.0  # stretched past its sound, so it goes without
+
+
+def test_the_right_click_panel_sets_things_up_and_runs_the_command(storage):
+    MoshForm, MoshPanel = menu.image_menu.MoshForm, menu.image_menu.MoshPanel  # the module the harness set up
+
+    async def body(harness):
+        cog = harness.cog
+        assert harness.bot.tree.get_command("Datamosh", type=__import__("discord").AppCommandType.message) is not None
+        empty = menu.FakeInteraction()
+        await cog.datamosh(empty, __import__("types").SimpleNamespace(attachments=[], embeds=[]))
+        assert "Nothing To Mosh" in empty.response.sent[0]["embed"].title
+
+        target = __import__("types").SimpleNamespace(attachments=[menu.FakeAttachment(gif_of(clip()), "clip.gif")], embeds=[])
+        opened = menu.FakeInteraction()
+        await cog.datamosh(opened, target)
+        panel = opened.response.sent[0]["view"]
+        assert isinstance(panel, MoshPanel) and opened.response.sent[0]["ephemeral"] is True
+        # four dropdowns, one for each pick-one setting, and a row of buttons
+        assert [type(item).__name__ for item in panel.children].count("MoshChoice") == 4
+        assert [item.label for item in panel.children if hasattr(item, "label")] == ["Mosh", "Amounts", "Range and seed", "Reverse: off"]
+        assert "melt **6**" in panel.embed().description and "seed **random**" in panel.embed().description
+
+        edits = []
+
+        class Editing(menu.Response):
+            async def edit_message(self, **kwargs):
+                edits.append(kwargs)
+                self.done = True
+
+        def press():
+            interaction = menu.FakeInteraction()
+            interaction.response = Editing()
+            return interaction
+
+        # the two forms hold every number the command takes, filled in with where things stand
+        forms = {}
+        for label in ("Amounts", "Range and seed"):
+            pressed = press()
+            await next(item for item in panel.children if getattr(item, "label", "") == label).callback(pressed)
+            forms[label] = pressed.response.modal
+            assert isinstance(forms[label], MoshForm)
+        amounts = {parameter.name: component for parameter, component in forms["Amounts"].fields}
+        assert list(amounts) == ["melt", "every", "skip", "shuffle", "blockiness"] and amounts["melt"].default == "6"
+        amounts["melt"]._value, amounts["every"]._value, amounts["skip"]._value = "9", "5", ""
+        amounts["shuffle"]._value, amounts["blockiness"]._value = "20", "99"
+        refused = press()
+        await forms["Amounts"].on_submit(refused)
+        assert "Check Those Values" in refused.response.sent[0]["embed"].title and panel.values == {}  # nothing half-applied
+        amounts["blockiness"]._value = "12"
+        await forms["Amounts"].on_submit(press())
+        assert panel.values == {"melt": 9, "every": 5, "shuffle": 20, "blockiness": 12} and "melt **9**" in edits[-1]["embed"].description
+
+        chunky = next(item for item in panel.children if getattr(item, "parameter", None) is not None and item.parameter.name == "block_size")
+        chunky._values = ["chunky"]
+        await chunky.callback(press())
+        await panel.toggle_reverse(press())
+        assert panel.values["block_size"] == "chunky" and panel.values["reverse"] is True and panel.reverse_button.label == "Reverse: on"
+        assert [option.default for option in chunky.options] == [False, False, True]
+
+        seen = {}
+        real = mosh.datamosh
+
+        def watch(clip_frames, settings, into=None):
+            seen["settings"] = settings
+            return real(clip_frames, settings, into)
+
+        mosh.datamosh = watch
+        try:
+            await panel.run(menu.FakeInteraction())
+        finally:
+            mosh.datamosh = real
+        assert harness.errors == [] and harness.sent[0]["filename"] == "datamosh.gif"
+        used = seen["settings"]
+        assert (used.melt, used.every, used.shuffle, used.blockiness, used.block_size, used.reverse) == (9, 5, 20, 12, "chunky", True)
+        assert used.skip == 0 and used.motion == "smear"  # what was left alone is the command's own default
+
+    menu.run(storage, body)

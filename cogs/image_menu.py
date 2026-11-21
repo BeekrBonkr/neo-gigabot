@@ -13,6 +13,11 @@ log = logging.getLogger(__name__)
 MENU_NAME = "Edit Image"
 QUOTE_MENU_NAME = "Quote Message"
 QUOTE_COMMAND = "image text quote"  # the slash command the quote menu stands in for
+MOSH_MENU_NAME = "Datamosh"
+MOSH_COMMAND = "animate datamosh"  # the slash command the datamosh panel runs
+MOSH_PANEL_TIMEOUT_SECONDS = 900  # as long as Discord lets the panel be redrawn
+# The panel's two forms: a form holds five fields, and these are the numbers the command takes.
+MOSH_FORMS = (("Amounts", ("melt", "every", "skip", "shuffle", "blockiness")), ("Range and seed", ("start", "end", "seed")))
 MAX_SELECT_OPTIONS = 25  # Discord's cap on one dropdown
 MAX_FORM_FIELDS = 5  # and on one pop-up form
 PICKER_TIMEOUT_SECONDS = 300
@@ -246,24 +251,160 @@ class EffectPicker(discord.ui.View):
         log.exception("Edit Image picker failed", exc_info=error)
 
 
+class MoshForm(discord.ui.Modal):
+    """Some of the datamosh panel's numbers. Sending it puts them on the panel; nothing runs yet."""
+
+    def __init__(self, panel: MoshPanel, title: str, names: tuple[str, ...]) -> None:
+        super().__init__(title=title, timeout=MOSH_PANEL_TIMEOUT_SECONDS)
+        self.panel = panel
+        self.fields: list[tuple[app_commands.Parameter, discord.ui.TextInput]] = []
+        for name in names:
+            parameter = panel.parameters[name]
+            component = _field_input(parameter)
+            component.default = None if panel.current(name) is None else str(panel.current(name))
+            self.add_item(discord.ui.Label(text=field_label(parameter)[:45], description=parameter.description[:100], component=component))
+            self.fields.append((parameter, component))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        problems: list[str] = []
+        entered: dict[str, object] = {}
+        for parameter, component in self.fields:
+            try:
+                entered[parameter.name] = parse_field(parameter, component.value)
+            except ValueError as exc:
+                problems.append(str(exc))
+        if problems:
+            await self.panel.cog.bot.embeds.error_interaction(interaction, "Check Those Values", "\n".join(problems), ephemeral=True)
+            return
+        for name, value in entered.items():
+            if value is NOT_GIVEN:
+                self.panel.values.pop(name, None)  # emptied: back to what the command does by default
+            else:
+                self.panel.values[name] = value
+        await interaction.response.edit_message(embed=self.panel.embed(), view=self.panel)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception("Datamosh form failed", exc_info=error)
+
+
+class MoshChoice(discord.ui.Select):
+    """One of the command's pick-one settings, as a dropdown that shows what is picked."""
+
+    def __init__(self, panel: MoshPanel, parameter: app_commands.Parameter, row: int) -> None:
+        self.panel, self.parameter = panel, parameter
+        picked = panel.values.get(parameter.name, parameter.choices[0].value)  # the first choice is what the command does unasked
+        options = [
+            discord.SelectOption(label=f"{field_label(parameter)}: {choice.name}"[:100], value=str(choice.value), default=choice.value == picked)
+            for choice in parameter.choices
+        ]
+        super().__init__(options=options, row=row)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.panel.values[self.parameter.name] = self.values[0]
+        for option in self.options:
+            option.default = option.value == self.values[0]
+        await interaction.response.edit_message(embed=self.panel.embed(), view=self.panel)
+
+
+class MoshPanel(discord.ui.View):
+    """The private settings panel for datamoshing one message's clip: every
+    setting of /animate datamosh that does not need a second file. It stays
+    open after a run, so the settings can be changed and tried again."""
+
+    def __init__(self, cog: ImageMenu, command: app_commands.Command, target: discord.Message) -> None:
+        super().__init__(timeout=MOSH_PANEL_TIMEOUT_SECONDS)
+        self.cog, self.command, self.target = cog, command, target
+        self.parameters = {parameter.name: parameter for parameter in command.parameters}
+        self.values: dict[str, object] = {}  # only what has been changed; the command fills in the rest
+        choices = [parameter for parameter in command.parameters if parameter.choices]
+        for row, parameter in enumerate(choices[:4]):
+            self.add_item(MoshChoice(self, parameter, row))
+
+        run = discord.ui.Button(label="Mosh", style=discord.ButtonStyle.primary, row=4)
+        run.callback = self.run
+        self.add_item(run)
+        for title, names in MOSH_FORMS:
+            button = discord.ui.Button(label=title, style=discord.ButtonStyle.secondary, row=4)
+            button.callback = self._opens(title, names)
+            self.add_item(button)
+        self.reverse_button = discord.ui.Button(label="Reverse: off", style=discord.ButtonStyle.secondary, row=4)
+        self.reverse_button.callback = self.toggle_reverse
+        self.add_item(self.reverse_button)
+
+    def current(self, name: str) -> object:
+        """A setting as it stands: what was entered, or else the command's own default."""
+        return self.values.get(name, self.parameters[name].default)
+
+    def embed(self) -> discord.Embed:
+        numbers = [name for _, names in MOSH_FORMS for name in names]
+        lines = " · ".join(
+            f"{field_label(self.parameters[name]).lower()} **{'random' if self.current(name) is None else self.current(name)}**" for name in numbers
+        )
+        return self.cog.bot.embeds.info_embed(
+            MOSH_MENU_NAME,
+            "Set it up, then press **Mosh**. This panel stays open, so you can change things and go again.\n\n" + lines,
+        )
+
+    def _opens(self, title: str, names: tuple[str, ...]):
+        async def open_form(interaction: discord.Interaction) -> None:
+            await interaction.response.send_modal(MoshForm(self, title, names))
+
+        return open_form
+
+    async def toggle_reverse(self, interaction: discord.Interaction) -> None:
+        self.values["reverse"] = not self.values.get("reverse", False)
+        self.reverse_button.label = f"Reverse: {'on' if self.values['reverse'] else 'off'}"
+        self.reverse_button.style = discord.ButtonStyle.success if self.values["reverse"] else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def run(self, interaction: discord.Interaction) -> None:
+        if not await self.cog.bot.command_gate(interaction, self.command.qualified_name):
+            return
+        await self.cog.run_effect(interaction, self.command, self.target, dict(self.values))
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        log.exception("Datamosh panel failed", exc_info=error)
+
+
 class ImageMenu(commands.Cog):
     """Right-click a message, then Apps: Edit Image runs an image command on
-    that message's image, and Quote Message makes a quote image of its text.
-    Neither needs a link to the message."""
+    that message's image, Quote Message makes a quote image of its text, and
+    Datamosh opens a settings panel for breaking its GIF or video. None of
+    them needs a link to the message."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.menu = app_commands.ContextMenu(name=MENU_NAME, callback=self.edit_image)
         self.quote_menu = app_commands.ContextMenu(name=QUOTE_MENU_NAME, callback=self.quote_message)
         app_commands.checks.cooldown(1, 5.0)(self.quote_menu)
+        self.mosh_menu = app_commands.ContextMenu(name=MOSH_MENU_NAME, callback=self.datamosh)
 
     async def cog_load(self) -> None:
         self.bot.tree.add_command(self.menu)
         self.bot.tree.add_command(self.quote_menu)
+        self.bot.tree.add_command(self.mosh_menu)
 
     async def cog_unload(self) -> None:
         self.bot.tree.remove_command(self.menu.name, type=self.menu.type)
         self.bot.tree.remove_command(self.quote_menu.name, type=self.quote_menu.type)
+        self.bot.tree.remove_command(self.mosh_menu.name, type=self.mosh_menu.type)
+
+    async def datamosh(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """Open the datamosh panel for the clip in the message that was clicked."""
+        command = self.bot.tree.get_command("animate")
+        command = command.get_command("datamosh") if isinstance(command, app_commands.Group) else None
+        if command is None:
+            await self.bot.embeds.error_interaction(interaction, "Not Available", "Datamoshing is not available right now.", ephemeral=True)
+            return
+        if not self.bot.image_tools.message_has_image(message):
+            await self.bot.embeds.error_interaction(
+                interaction, "Nothing To Mosh", "That message does not contain a GIF or a video.", ephemeral=True,
+            )
+            return
+        if not await self.bot.command_gate(interaction, command.qualified_name):
+            return
+        panel = MoshPanel(self, command, message)
+        await interaction.response.send_message(embed=panel.embed(), view=panel, ephemeral=True)
 
     async def quote_message(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """/image text quote, for the message that was clicked."""
