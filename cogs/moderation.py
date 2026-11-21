@@ -220,36 +220,49 @@ class Moderation(commands.Cog):
 
     @tasks.loop(seconds=60)
     async def _process_due_tempbans(self) -> None:
-        for entry in due_tempbans(self.bot.storage_path):
-            guild = self.bot.get_guild(entry["guild_id"])
-            if guild is None:
-                # Bot is no longer in that guild - the schedule can't be honored.
-                remove_tempban(self.bot.storage_path, entry["guild_id"], entry["user_id"])
-                continue
-
+        # tasks.loop stops for good on any error that is not a dropped connection, and bans that
+        # should have ended would then quietly last forever: nothing may escape a pass.
+        try:
+            due = due_tempbans(self.bot.storage_path)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Could not read the tempbans that are due; trying again in a minute")
+            return
+        for entry in due:
             try:
-                await guild.unban(
-                    discord.Object(id=entry["user_id"]),
-                    reason=f"Tempban expired (banned by moderator {entry['moderator_id']})",
-                )
-            except discord.NotFound:
-                pass  # already unbanned manually - nothing left to do
-            except discord.Forbidden:
-                # Retrying every minute won't grant us the permission; drop the
-                # row and leave a trail instead of spinning forever.
-                LOGGER.warning("Cannot unban user %s in guild %s (missing permissions)", entry["user_id"], guild.id)
-            except discord.HTTPException as exc:
-                LOGGER.warning("Transient error unbanning user %s in guild %s: %s", entry["user_id"], guild.id, exc)
-                continue  # keep the row; retry next tick
+                await self._expire_tempban(entry)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Ending the tempban of user %s in guild %s failed", entry.get("user_id"), entry.get("guild_id"))
 
+    async def _expire_tempban(self, entry: dict) -> None:
+        guild = self.bot.get_guild(entry["guild_id"])
+        if guild is None:
+            # Bot is no longer in that guild - the schedule can't be honored.
             remove_tempban(self.bot.storage_path, entry["guild_id"], entry["user_id"])
+            return
 
-            target = await self._fetch_user_quiet(entry["user_id"])
-            if target is not None:
-                await self._log_mod_action(
-                    guild, event="ban", title="🔓 Tempban Expired", color=self.bot.embeds.success_color,
-                    target=target, moderator=self.bot.user, reason=entry["reason"] or None,
-                )
+        try:
+            await guild.unban(
+                discord.Object(id=entry["user_id"]),
+                reason=f"Tempban expired (banned by moderator {entry['moderator_id']})",
+            )
+        except discord.NotFound:
+            pass  # already unbanned manually - nothing left to do
+        except discord.Forbidden:
+            # Retrying every minute won't grant us the permission; drop the
+            # row and leave a trail instead of spinning forever.
+            LOGGER.warning("Cannot unban user %s in guild %s (missing permissions)", entry["user_id"], guild.id)
+        except discord.HTTPException as exc:
+            LOGGER.warning("Transient error unbanning user %s in guild %s: %s", entry["user_id"], guild.id, exc)
+            return  # keep the row; retry next tick
+
+        remove_tempban(self.bot.storage_path, entry["guild_id"], entry["user_id"])
+
+        target = await self._fetch_user_quiet(entry["user_id"])
+        if target is not None:
+            await self._log_mod_action(
+                guild, event="ban", title="🔓 Tempban Expired", color=self.bot.embeds.success_color,
+                target=target, moderator=self.bot.user, reason=entry["reason"] or None,
+            )
 
     @_process_due_tempbans.before_loop
     async def _before_tempban_loop(self) -> None:

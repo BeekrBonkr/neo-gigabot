@@ -86,7 +86,8 @@ def write_transaction(storage_path: Path) -> Iterator[sqlite3.Connection]:
         yield connection
         connection.execute("COMMIT")
     except BaseException:
-        connection.execute("ROLLBACK")
+        if connection.in_transaction:  # not when BEGIN itself failed: a rollback there would hide the real error
+            connection.execute("ROLLBACK")
         raise
     finally:
         connection.close()
