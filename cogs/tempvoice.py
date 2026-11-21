@@ -79,10 +79,12 @@ class TempVoice(commands.Cog):
                 return
             store.remove(self.bot.storage_path, channel_id)
         settings = get_guild_settings(self.bot.storage_path, guild.id)
-        overwrites = {
-            member: discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True),
-            guild.me: discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True, view_channel=True),
-        }
+        # Start from the hub's own permissions. A channel created with overwrites of its own does
+        # not take its category's, so without this a channel made under a staff-only or
+        # verified-only hub would be open to everyone.
+        overwrites = dict(getattr(hub, "overwrites", None) or {})
+        overwrites[member] = discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True, view_channel=True)
+        overwrites[guild.me] = discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True, view_channel=True)
         try:
             channel = await guild.create_voice_channel(
                 channel_name(str(settings.get("tempvoice_name") or ""), member), category=hub.category, overwrites=overwrites,

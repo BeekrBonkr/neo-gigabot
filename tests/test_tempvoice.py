@@ -93,3 +93,27 @@ def test_a_channel_nobody_could_be_moved_into_is_cleaned_up_and_restarts_sweep_e
     store.add(storage, 999, 1, 5)                       # and one whose channel is already gone
     asyncio.run(cog.on_ready())
     assert 101 in deleted and store.all_channels(storage) == []
+
+
+def test_a_new_channel_keeps_the_restrictions_of_the_hub_it_came_from(storage):
+    import discord
+
+    cog, hub, member, state, channels, created, deleted = _world(storage)
+    sent = {}
+    everyone, verified = object(), object()
+    hub.overwrites = {
+        everyone: discord.PermissionOverwrite(view_channel=False, connect=False),
+        verified: discord.PermissionOverwrite(view_channel=True, connect=True),
+    }
+    guild = hub_guild = cog.bot.get_guild(1)
+    make = guild.create_voice_channel
+
+    async def create_voice_channel(name, overwrites=None, **kwargs):
+        sent.update(overwrites)
+        return await make(name, overwrites=overwrites, **kwargs)
+
+    hub_guild.create_voice_channel = create_voice_channel
+    robin = member(7)
+    asyncio.run(cog.create_for(robin, hub))
+    assert sent[everyone].view_channel is False and sent[everyone].connect is False and sent[verified].connect is True
+    assert sent[robin].manage_channels is True and sent[guild.me].view_channel is True
