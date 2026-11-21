@@ -31,7 +31,8 @@ run_pip() {
 version() { run_pip show yt-dlp 2>/dev/null | awk '/^Version:/ {print $2}'; }
 
 before=$(version)
-run_pip install --quiet --upgrade yt-dlp
+# Wheels only (no setup script is run) and nothing but yt-dlp itself.
+run_pip install --quiet --upgrade --only-binary=:all: --no-deps yt-dlp
 after=$(version)
 
 if [ "$before" = "$after" ]; then
@@ -44,6 +45,12 @@ if [ "$SCOPE" = "user" ]; then
     if systemctl --user is-active --quiet "$SERVICE"; then
         systemctl --user restart "$SERVICE"
     fi
+    exit 0
+fi
+# From the timer this runs as the bot's user, not root: leave a marker, and the
+# unit's own ExecStartPost restarts the bot (only if it is running).
+if [ -n "${YTDLP_CHANGED_MARKER:-}" ]; then
+    touch "$YTDLP_CHANGED_MARKER"
     exit 0
 fi
 # Only restart when the service is actually running; a stopped bot stays stopped.
