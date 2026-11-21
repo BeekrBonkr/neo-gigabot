@@ -55,6 +55,33 @@ COGS = [
 ]
 
 
+# Discord's own names for permissions, where they differ from the code name.
+PERMISSION_NAMES = {
+    "moderate_members": "Timeout Members", "manage_guild": "Manage Server", "manage_roles": "Manage Roles",
+    "manage_channels": "Manage Channels", "manage_emojis_and_stickers": "Manage Expressions", "manage_expressions": "Manage Expressions",
+    "view_audit_log": "View Audit Log", "read_message_history": "Read Message History", "external_emojis": "Use External Emojis",
+    "use_external_emojis": "Use External Emojis", "manage_nicknames": "Manage Nicknames", "mention_everyone": "Mention @everyone",
+}
+
+
+def permission_names(names: list[str]) -> str:
+    """Permissions as Discord's settings show them: "**Kick Members** and **Timeout Members**"."""
+    shown = [f"**{PERMISSION_NAMES.get(name, name.replace('_', ' ').title())}**" for name in names]
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+def invalid_value_message(error: app_commands.TransformerError) -> str:
+    """Which value was wrong, and what was expected there."""
+    kind = getattr(getattr(error, "type", None), "name", "") or ""
+    expected = {"user": "a member of this server", "channel": "a channel I can see", "role": "a role", "integer": "a whole number", "number": "a number"}.get(kind)
+    value = str(getattr(error, "value", "") or "")[:80]
+    if expected and kind == "user":
+        return "That person is not in this server, and this command needs a member."
+    if expected:
+        return f"`{value}` is not {expected}." if value else f"One value should have been {expected}."
+    return "One of the values you entered was invalid."
+
+
 class GigaBot(commands.Bot):
     def __init__(self) -> None:
         self.config = load_config()
@@ -273,9 +300,27 @@ class GigaBot(commands.Bot):
             await self.embeds.error_interaction(
                 interaction,
                 "Missing Permissions",
-                f"You are missing: `{missing}`.",
+                f"You need the {permission_names(error.missing_permissions)} permission to use this command.",
                 ephemeral=True,
             )
+            return
+
+        if isinstance(error, app_commands.BotMissingPermissions):
+            # a CheckFailure, but not the person's doing: say that it is the bot that needs something
+            missing = ", ".join(error.missing_permissions)
+            await record_command(self.storage_path, interaction, command, status="BOT_MISSING_PERMISSIONS", error=missing)
+            await self.embeds.error_interaction(
+                interaction,
+                "I Need More Permissions",
+                f"I am missing the {permission_names(error.missing_permissions)} permission here. "
+                "Give it to my role in Server Settings > Roles (or check this channel's permissions), then try again.",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(error, app_commands.NoPrivateMessage):
+            await record_command(self.storage_path, interaction, command, status="CHECK_FAILED", error="guild only")
+            await self.embeds.error_interaction(interaction, "Server Only", "This command only works in a server.", ephemeral=True)
             return
 
         if isinstance(error, app_commands.TransformerError):
@@ -283,7 +328,7 @@ class GigaBot(commands.Bot):
             await self.embeds.error_interaction(
                 interaction,
                 "Invalid Value",
-                "One of the values you entered was invalid.",
+                invalid_value_message(error),
                 ephemeral=True,
             )
             return
