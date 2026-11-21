@@ -14,6 +14,13 @@ from utils.welcome_card import card_options, card_text, render_card
 LOGGER = logging.getLogger(__name__)
 
 
+def _plain(name: str) -> str:
+    """A name as text and nothing more. People choose their own names, and a
+    name written as a link or a mention would otherwise be posted by the bot
+    as one."""
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(name))
+
+
 def _substitute(template: str, member: discord.Member) -> str:
     """Fill in a greeting. {mention} pings them, {user} is their username,
     {name} their display name, {server} the server and {count} how many
@@ -21,8 +28,8 @@ def _substitute(template: str, member: discord.Member) -> str:
     return (
         template.replace("{mention}", member.mention)
         .replace("{server}", member.guild.name)
-        .replace("{user}", str(member))
-        .replace("{name}", member.display_name)
+        .replace("{user}", _plain(str(member)))
+        .replace("{name}", _plain(member.display_name))
         .replace("{count}", f"{member.guild.member_count or 0:,}")
     )
 
