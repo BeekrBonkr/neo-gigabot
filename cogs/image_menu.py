@@ -44,21 +44,21 @@ ALWAYS_ASK = frozenset({"image transform crop", "filter adjust", "edit resize"})
 NOT_GIVEN = object()
 
 
+# Has the usual options, but is no use without the second picture it also takes.
+NEEDS_A_SECOND_PICTURE = frozenset({"image effects overlay"})
+
+
 def takes_message_image(command: app_commands.Command) -> bool:
     """Whether the command works on one image it can be handed from a message:
-    it has the usual attachment and message_link options, wants no second
-    picture, and needs nothing a form can't ask for."""
+    it has the usual attachment and message_link options, can do without a
+    second picture, and needs nothing a form can't ask for."""
     parameters = command.parameters
-    if not SOURCE_PARAMETERS <= {parameter.name for parameter in parameters}:
+    if not SOURCE_PARAMETERS <= {parameter.name for parameter in parameters} or command.qualified_name in NEEDS_A_SECOND_PICTURE:
         return False
-    for parameter in parameters:
-        if parameter.name in SOURCE_PARAMETERS:
-            continue
-        if parameter.type is discord.AppCommandOptionType.attachment:
-            return False
-        if parameter.required and parameter.type not in FORM_TYPES:
-            return False
-    return True
+    return not any(
+        parameter.required and parameter.type not in FORM_TYPES
+        for parameter in parameters if parameter.name not in SOURCE_PARAMETERS
+    )
 
 
 def category_of(command: app_commands.Command) -> str | None:

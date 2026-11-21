@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import random
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from utils import image_animate as an
+from utils import image_mosh as mosh
 from utils.imaging import encode_frames, load_frames
 
 SOURCE_HELP = {
@@ -18,6 +21,23 @@ DIRECTIONS = [
     app_commands.Choice(name="Counterclockwise", value="counterclockwise"),
 ]
 Speed = app_commands.Range[int, 20, 200]
+MOSH_BLOCKS = [
+    app_commands.Choice(name="Fine", value="fine"),
+    app_commands.Choice(name="Medium", value="medium"),
+    app_commands.Choice(name="Chunky", value="chunky"),
+]
+MOSH_MOTION = [
+    app_commands.Choice(name="Smear: pixels follow what moves", value="smear"),
+    app_commands.Choice(name="Ghost: trails stay in place", value="ghost"),
+]
+MOSH_CUTS = [
+    app_commands.Choice(name="Mosh through scene cuts", value="mosh"),
+    app_commands.Choice(name="Keep scene cuts clean", value="clean"),
+]
+MOSH_LENGTH = [
+    app_commands.Choice(name="Keep the clip's length", value="keep"),
+    app_commands.Choice(name="Stretch: melting adds frames", value="stretch"),
+]
 
 
 class ImageAnimate(commands.GroupCog, group_name="animate", group_description="Turn images into GIFs, and edit GIFs."):
@@ -161,6 +181,60 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
             return data, out_name, summary
 
         await self.bot.image_tools.run_image_command(interaction, "frames", "Frame", work, attachment=attachment, message_link=message_link)
+
+    @app_commands.command(name="datamosh", description="Break a GIF or video the way a damaged file breaks: smears, melts and glitches.")
+    @app_commands.describe(
+        into="A second GIF or video. Its motion drags the first one's last picture around: the classic mosh.",
+        melt="How many extra times the motion at each mosh point is applied. More melts further.",
+        every="A mosh point every this many frames.",
+        start="How far in the moshing begins, in percent.",
+        end="How far in the moshing stops, in percent.",
+        skip="Frames thrown away after each mosh point, so later motion lands on a stale picture.",
+        shuffle="Percent of motion frames moved out of order.",
+        blockiness="How hard the picture is compressed. 1 is clean, 31 is crushed.",
+        block_size="How big the blocks that smear around are.",
+        motion="Smear follows what moves. Ghost leaves trails in place.",
+        cuts="What happens where the scene changes.",
+        length="Whether melting stretches the clip. Keeping the length keeps a video's sound.",
+        reverse="Mosh the clip played backward.",
+        seed="The same seed gives the same shuffle again.",
+        **SOURCE_HELP,
+    )
+    @app_commands.choices(block_size=MOSH_BLOCKS, motion=MOSH_MOTION, cuts=MOSH_CUTS, length=MOSH_LENGTH)
+    @app_commands.checks.cooldown(1, 8.0)
+    async def datamosh(
+        self, interaction: discord.Interaction,
+        into: discord.Attachment | None = None,
+        melt: app_commands.Range[int, 0, 40] = 6, every: app_commands.Range[int, 1, 120] = 12,
+        start: app_commands.Range[int, 0, 95] = 0, end: app_commands.Range[int, 5, 100] = 100,
+        skip: app_commands.Range[int, 0, 30] = 0, shuffle: app_commands.Range[int, 0, 100] = 0,
+        blockiness: app_commands.Range[int, 1, 31] = 5,
+        block_size: app_commands.Choice[str] | None = None, motion: app_commands.Choice[str] | None = None,
+        cuts: app_commands.Choice[str] | None = None, length: app_commands.Choice[str] | None = None,
+        reverse: bool = False, seed: app_commands.Range[int, 0, 999999] | None = None,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        if end <= start:
+            await self.bot.image_tools.send_error(interaction, "Nothing To Mosh", "`end` has to come after `start`.")
+            return
+        settings = mosh.Settings(
+            melt=melt, every=every, start=start, end=end, skip=skip, shuffle=shuffle, blockiness=blockiness,
+            block_size=block_size.value if block_size else "fine", motion=motion.value if motion else "smear",
+            clean_cuts=bool(cuts and cuts.value == "clean"), keep_length=not (length and length.value == "stretch"),
+            reverse=reverse, seed=seed if seed is not None else random.randrange(1000000),
+        )
+
+        def work(image_bytes: bytes, filename: str, *more: bytes) -> tuple[bytes, str, str]:
+            clip = load_frames(image_bytes, filename, max_edge=mosh.MOSH_MAX_EDGE)
+            second = load_frames(more[0], max_edge=mosh.MOSH_MAX_EDGE) if more else None
+            frames, durations = mosh.datamosh(clip, settings, second)
+            data, out_name = encode_frames(frames, durations, "datamosh", loop=clip.loop)
+            return data, out_name, f"Melt {melt} every {every} frames · blockiness {blockiness} · seed {settings.seed}"
+
+        await self.bot.image_tools.run_image_command(
+            interaction, "datamosh", "Datamoshed", work, attachment=attachment, message_link=message_link,
+            extra_sources=[(into, None)] if into is not None else None,
+        )
 
     @app_commands.command(name="togif", description="Join two to six images, GIFs or videos into one looping GIF.")
     @app_commands.describe(
