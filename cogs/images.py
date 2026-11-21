@@ -626,7 +626,11 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 "Face & Compositing",
                 "`/image effects overlay/facebox/blurfaces/facecrop/faceswap/googlyeyes/joy/clown/forehead/contentaware`",
             ),
-            self.bot.embeds.field("Source Priority", "Attachment → message link → selected source → latest image in channel"),
+            self.bot.embeds.field(
+                "Source Priority",
+                "Attachment → message link → selected source → latest image in channel. "
+                "Or right-click a message, then Apps → Edit Image, to pick an effect for its image.",
+            ),
             self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
             self.bot.embeds.field("Other", "`/image effects deepfry` `/image misc pfp` `/image misc clearimagesource`"),
             self.bot.embeds.field("Color Filters", "`/filter invert/grayscale/sepia/hue/adjust/posterize/edges/emboss/vaporwave`"),

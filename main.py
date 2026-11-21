@@ -30,6 +30,7 @@ COGS = [
     "cogs.image_animate",
     "cogs.image_memes",
     "cogs.image_edit",
+    "cogs.image_menu",
     "cogs.logging",
     "cogs.moderation",
     "cogs.cases",
@@ -141,24 +142,39 @@ class GigaBot(commands.Bot):
         is exempt so a server can never lock itself out of unblocking."""
         if interaction.type is not discord.InteractionType.application_command:
             return True
-        if interaction.guild is None:
-            return True
 
         command = interaction.command
         if command is None or command.qualified_name == "settings":
             return True
+        # A menu's name is not a path of groups: "Edit Image" must not be
+        # switched off by a block on the /edit group, so only its own name counts.
+        return await self.command_gate(interaction, command.qualified_name, exact=isinstance(command, app_commands.ContextMenu))
+
+    async def command_gate(self, interaction: discord.Interaction, qualified_name: str, *, exact: bool = False) -> bool:
+        """Whether this server lets `qualified_name` run: not on its blocked
+        list and not part of a module that is turned off. Sends the refusal
+        itself. With `exact`, a block on a group of the same first word does
+        not count. Also used for commands started some other way than by
+        typing them, such as from the Edit Image menu."""
+        if interaction.guild is None:
+            return True
 
         settings = get_guild_settings(self.storage_path, interaction.guild.id)
-        if blocking_entry(command.qualified_name, settings.get("blocked_commands")) is not None:
+        blocked = settings.get("blocked_commands")
+        if exact:
+            is_blocked = qualified_name.lower() in {str(name).lower() for name in (blocked or [])}
+        else:
+            is_blocked = blocking_entry(qualified_name, blocked) is not None
+        if is_blocked:
             await self.embeds.error_interaction(
                 interaction,
                 "Command Disabled",
-                f"`/{command.qualified_name}` is disabled in this server.",
+                f"`/{qualified_name}` is disabled in this server.",
                 ephemeral=True,
             )
             return False
 
-        module = disabled_module_for(command.qualified_name, settings)
+        module = disabled_module_for(qualified_name, settings)
         if module is not None:
             where = site_link(self, "the website", f"/app/{interaction.guild.id}/settings")
             await self.embeds.error_interaction(
