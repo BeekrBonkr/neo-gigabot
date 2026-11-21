@@ -55,8 +55,8 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
 - **Edit Image menu**: right-click a message (long-press on mobile), then Apps → Edit Image, and pick an
-  effect from a private list to run it on that message's image, with no link to copy. Commands that need
-  text or numbers ask for them in a pop-up form. Cooldowns and a server's blocked commands apply as usual
+  effect from a private list to run it on that message's image, with no link to copy. Commands with
+  settings show them in a pop-up form first, filled in with their defaults, and datamosh opens its panel. Cooldowns and a server's blocked commands apply as usual
 - **Quote Message menu**: Apps → Quote Message makes the `/image text quote` picture from the message
   you clicked
 - Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
