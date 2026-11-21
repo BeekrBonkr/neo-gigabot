@@ -5,8 +5,9 @@ from datetime import timedelta
 from typing import Iterable
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
+from utils.activity_log import prune_all as prune_activity
 from utils.activity_log import record as record_activity
 from utils.settings import get_guild_settings
 
@@ -79,6 +80,28 @@ class Logging(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    async def cog_load(self) -> None:
+        self._prune_stored_copies.start()
+
+    async def cog_unload(self) -> None:
+        self._prune_stored_copies.cancel()
+
+    def _keep_days(self, guild_id: int) -> int:
+        """How long this server keeps the stored copy of its log (0: no copy at all)."""
+        return int(get_guild_settings(self.bot.storage_path, guild_id).get("logging_keep_days", 30) or 0)
+
+    @tasks.loop(hours=1)
+    async def _prune_stored_copies(self) -> None:
+        """Deleted and edited messages are kept for the website's log viewer.
+        Each server chooses for how long, and that has to hold for a quiet
+        server too, and soon after the setting is lowered."""
+        try:
+            removed = prune_activity(self.bot.storage_path, self._keep_days)
+            if removed:
+                LOGGER.info("Removed %s activity log entries past their server's retention", removed)
+        except Exception:  # noqa: BLE001 - try again next hour
+            LOGGER.exception("Pruning stored activity log entries failed")
 
     # ---------- gating / dispatch ----------
 

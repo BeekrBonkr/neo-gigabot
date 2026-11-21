@@ -66,6 +66,22 @@ def _prune(connection, guild_id: int, keep_days: int) -> None:
     )
 
 
+def prune_all(storage_path: Path, keep_days_for) -> int:
+    """Apply every server's own retention, quiet servers included.
+    `keep_days_for(guild_id)` gives the days to keep (0: keep nothing, as when
+    logging is off). Returns how many rows went."""
+    ensure_table(storage_path)
+    with connect(storage_path) as connection:
+        before = connection.total_changes
+        for (guild_id,) in connection.execute("SELECT DISTINCT guild_id FROM activity_log").fetchall():
+            keep_days = int(keep_days_for(guild_id))
+            if keep_days <= 0:
+                connection.execute("DELETE FROM activity_log WHERE guild_id = ?", (guild_id,))
+            else:
+                _prune(connection, guild_id, keep_days)
+        return connection.total_changes - before
+
+
 def prune(storage_path: Path, guild_id: int, keep_days: int) -> None:
     ensure_table(storage_path)
     with connect(storage_path) as connection:
