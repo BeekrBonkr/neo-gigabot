@@ -8,8 +8,11 @@
 #   systemctl list-timers neo-gigabot-ytdlp-update.timer   # confirm next run
 #   sudo systemctl start neo-gigabot-ytdlp-update.service  # dry run now
 #
-# Runs as root so it can restart the service; the script drops to the repo
-# owner (via runuser) for the pip upgrade so the venv stays owned by that user.
+# The script runs as the bot's own user, never as root: it lives in that user's
+# checkout, so root running it would hand root to anything that can write
+# there. It leaves a marker when yt-dlp changed, and the one step that needs
+# root, restarting the bot, is the fixed command in ExecStartPost ("+" runs
+# that line with full privileges). Change User= and the paths to match yours.
 
 [Unit]
 Description=Upgrade yt-dlp for neo-GigaBot and restart if changed
@@ -18,5 +21,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=michael
 WorkingDirectory=/home/michael/neogigabot
+RuntimeDirectory=neo-gigabot-ytdlp
+Environment=YTDLP_CHANGED_MARKER=/run/neo-gigabot-ytdlp/changed
 ExecStart=/home/michael/neogigabot/scripts/update_ytdlp.sh
+ExecStartPost=+/bin/sh -c 'if [ -e /run/neo-gigabot-ytdlp/changed ]; then /usr/bin/systemctl try-restart neo-gigabot.service; fi'
+NoNewPrivileges=yes

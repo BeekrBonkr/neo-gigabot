@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.modules import enabled_in
+from utils.numbers import is_digits
 from utils.durations import parse_duration
 from utils.website import site_link
 from utils.settings import (
@@ -30,6 +33,12 @@ CATEGORIES: list[tuple[str, str, str, str]] = [
     ("music", "Music", "🎵", "DJ restrictions, playback defaults, and queue limits."),
 ]
 
+# A join event only earns a greeting in a known guild when the bot joined this
+# recently (seconds); see on_guild_join.
+JOIN_GREETING_WINDOW = 300
+# Pause before the second audit log read when looking for who added the bot.
+INVITER_LOOKUP_RETRY = 2.0
+
 MOD_LOG_EVENT_LABELS = {
     "warn": ("Warnings", "⚠️"),
     "mute": ("Mutes / unmutes", "🔇"),
@@ -43,6 +52,7 @@ MOD_LOG_EVENT_LABELS = {
 UNBLOCKABLE_COMMAND_NAMES = {"settings"}
 UNBLOCKABLE_BUCKETS = {"Owner", "Settings"}
 MAX_SELECT_OPTIONS = 25
+OTHER_BUCKET = "Other"
 
 
 def _iter_leaf_commands(
@@ -75,8 +85,19 @@ def _blockable_command_pages(bot: commands.Bot) -> list[tuple[str, list[app_comm
             continue
         buckets.setdefault(label, []).extend(c for c in leaves if c.name not in UNBLOCKABLE_COMMAND_NAMES)
 
+    # The pages are themselves options of one dropdown, so there can be at most 25 of them.
+    # Small groups share an "Other" page, smallest first, until the pages fit.
+    def page_count() -> int:
+        return sum(max(1, -(-len({c.qualified_name for c in commands_}) // MAX_SELECT_OPTIONS)) for commands_ in buckets.values())
+
+    while page_count() > MAX_SELECT_OPTIONS:
+        smallest = min((label for label in buckets if label != OTHER_BUCKET), key=lambda label: (len(buckets[label]), label), default=None)
+        if smallest is None:
+            break
+        buckets.setdefault(OTHER_BUCKET, []).extend(buckets.pop(smallest))
+
     pages: list[tuple[str, list[app_commands.Command]]] = []
-    for label in sorted(buckets):
+    for label in sorted(buckets, key=lambda label: (label == OTHER_BUCKET, label)):
         seen: set[str] = set()
         unique = [c for c in sorted(buckets[label], key=lambda c: c.qualified_name) if not (c.qualified_name in seen or seen.add(c.qualified_name))]
         chunks = [unique[i : i + MAX_SELECT_OPTIONS] for i in range(0, len(unique), MAX_SELECT_OPTIONS)]
@@ -170,7 +191,7 @@ class WarnEscalationModal(discord.ui.Modal, title="Warning Escalation"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         threshold_text = self.threshold_input.value.strip()
-        if not threshold_text.isdigit():
+        if not is_digits(threshold_text):
             await interaction.response.send_message("Threshold must be a whole number (0 or more).", ephemeral=True)
             return
 
@@ -180,7 +201,7 @@ class WarnEscalationModal(discord.ui.Modal, title="Warning Escalation"):
             return
 
         window_text = self.window_input.value.strip()
-        if not window_text.isdigit():
+        if not is_digits(window_text):
             await interaction.response.send_message("The warning window must be a whole number of days (0 or more).", ephemeral=True)
             return
 
@@ -207,7 +228,7 @@ class StarboardThresholdModal(discord.ui.Modal, title="Starboard Threshold"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         text = self.threshold_input.value.strip()
-        if not text.isdigit() or int(text) < 1:
+        if not is_digits(text) or int(text) < 1:
             await interaction.response.send_message("The threshold must be a whole number of 1 or more.", ephemeral=True)
             return
 
@@ -467,8 +488,27 @@ class SettingsDashboardView(discord.ui.View):
         )
 
         async def _on_autoroles(interaction: discord.Interaction) -> None:
-            update_guild_settings(self.bot.storage_path, self.guild_id, {"autoroles": [r.id for r in autorole_select.values]})
+            # the rules /autorole add applies: nothing at or above the admin's own rank or the bot's,
+            # nothing managed, and nothing that carries moderation permissions
+            guild, user = interaction.guild, interaction.user
+            elevated = discord.Permissions.elevated().value
+            allowed = [
+                r for r in autorole_select.values
+                if not r.is_default() and not r.managed and not (r.permissions.value & elevated)
+                and r < guild.me.top_role and (guild.owner_id == user.id or r < user.top_role)
+            ]
+            update_guild_settings(self.bot.storage_path, self.guild_id, {"autoroles": [r.id for r in allowed]})
             await self.refresh(interaction)
+            refused = len(autorole_select.values) - len(allowed)
+            if refused:
+                await interaction.followup.send(
+                    embed=self.bot.embeds.warning_embed(
+                        "Some Roles Were Left Out",
+                        f"{refused} role(s) can't be autoroles: they are at or above your highest role or mine, "
+                        "are managed by an integration, or carry moderation permissions.",
+                    ),
+                    ephemeral=True,
+                )
 
         autorole_select.callback = _on_autoroles
         self.add_item(autorole_select)
@@ -838,7 +878,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 100):
+            if not is_digits(value) or not (0 <= int(value) <= 100):
                 return "Volume must be a whole number between 0 and 100."
             return None
 
@@ -900,7 +940,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 3600):
+            if not is_digits(value) or not (0 <= int(value) <= 3600):
                 return "Give a whole number of seconds between 0 and 3600 (0 keeps messages forever)."
             return None
 
@@ -946,7 +986,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 100):
+            if not is_digits(value) or not (0 <= int(value) <= 100):
                 return "Give a whole number between 0 and 100 (0 = the default cap of 100)."
             return None
 
@@ -967,7 +1007,7 @@ class SettingsDashboardView(discord.ui.View):
         settings = get_guild_settings(self.bot.storage_path, self.guild_id)
 
         def _validate(value: str) -> str | None:
-            if not value.isdigit() or not (0 <= int(value) <= 180):
+            if not is_digits(value) or not (0 <= int(value) <= 180):
                 return "Give a whole number of minutes between 0 and 180 (0 = the default cap of 3 hours)."
             return None
 
@@ -991,6 +1031,13 @@ class SettingsDashboardView(discord.ui.View):
         if enabled:
             return f"🟢 On — {detail}" if detail else "🟢 On"
         return "⚫ Off"
+
+    def _module_state(self, settings: dict, module: str, configured: bool, detail: str | None = None) -> str:
+        """On or off as the bot itself will treat the module: a channel being
+        set is not enough when the module's switch (on the website) is off."""
+        if configured and not enabled_in(settings, module):
+            return "⚫ Off (switched off on the website). Pick the channel again to turn it back on."
+        return self._on_off(configured, detail)
 
     def _build_embed(self, settings: dict) -> discord.Embed:
         if self._confirming_reset:
@@ -1060,15 +1107,19 @@ class SettingsDashboardView(discord.ui.View):
             welcome_ids = settings.get("welcome_channel_ids") or []
             embed.add_field(
                 name="Welcome Channel",
-                value=self._on_off(bool(welcome_ids), _format_channels(welcome_ids) if welcome_ids else None),
+                value=self._module_state(settings, "welcome", bool(welcome_ids), _format_channels(welcome_ids) if welcome_ids else None),
                 inline=True,
             )
             leave_ids = settings.get("leave_channel_ids") or []
-            embed.add_field(
-                name="Leave Channel",
-                value=_format_channels(leave_ids) if leave_ids else "Same as welcome",
-                inline=True,
-            )
+            leave_where = leave_ids or welcome_ids
+            leave_detail = (_format_channels(leave_ids) if leave_ids else "same channel as welcome") if leave_where else None
+            if leave_where and settings.get("leave_enabled"):
+                leave_state = self._on_off(True, leave_detail)
+            elif leave_where:
+                leave_state = "⚫ Off. Edit the leave message or pick a leave channel to turn them on."
+            else:
+                leave_state = self._on_off(False)
+            embed.add_field(name="Leave Messages", value=leave_state, inline=True)
             delete_after = int(settings.get("welcome_delete_after", 0) or 0)
             embed.add_field(
                 name="Auto-Delete",
@@ -1081,7 +1132,7 @@ class SettingsDashboardView(discord.ui.View):
             channel_id = settings.get("starboard_channel_id")
             detail = f"<#{int(channel_id)}>" if channel_id else None
             star_emoji = str(settings.get("starboard_emoji") or "⭐")
-            embed.add_field(name="Starboard", value=self._on_off(bool(channel_id), detail), inline=False)
+            embed.add_field(name="Starboard", value=self._module_state(settings, "starboard", bool(channel_id), detail), inline=False)
             embed.add_field(
                 name="Star Threshold",
                 value=f"Messages need **{settings.get('starboard_threshold', 3)}** {star_emoji} reaction(s) to be posted.",
@@ -1123,29 +1174,90 @@ class Settings(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        # A kicked-and-reinvited guild (or a replayed join event after an
-        # outage) must keep its existing config - only seed defaults for
-        # guilds we've truly never stored.
+        # A kicked-and-reinvited guild must keep its existing config, so only
+        # seed defaults for guilds we've truly never stored. A known guild is
+        # greeted again only if the bot really just joined, which rules out a
+        # join event replayed after an outage.
         if guild_settings_exists(self.bot.storage_path, guild.id):
-            return
-        create_guild_settings(self.bot.storage_path, guild.id)
+            if not self._just_joined(guild):
+                return
+        else:
+            create_guild_settings(self.bot.storage_path, guild.id)
         await self._introduce(guild)
 
+    @staticmethod
+    def _just_joined(guild: discord.Guild) -> bool:
+        joined_at = guild.me.joined_at if guild.me else None
+        return joined_at is not None and (discord.utils.utcnow() - joined_at).total_seconds() < JOIN_GREETING_WINDOW
+
     async def _introduce(self, guild: discord.Guild) -> None:
-        """Say hello once in a brand-new server, so admins know where setup
-        lives. Best-effort: no system channel or no permission means no message."""
-        channel = guild.system_channel
-        me = guild.me
-        if channel is None or me is None or not channel.permissions_for(me).send_messages:
+        """Tell whoever added the bot where setup lives: a DM to them, or a
+        message in the server's main channel when the DM can't be delivered.
+        Best-effort: nobody to DM and nowhere to post means no message."""
+        title = f"👋 Hi, I'm {self.bot.user.name}"
+        inviter = await self._find_inviter(guild)
+        if inviter is not None:
+            try:
+                await inviter.send(embed=self.bot.embeds.info_embed(title, self._intro_text(guild, dm=True)))
+                return
+            except discord.HTTPException:
+                pass
+        channel = self._main_channel(guild)
+        if channel is None:
             return
-        website = site_link(self.bot, "website", f"/app/{guild.id}")
-        lines = ["Thanks for adding me! Admins can set everything up with `/settings`, and `/help` lists what I can do."]
-        if website:
-            lines.append(f"There is also a {website}: a web music player and playlists for everyone, and a settings dashboard for admins.")
         try:
-            await channel.send(embed=self.bot.embeds.info_embed(f"👋 Hi, I'm {self.bot.user.name}", "\n".join(lines)))
+            await channel.send(embed=self.bot.embeds.info_embed(title, self._intro_text(guild, dm=False)))
         except discord.HTTPException:
             pass
+
+    def _intro_text(self, guild: discord.Guild, *, dm: bool) -> str:
+        thanks = f"Thanks for adding me to **{guild.name}**!" if dm else "Thanks for adding me!"
+        start = site_link(self.bot, "getting started page", f"/app/{guild.id}/start")
+        if not start:
+            return f"{thanks} Admins can set everything up with `/settings`, and `/help` lists what I can do."
+        website = site_link(self.bot, "website", f"/app/{guild.id}")
+        return (
+            f"{thanks} The server's {start} walks admins through setting me up, "
+            f"and `/settings` does the same in Discord. `/help` lists what I can do.\n"
+            f"The {website} also has a web music player and playlists for everyone."
+        )
+
+    async def _find_inviter(self, guild: discord.Guild) -> discord.abc.User | None:
+        """Who added the bot, read from the audit log. None when the bot can't
+        see the log or its own entry isn't there."""
+        me = guild.me
+        if me is None or not me.guild_permissions.view_audit_log:
+            return None
+        # The entry can land a moment after the join event, so look twice.
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(INVITER_LOOKUP_RETRY)
+            try:
+                async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                    if entry.target is not None and entry.target.id == me.id:
+                        return entry.user
+            except discord.HTTPException:
+                return None
+        return None
+
+    @staticmethod
+    def _main_channel(guild: discord.Guild) -> discord.TextChannel | None:
+        """The system channel, else #general, else the topmost text channel,
+        skipping any the bot can't post embeds in."""
+        me = guild.me
+        if me is None:
+            return None
+
+        def usable(channel: discord.TextChannel | None) -> bool:
+            if channel is None:
+                return False
+            perms = channel.permissions_for(me)
+            return perms.view_channel and perms.send_messages and perms.embed_links
+
+        if usable(guild.system_channel):
+            return guild.system_channel
+        channels = [c for c in sorted(guild.text_channels, key=lambda c: (c.position, c.id)) if usable(c)]
+        return next((c for c in channels if c.name.lower() == "general"), channels[0] if channels else None)
 
     @app_commands.command(name="settings", description="Open the interactive server settings dashboard.")
     @app_commands.checks.has_permissions(administrator=True)

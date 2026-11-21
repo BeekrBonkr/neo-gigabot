@@ -280,3 +280,61 @@ def test_music_limits(storage: Path) -> None:
     update_guild_settings(storage, GUILD_ID, {"music_max_queue_length": 25, "music_max_track_minutes": 10})
     assert get_music_max_queue_length(storage, GUILD_ID) == 25
     assert get_music_max_track_seconds(storage, GUILD_ID) == 600
+
+
+def test_the_command_pages_fit_in_one_dropdown_and_lose_no_command(tmp_path):
+    import asyncio
+
+    import discord
+    from discord import app_commands
+    from discord.ext import commands
+
+    import main
+    from cogs.settings import MAX_SELECT_OPTIONS, UNBLOCKABLE_COMMAND_NAMES, _blockable_command_pages
+
+    async def load():
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none(), help_command=None)
+        bot.project_root = main.Path(main.__file__).resolve().parent
+        bot.storage_path = tmp_path
+        for extension in main.COGS:
+            await bot.load_extension(extension)
+        pages = [(label, [command.qualified_name for command in chunk]) for label, chunk in _blockable_command_pages(bot)]
+        everything = {c.qualified_name for c in bot.tree.walk_commands() if isinstance(c, app_commands.Command)}
+        for extension in main.COGS:
+            await bot.unload_extension(extension)
+        return pages, everything
+
+    pages, everything = asyncio.run(load())
+    assert len(pages) <= MAX_SELECT_OPTIONS, [label for label, _ in pages]
+    assert all(1 <= len(names) <= MAX_SELECT_OPTIONS for _, names in pages)
+    listed = [name for _, names in pages for name in names]
+    assert len(listed) == len(set(listed))
+    missing = {n for n in everything - set(listed) if n.split(" ")[0] not in ("owner", "settings") and n.split(" ")[-1] not in UNBLOCKABLE_COMMAND_NAMES}
+    assert not missing, sorted(missing)
+    print([(label, len(names)) for label, names in pages])
+
+
+def test_editing_the_leave_message_turns_leave_messages_on(storage):
+    from utils.settings import get_guild_settings, update_guild_settings
+
+    update_guild_settings(storage, 5, {"welcome_channel_ids": ["555"]})
+    assert get_guild_settings(storage, 5)["leave_enabled"] is False
+    update_guild_settings(storage, 5, {"leave_message": "Bye {user}"})
+    assert get_guild_settings(storage, 5)["leave_enabled"] is True
+    update_guild_settings(storage, 6, {"leave_message": ""})   # clearing it turns nothing on
+    assert get_guild_settings(storage, 6)["leave_enabled"] is False
+
+
+def test_the_dashboard_reports_modules_as_the_bot_treats_them(storage):
+    from types import SimpleNamespace
+
+    from cogs.settings import SettingsDashboardView
+    from utils.settings import get_guild_settings, update_guild_settings
+
+    view = SimpleNamespace(_on_off=SettingsDashboardView._on_off)
+    state = lambda settings, module, configured, detail=None: SettingsDashboardView._module_state(view, settings, module, configured, detail)  # noqa: E731
+    update_guild_settings(storage, 7, {"welcome_channel_ids": ["555"]})
+    assert state(get_guild_settings(storage, 7), "welcome", True, "<#555>").startswith("🟢 On")
+    update_guild_settings(storage, 7, {"welcome_enabled": False})  # as the website's switch does
+    assert "switched off on the website" in state(get_guild_settings(storage, 7), "welcome", True, "<#555>")
+    assert state(get_guild_settings(storage, 7), "welcome", False) == "⚫ Off"

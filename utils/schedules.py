@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from utils.numbers import is_digits
 from utils.db import connect
 
 MAX_SCHEDULES_PER_GUILD = 20
@@ -88,7 +89,7 @@ def clean_options(action: str, options: dict[str, Any] | None) -> dict[str, int]
 
     def number(key: str, low: int, high: int, what: str) -> int:
         raw = str(options.get(key, "")).strip()
-        if not raw.isdigit() or not low <= int(raw) <= high:
+        if not is_digits(raw) or not low <= int(raw) <= high:
             raise ScheduleError(what)
         return int(raw)
 

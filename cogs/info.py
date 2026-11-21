@@ -6,8 +6,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import user_app
 from utils.cases import count_cases
 from utils.warnings import count_warnings
+from utils.config import beta_notice
 from utils.website import site_link
 
 SUPPORT_FALLBACK_MESSAGE = "No support server has been configured for this bot yet."
@@ -49,28 +51,7 @@ class Info(commands.Cog):
             self.bot.embeds.field("Library", f"discord.py {discord.__version__}", True),
         ]
 
-        invite_url = discord.utils.oauth_url(
-            self.bot.application_id,
-            permissions=discord.Permissions(
-                manage_roles=True,
-                manage_channels=True,
-                kick_members=True,
-                ban_members=True,
-                manage_nicknames=True,
-                moderate_members=True,
-                view_audit_log=True,
-                send_messages=True,
-                embed_links=True,
-                attach_files=True,
-                read_message_history=True,
-                add_reactions=True,
-                connect=True,
-                speak=True,
-                manage_messages=True,
-                create_instant_invite=True,
-            ),
-            scopes=("bot", "applications.commands"),
-        )
+        invite_url = user_app.invite_url(self.bot)
         fields.append(self.bot.embeds.field("Invite Me", f"[Click here]({invite_url})", True))
 
         website = site_link(self.bot, "Open the website")
@@ -83,7 +64,8 @@ class Info(commands.Cog):
 
         embed = self.bot.embeds.create(
             title=f"About {self.bot.user.name}",
-            description="Use `/help` for a categorized list of everything I can do."
+            description=(f"{beta_notice(self.bot.config)}\n\n" if beta_notice(self.bot.config) else "")
+            + "Use `/help` for a categorized list of everything I can do."
             + (f"\nOn the {site_link(self.bot, 'website')} you can control music from your browser, manage playlists, "
                "and (as an admin) change every server setting." if website else ""),
             color=discord.Color.blurple(),

@@ -205,3 +205,19 @@ def test_card_backgrounds_gradients_and_text_can_be_customized(storage):
             welcome_card.prepare_background(bad)
     assert welcome_card.delete_background(storage, 1) and welcome_card.read_background(storage, 1) is None
     assert welcome_card.card_text("#{count} {name} {mention} {server}", name="Robin", user="robin", server="Den", count=1234) == "#1,234 Robin Robin Den"
+
+
+def test_a_name_written_as_a_link_or_a_mention_is_posted_as_plain_text():
+    from types import SimpleNamespace
+
+    from cogs.welcome import _substitute
+
+    def member(name):
+        guild = SimpleNamespace(name="Server", member_count=10)
+        return type("M", (), {"mention": "<@5>", "guild": guild, "display_name": name, "__str__": lambda self: name})()
+
+    link = _substitute("Welcome {name}!", member("[Free Nitro](https://evil.example)"))
+    assert link == "Welcome \\[Free Nitro](https://evil.example)!"   # the escaped bracket stops it being a link
+    ping = _substitute("Bye {user} / {name}", member("<@80351110224678912>"))
+    assert "<@80351110224678912>" not in ping
+    assert _substitute("Hi {mention}", member("x")) == "Hi <@5>"   # the newcomer's own mention still works

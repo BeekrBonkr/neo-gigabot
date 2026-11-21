@@ -6,6 +6,7 @@ from datetime import timedelta
 import discord
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils import automod as rules
 from utils.durations import parse_duration
 from utils.modules import enabled_in
@@ -32,10 +33,10 @@ class Automod(commands.Cog):
             return True
         if author.guild_permissions.manage_messages or author.id == message.guild.owner_id:
             return True
-        exempt_roles = {int(r) for r in settings.get("automod_exempt_roles") or [] if str(r).isdigit()}
+        exempt_roles = {int(r) for r in settings.get("automod_exempt_roles") or [] if is_digits(str(r))}
         if exempt_roles and any(role.id in exempt_roles for role in author.roles):
             return True
-        exempt_channels = {int(c) for c in settings.get("automod_exempt_channels") or [] if str(c).isdigit()}
+        exempt_channels = {int(c) for c in settings.get("automod_exempt_channels") or [] if is_digits(str(c))}
         channel = message.channel
         return channel.id in exempt_channels or getattr(channel, "parent_id", None) in exempt_channels
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import io
 import json
 import logging
 import math
@@ -35,8 +36,11 @@ from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
+from utils.numbers import is_digits
 from utils import appeals as appeal_store
 from utils import cases as case_store
+from utils import command_dates
+from utils import samples
 from utils import newsletter as newsletter_store
 from utils import playlists as playlist_store
 from utils import reactionroles as reaction_role_store
@@ -148,20 +152,22 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
                 raise SettingsValidationError(f"{key} must be a list of up to {MAX_ID_LIST_LENGTH} IDs.")
             ids: list[int] = []
             for item in value:
-                if not str(item).isdigit():
+                if not is_digits(item):
                     raise SettingsValidationError(f"{key} contains a non-numeric ID.")
                 if int(item) not in ids:
                     ids.append(int(item))
             cleaned[key] = ids
         elif key in ID_SCALAR_KEYS or key in SETTING_IDS:
             text = str(value or "").strip()
-            if text and not text.isdigit():
+            if text and not is_digits(text):
                 raise SettingsValidationError(f"{key} must be an ID or empty.")
             cleaned[key] = text
         elif key == "blocked_commands":
             if not isinstance(value, list) or len(value) > 500:
                 raise SettingsValidationError("blocked_commands must be a list of command names.")
             names = sorted({str(name).strip().lower() for name in value if str(name).strip()})
+            if any(len(name) > MAX_COMMAND_NAME_LENGTH for name in names):
+                raise SettingsValidationError("blocked_commands holds a name that is too long to be a command.")
             if "settings" in names:
                 raise SettingsValidationError("/settings can't be blocked.")
             cleaned[key] = names
@@ -188,7 +194,7 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
                 raise SettingsValidationError(f"{key} must be one of {', '.join(SETTING_CHOICES[key])}.")
             cleaned[key] = value
         elif key == "warn_mute_duration" or key in SETTING_DURATIONS:
-            if not isinstance(value, str) or parse_duration(value) is None:
+            if not isinstance(value, str) or len(value) > MAX_DURATION_TEXT or parse_duration(value) is None:
                 raise SettingsValidationError(f"{key} must be a duration like 1h or 1d12h.")
             cleaned[key] = value.strip()
         elif key == "embed_color" or key in SETTING_COLORS:
@@ -226,6 +232,10 @@ def validate_settings(data: Any, defaults: dict[str, Any]) -> dict[str, Any]:
             cleaned[key] = value
 
     return cleaned
+
+
+MAX_COMMAND_NAME_LENGTH = 100  # three words of at most 32 characters, and the spaces between
+MAX_DURATION_TEXT = 32
 
 
 def _iso(moment) -> str | None:
@@ -352,6 +362,7 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
         r.add_post("/v1/guilds/{guild_id}/music/action", self.h_music_action)
         r.add_get("/v1/commands", self.h_commands)
+        r.add_get("/v1/samples/{name}", self.h_sample)
         r.add_post("/v1/users/resolve", self.h_users_resolve)
         r.add_post("/v1/actions/reload", self.h_reload)
         r.add_post("/v1/actions/sync", self.h_sync)
@@ -360,6 +371,8 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/actions/avatar", self.h_avatar)
         r.add_post("/v1/actions/restart", self.h_restart)
         r.add_post("/v1/notify", self.h_notify)
+        r.add_get("/v1/announce/channel/{channel_id}", self.h_announce_channel)
+        r.add_post("/v1/announce", self.h_announce)
         r.add_post("/v1/data/{kind}/delete", self.h_data_delete)
         r.add_post("/v1/data/playlists/update", self.h_playlist_update)
         r.add_get("/v1/guilds/{guild_id}/reactionroles", self.h_rr_overview)
@@ -402,7 +415,7 @@ class PanelBridge(commands.Cog):
 
     def _guild(self, request: web.Request) -> discord.Guild:
         raw = request.match_info["guild_id"]
-        guild = self.bot.get_guild(int(raw)) if raw.isdigit() else None
+        guild = self.bot.get_guild(int(raw)) if is_digits(raw) else None
         if guild is None:
             raise BridgeError(404, "The bot is not in a server with that ID.")
         return guild
@@ -559,13 +572,13 @@ class PanelBridge(commands.Cog):
 
     async def h_settings_get(self, request: web.Request) -> web.Response:
         raw = request.match_info["guild_id"]
-        if not raw.isdigit():
+        if not is_digits(raw):
             raise BridgeError(400, "Invalid server ID.")
         return web.json_response({"settings": get_guild_settings(self.storage, int(raw))})
 
     async def h_settings_put(self, request: web.Request) -> web.Response:
         raw = request.match_info["guild_id"]
-        if not raw.isdigit():
+        if not is_digits(raw):
             raise BridgeError(400, "Invalid server ID.")
         body = await self._json(request)
         defaults = get_default_settings(self.storage)
@@ -667,7 +680,7 @@ class PanelBridge(commands.Cog):
     @staticmethod
     def _user_id(request: web.Request, source: str | None = None) -> int:
         raw = source if source is not None else request.match_info.get("user_id", "")
-        if not str(raw).isdigit():
+        if not is_digits(str(raw)):
             raise BridgeError(400, "A user ID is required.")
         return int(raw)
 
@@ -704,6 +717,21 @@ class PanelBridge(commands.Cog):
         refusal = self._command_refusal(guild, member, command)
         return not refusal, refusal
 
+    def _autoplay_access(self, guild: discord.Guild, user_id: int) -> tuple[bool, str]:
+        """Whether this user may switch autoplay from the website: the same
+        people /music autoplay answers to, those who can manage the server."""
+        member = guild.get_member(user_id)
+        if member is None:
+            return False, "You are not a member of this server."
+        if not self._web_enabled(guild, "web_player_enabled"):
+            return False, WEB_PLAYER_OFF
+        if not member.guild_permissions.manage_guild:
+            return False, "Only people who can manage the server can change autoplay."
+        # DJ mode gates playback, not settings, so only a disabled command stands in the way.
+        if blocking_entry("music autoplay", get_guild_settings(self.storage, guild.id).get("blocked_commands")) is not None:
+            return False, "/music autoplay is disabled in this server."
+        return True, ""
+
     def _web_enabled(self, guild: discord.Guild, key: str) -> bool:
         """A server's website switches: web_player_enabled, web_join_enabled,
         web_discovery_enabled. All default to on."""
@@ -722,7 +750,7 @@ class PanelBridge(commands.Cog):
             role_name = str(settings.get("music_dj_role_name", "dj"))
             djadmin = str(settings.get("music_djadmin_role_id") or "")
             has_dj = any(role.name == role_name for role in member.roles)
-            has_djadmin = djadmin.isdigit() and any(role.id == int(djadmin) for role in member.roles)
+            has_djadmin = is_digits(djadmin) and any(role.id == int(djadmin) for role in member.roles)
             if not (has_dj or has_djadmin):
                 return f"DJ mode is on. You need the {role_name} role."
         return ""
@@ -843,6 +871,7 @@ class PanelBridge(commands.Cog):
         return {
             "session": self._music_session(guild),
             "can_control": can_control,
+            "can_autoplay": self._autoplay_access(guild, user_id)[0],
             "reason": reason,
             "join_channel": getattr(self._join_target(guild, user_id)[0], "name", None),
             "queue_limit": self._queue_limit(guild.id),
@@ -918,6 +947,14 @@ class PanelBridge(commands.Cog):
             raise BridgeError(503, "Music is not available right now.")
         if action == "join":  # the one action that doesn't need the bot in voice already
             return await self._music_join(guild, user_id, music)
+        if action == "autoplay":  # a server setting, not a playback control: who may change it is the command's own rule
+            allowed, reason = self._autoplay_access(guild, user_id)
+            if not allowed:
+                raise BridgeError(403, reason)
+            enabled = str(body.get("enabled", "")).lower() in ("true", "1", "on")
+            update_guild_settings(self.storage, guild.id, {"music_autoplay": enabled})
+            detail = "Autoplay on: similar tracks keep playing when the queue runs out" if enabled else "Autoplay off"
+            return web.json_response({"ok": True, "detail": detail, "session": self._music_session(guild)})
 
         voice_client = guild.voice_client
         command = {
@@ -940,7 +977,7 @@ class PanelBridge(commands.Cog):
             """A 1-based queue position, checked against the track the user
             was looking at so a stale page can't act on the wrong track."""
             raw = str(body.get(name, ""))
-            if not raw.isdigit() or not 1 <= int(raw) <= len(state.queue):
+            if not is_digits(raw) or not 1 <= int(raw) <= len(state.queue):
                 raise BridgeError(409, "The queue changed. Try again.")
             return int(raw)
 
@@ -977,7 +1014,7 @@ class PanelBridge(commands.Cog):
             detail = f"Loop: {mode}"
         elif action == "volume":
             raw = str(body.get("percent", ""))
-            if not raw.isdigit() or int(raw) > 100:
+            if not is_digits(raw) or int(raw) > 100:
                 raise BridgeError(400, "Volume must be between 0 and 100.")
             state.volume = int(raw) / 100
             source = getattr(voice_client, "source", None)
@@ -986,7 +1023,7 @@ class PanelBridge(commands.Cog):
             detail = f"Volume {raw}%"
         elif action == "seek":
             raw = str(body.get("seconds", ""))
-            if not raw.isdigit():
+            if not is_digits(raw):
                 raise BridgeError(400, "Seek needs a time in seconds.")
             try:
                 track = music.seek(guild, int(raw))
@@ -1001,7 +1038,7 @@ class PanelBridge(commands.Cog):
             track = items.pop(index - 1)
             if action == "move":
                 target = str(body.get("to", ""))
-                if not target.isdigit() or not 1 <= int(target) <= len(items) + 1:
+                if not is_digits(target) or not 1 <= int(target) <= len(items) + 1:
                     raise BridgeError(409, "The queue changed. Try again.")
                 items.insert(int(target) - 1, track)
                 detail = f"Moved {track.title} to position {target}"
@@ -1027,7 +1064,7 @@ class PanelBridge(commands.Cog):
             from cogs.music import Track  # the cog's own track type, so the player loop treats these like any other
 
             owner_raw = str(body.get("owner_id") or user_id)
-            if not owner_raw.isdigit():
+            if not is_digits(owner_raw):
                 raise BridgeError(400, "Unknown playlist.")
             # Raises PlaylistError for a missing playlist or someone else's private one.
             playlist = playlist_store.get_visible_playlist(self.storage, int(owner_raw), str(body.get("name", "")), viewer_id=user_id)
@@ -1036,7 +1073,7 @@ class PanelBridge(commands.Cog):
             songs = playlist["songs"]
             one = str(body.get("position") or "")
             if one:  # a single song from the playlist rather than all of it
-                if not one.isdigit() or not 1 <= int(one) <= len(songs) or str(body.get("expect_title", songs[int(one) - 1].get("title"))) != str(songs[int(one) - 1].get("title")):
+                if not is_digits(one) or not 1 <= int(one) <= len(songs) or str(body.get("expect_title", songs[int(one) - 1].get("title"))) != str(songs[int(one) - 1].get("title")):
                     raise BridgeError(409, "That playlist changed. Reload the page and try again.")
                 songs = [songs[int(one) - 1]]
             tracks = [Track.from_storage_dict(song, requester=member) for song in songs]
@@ -1150,6 +1187,8 @@ class PanelBridge(commands.Cog):
                     "category": by_root.get(root, "owner" if root == "owner" else "other"),
                     **self._command_module(command.qualified_name),
                     "kind": "slash",
+                    "added": command_dates.added_on(command.qualified_name),
+                    "sample": samples.can_sample(command),
                     "requires": self._required_permissions(command),
                     "params": [
                         {"name": p.display_name, "description": p.description if p.description != "…" else "", "required": p.required}
@@ -1160,19 +1199,31 @@ class PanelBridge(commands.Cog):
         # Right-click ("Apps") commands live outside the slash tree.
         for kind in (discord.AppCommandType.message, discord.AppCommandType.user):
             for menu in self.bot.tree.get_commands(type=kind):
+                # a menu has no group to go by: the cog its handler belongs to says what it is for
+                owner = type(getattr(menu.callback, "__self__", None)).__name__
                 result.append(
                     {"name": menu.name, "description": f"Right-click a {kind.name}, then Apps.", "group": None,
-                     "category": "images" if "Image" in menu.name else "other", "kind": "menu", "requires": [], "params": []}
+                     "category": "images" if "Image" in menu.name or owner.startswith("Image") else "other", "kind": "menu", "requires": [], "params": [],
+                     "added": command_dates.added_on(menu.name)}
                 )
         result.sort(key=lambda c: (c["kind"] != "slash", c["name"]))
         return web.json_response({"commands": result, "categories": categories})
+
+    async def h_sample(self, request: web.Request) -> web.Response:
+        """An example of what an image command makes, as the image itself."""
+        made = await self.bot.samples.get(request.match_info["name"])
+        if made is None:
+            raise BridgeError(404, "That command has no sample.")
+        data, filename = made
+        kind = {"gif": "image/gif", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+        return web.Response(body=data, content_type=kind.get(filename.rsplit(".", 1)[-1].lower(), "application/octet-stream"))
 
     async def h_users_resolve(self, request: web.Request) -> web.Response:
         """Names for user IDs out of the bot's cache (no API calls)."""
         body = await self._json(request)
         users: dict[str, dict[str, Any]] = {}
         for raw in list(body.get("ids") or [])[:500]:
-            if not str(raw).isdigit():
+            if not is_digits(str(raw)):
                 continue
             user = self.bot.get_user(int(raw))
             if user is not None:
@@ -1310,6 +1361,61 @@ class PanelBridge(commands.Cog):
             raise BridgeError(502, f"Could not DM the owner: {exc}") from exc
         return web.json_response({"ok": True})
 
+    # ---------- announcements ----------
+
+    def _announce_channel(self, raw: Any) -> discord.TextChannel:
+        channel = self.bot.get_channel(int(raw)) if is_digits(str(raw)) else None
+        if not isinstance(channel, discord.TextChannel):
+            raise BridgeError(404, "I can't see a text or announcement channel with that ID. It has to be in a server I'm in.")
+        return channel
+
+    @staticmethod
+    def _announce_report(channel: discord.TextChannel) -> dict[str, Any]:
+        mine = channel.permissions_for(channel.guild.me)
+        return {
+            "id": str(channel.id), "name": channel.name, "guild": channel.guild.name, "news": channel.is_news(),
+            "can_post": mine.view_channel and mine.send_messages and mine.embed_links and mine.attach_files,
+            # publishing your own message needs Send Messages; Manage Messages covers every case
+            "can_publish": channel.is_news() and mine.send_messages,
+        }
+
+    async def h_announce_channel(self, request: web.Request) -> web.Response:
+        """What the panel shows beside the announcement channel setting."""
+        return web.json_response({"channel": self._announce_report(self._announce_channel(request.match_info["channel_id"]))})
+
+    async def h_announce(self, request: web.Request) -> web.Response:
+        """Post an announcement, with one command's sample as its picture if
+        asked, and publish it when the channel is an announcement channel so
+        the servers following it get a copy."""
+        body = await self._json(request)
+        channel = self._announce_channel(body.get("channel_id"))
+        title, text = str(body.get("title", "")).strip()[:256], str(body.get("body", "")).strip()[:4000]
+        if not title or not text:
+            raise BridgeError(400, "An announcement needs a title and a message.")
+        if not self._announce_report(channel)["can_post"]:
+            raise BridgeError(409, f"I can't post in #{channel.name}: I need View Channel, Send Messages, Embed Links and Attach Files there.")
+        embed = self.bot.embeds.create(title=title, description=text, color=discord.Color.blurple(), timestamp=True)
+        files = []
+        sample = await self.bot.samples.get(str(body["sample"])) if body.get("sample") else None
+        if sample is not None:
+            embed.set_image(url=f"attachment://{sample[1]}")
+            files.append(discord.File(io.BytesIO(sample[0]), filename=sample[1]))
+        try:
+            message = await channel.send(embed=embed, files=files)
+        except discord.HTTPException as exc:
+            raise BridgeError(502, f"Discord refused the message: {exc}") from exc
+        published, note = False, ""
+        if body.get("publish", True):
+            if not channel.is_news():
+                note = "Posted, but not published: that is an ordinary channel, not an announcement channel, so nobody can follow it."
+            else:
+                try:
+                    await message.publish()
+                    published = True
+                except discord.HTTPException as exc:
+                    note = f"Posted, but publishing failed ({exc}). Press Publish on the message in Discord."
+        return web.json_response({"message_id": str(message.id), "url": message.jump_url, "published": published, "note": note})
+
     # ---------- stored-data edits ----------
 
     async def h_data_delete(self, request: web.Request) -> web.Response:
@@ -1320,7 +1426,7 @@ class PanelBridge(commands.Cog):
 
         def need_int(name: str) -> int:
             value = str(body.get(name, ""))
-            if not value.isdigit():
+            if not is_digits(value):
                 raise BridgeError(400, f"{name} is required.")
             return int(value)
 
@@ -1382,7 +1488,7 @@ class PanelBridge(commands.Cog):
     async def h_playlist_update(self, request: web.Request) -> web.Response:
         body = await self._json(request)
         owner_raw, name = str(body.get("owner_id", "")), str(body.get("name", ""))
-        if not owner_raw.isdigit():
+        if not is_digits(owner_raw):
             raise BridgeError(400, "owner_id is required.")
         owner_id = int(owner_raw)
         try:
@@ -1425,7 +1531,7 @@ class PanelBridge(commands.Cog):
     async def h_playlists(self, request: web.Request) -> web.Response:
         user_id = self._user_id(request)
         own = playlist_store.list_playlists(self.storage, user_id)
-        liked = [p for p in playlist_store.list_liked_playlists(self.storage, user_id) if p["owner_id"] != user_id]
+        liked = [p for p in await asyncio.to_thread(playlist_store.list_liked_playlists, self.storage, user_id) if p["owner_id"] != user_id]
         return web.json_response(
             {
                 "own": [self._playlist_view(p, user_id, with_songs=False) for p in own],
@@ -1443,11 +1549,11 @@ class PanelBridge(commands.Cog):
         return [guild for guild in self.bot.guilds
                 if guild.get_member(viewer_id) is not None and self._web_enabled(guild, "web_discovery_enabled")]
 
-    def _public_playlists(self, viewer_id: int) -> list[dict[str, Any]]:
+    async def _public_playlists(self, viewer_id: int) -> list[dict[str, Any]]:
         """Every public playlist with songs that isn't the viewer's own, most
         liked first. Public means public: these are the ones anyone with the
         link could already open."""
-        found = [p for p in playlist_store.list_public_playlists(self.storage) if p["owner_id"] != viewer_id and p["songs"]]
+        found = [p for p in await asyncio.to_thread(playlist_store.list_public_playlists, self.storage) if p["owner_id"] != viewer_id and p["songs"]]
         found.sort(key=lambda p: (-len(p["likes"]), p["display_name"].lower()))
         return found
 
@@ -1459,7 +1565,7 @@ class PanelBridge(commands.Cog):
         if not words:
             return web.json_response({"playlists": []})
         results = []
-        for playlist in self._public_playlists(user_id):
+        for playlist in await self._public_playlists(user_id):
             view = self._playlist_view(playlist, user_id, with_songs=False)
             haystack = " ".join(
                 [playlist["display_name"], playlist["description"], view["owner_name"] or ""]
@@ -1491,7 +1597,7 @@ class PanelBridge(commands.Cog):
         shared = self._shared_guilds(user_id)
         profiles: dict[int, dict[str, Any] | None] = {}
         found = []
-        for playlist in playlist_store.list_public_playlists(self.storage):
+        for playlist in await asyncio.to_thread(playlist_store.list_public_playlists, self.storage):
             owner_id = playlist["owner_id"]
             if owner_id == user_id or not playlist["songs"]:
                 continue
@@ -1507,7 +1613,7 @@ class PanelBridge(commands.Cog):
             found.append(view)
         found.sort(key=lambda p: (-p["likes"], p["display_name"].lower()))
         people = sorted((p for p in profiles.values() if p), key=lambda p: (-p["playlist_count"], (p["name"] or "").lower()))
-        popular = [self._playlist_view(p, user_id, with_songs=False) for p in self._public_playlists(user_id) if p["likes"]]
+        popular = [self._playlist_view(p, user_id, with_songs=False) for p in await self._public_playlists(user_id) if p["likes"]]
         return web.json_response({"profiles": people, "playlists": found, "popular": popular[:POPULAR_PLAYLISTS]})
 
     async def h_profile(self, request: web.Request) -> web.Response:
@@ -1516,7 +1622,7 @@ class PanelBridge(commands.Cog):
         for a user who doesn't exist."""
         user_id = self._user_id(request)
         owner_raw = request.match_info["owner_id"]
-        if not owner_raw.isdigit():
+        if not is_digits(owner_raw):
             raise BridgeError(404, "Profile not found.")
         owner_id = int(owner_raw)
         profile = self._profile_view(owner_id, self._shared_guilds(user_id))
@@ -1535,7 +1641,7 @@ class PanelBridge(commands.Cog):
         """One playlist as this user may see it: their own, or someone's public one."""
         user_id = self._user_id(request)
         owner_raw = request.match_info["owner_id"]
-        if not owner_raw.isdigit():
+        if not is_digits(owner_raw):
             raise BridgeError(404, "Playlist not found.")
         try:
             playlist = playlist_store.get_visible_playlist(self.storage, int(owner_raw), request.match_info["name"], viewer_id=user_id)
@@ -1573,7 +1679,7 @@ class PanelBridge(commands.Cog):
 
         def position(key: str) -> int:
             raw = str(body.get(key, ""))
-            if not raw.isdigit():
+            if not is_digits(raw):
                 raise BridgeError(400, "Invalid position.")
             return int(raw)
 
@@ -1632,7 +1738,7 @@ class PanelBridge(commands.Cog):
             # From the web player: copy what a server is playing into the
             # user's own playlist. Seeing the queue is all it takes.
             guild_raw = str(body.get("guild_id", ""))
-            guild = self.bot.get_guild(int(guild_raw)) if guild_raw.isdigit() else None
+            guild = self.bot.get_guild(int(guild_raw)) if is_digits(guild_raw) else None
             if guild is None or guild.get_member(user_id) is None:
                 raise BridgeError(404, "Server not found.")
             if not self._web_enabled(guild, "web_player_enabled"):
@@ -1643,7 +1749,7 @@ class PanelBridge(commands.Cog):
             if action == "save_song":
                 raw = str(body.get("position", "0"))  # 0 is the current track, 1.. the queue
                 offset = 0 if state and state.current else 1
-                index = int(raw) - offset if raw.isdigit() else -1
+                index = int(raw) - offset if is_digits(raw) else -1
                 if not 0 <= index < len(playing) or str(body.get("expect_title", playing[index].title)) != playing[index].title:
                     raise BridgeError(409, "The queue changed. Try again.")
                 result, added = store.add_songs(path, user_id, name, [playing[index].to_storage_dict()])
@@ -1656,7 +1762,7 @@ class PanelBridge(commands.Cog):
                 detail = f"Saved {added} song{'s' if added != 1 else ''} as {result['display_name']}"
         elif action in ("like", "unlike"):
             owner_raw = str(body.get("owner_id", ""))
-            if not owner_raw.isdigit():
+            if not is_digits(owner_raw):
                 raise BridgeError(400, "Unknown playlist.")
             result, now_liked = store.toggle_like(path, int(owner_raw), name, user_id, desired=action == "like")
             detail = "Liked" if now_liked else "Removed from your liked playlists"
@@ -1720,7 +1826,7 @@ class PanelBridge(commands.Cog):
             channel = None
             if spec["channel"]:
                 channel_raw = str(body.get("channel_id", ""))
-                channel = guild.get_channel(int(channel_raw)) if channel_raw.isdigit() else None
+                channel = guild.get_channel(int(channel_raw)) if is_digits(channel_raw) else None
                 if channel is None or not hasattr(channel, "send"):
                     raise BridgeError(400, "Choose a channel.")
                 permissions = channel.permissions_for(guild.me) if guild.me else discord.Permissions.none()
@@ -1746,7 +1852,7 @@ class PanelBridge(commands.Cog):
                     raise BridgeError(404, "That user ID isn't a member of this server.")
             run_at = schedule_store.parse_utc(str(body.get("run_at", "")))
             interval = str(body.get("interval_minutes", "0"))
-            if run_at is None or not interval.isdigit():
+            if run_at is None or not is_digits(interval):
                 raise BridgeError(400, "Choose when to post it.")
             try:
                 entry = schedule_store.add(self.storage, guild.id, channel.id if channel else 0, content, run_at, int(interval), admin.id,
@@ -1757,7 +1863,7 @@ class PanelBridge(commands.Cog):
             return web.json_response({"ok": True, "detail": f"Scheduled: {spec['label'].lower()}{where}", "id": entry["id"]})
         if action == "remove":
             raw = str(body.get("id", ""))
-            removed = schedule_store.remove(self.storage, guild.id, int(raw)) if raw.isdigit() else None
+            removed = schedule_store.remove(self.storage, guild.id, int(raw)) if is_digits(raw) else None
             if removed is None:
                 raise BridgeError(404, "That scheduled action no longer exists.")
             return web.json_response({"ok": True, "detail": "Cancelled the scheduled action", "before": removed})
@@ -1795,7 +1901,7 @@ class PanelBridge(commands.Cog):
 
     def _postable_channel(self, guild: discord.Guild, raw: str) -> Any:
         """A channel of this server the bot can post in, or a BridgeError saying why not."""
-        channel = guild.get_channel(int(raw)) if str(raw).isdigit() else None
+        channel = guild.get_channel(int(raw)) if is_digits(str(raw)) else None
         if channel is None or not hasattr(channel, "send"):
             raise BridgeError(400, "Choose a channel.")
         permissions = channel.permissions_for(guild.me) if guild.me else None
@@ -1824,7 +1930,7 @@ class PanelBridge(commands.Cog):
             await cog.post(channel, sticky)
             return web.json_response({"ok": True, "detail": f"Stuck the message in #{channel.name}"})
         # The rest act on an existing sticky, which must belong to this server.
-        existing = sticky_store.get(self.storage, int(channel_raw)) if channel_raw.isdigit() else None
+        existing = sticky_store.get(self.storage, int(channel_raw)) if is_digits(channel_raw) else None
         if existing is None or existing["guild_id"] != guild.id:
             raise BridgeError(404, "That sticky no longer exists.")
         channel = guild.get_channel(existing["channel_id"])
@@ -1865,7 +1971,7 @@ class PanelBridge(commands.Cog):
             raw_roles = body.get("role_ids")
             if style not in role_menu_store.STYLES or mode not in role_menu_store.MODES or not isinstance(raw_roles, list):
                 raise BridgeError(400, "Choose a style, a mode and the roles to offer.")
-            role_ids = list(dict.fromkeys(int(r) for r in raw_roles if str(r).isdigit()))
+            role_ids = list(dict.fromkeys(int(r) for r in raw_roles if is_digits(str(r))))
             try:
                 if role_menu_store.count_menus(self.storage, guild.id) >= role_menu_store.MAX_MENUS_PER_GUILD:
                     raise role_menu_store.RoleMenuError(f"This server already has {role_menu_store.MAX_MENUS_PER_GUILD} role menus. Delete one first.")
@@ -1880,21 +1986,21 @@ class PanelBridge(commands.Cog):
             return web.json_response({"ok": True, "detail": f"Posted a role menu with {len(roles)} role{'s' if len(roles) != 1 else ''} in #{channel.name}", "id": menu_id})
         if action == "edit":
             raw, raw_roles = str(body.get("id", "")), body.get("role_ids")
-            if not raw.isdigit() or not isinstance(raw_roles, list):
+            if not is_digits(raw) or not isinstance(raw_roles, list):
                 raise BridgeError(400, "Choose the roles to offer.")
             before = role_menu_store.get_menu(self.storage, guild.id, int(raw))
             try:
                 menu = await cog.apply_edit(
                     guild, admin, int(raw), title=str(body.get("title", "")), description=str(body.get("description", "")),
                     style=str(body.get("style", "")), mode=str(body.get("mode", "")),
-                    role_ids=list(dict.fromkeys(int(r) for r in raw_roles if str(r).isdigit())),
+                    role_ids=list(dict.fromkeys(int(r) for r in raw_roles if is_digits(str(r)))),
                 )
             except role_menu_store.RoleMenuError as exc:
                 raise BridgeError(404 if before is None else 400, str(exc).replace("`", "")) from exc
             return web.json_response({"ok": True, "detail": f"Updated the role menu {menu['title']}", "before": before})
         if action == "delete":
             raw = str(body.get("id", ""))
-            menu = role_menu_store.delete_menu(self.storage, guild.id, int(raw)) if raw.isdigit() else None
+            menu = role_menu_store.delete_menu(self.storage, guild.id, int(raw)) if is_digits(raw) else None
             if menu is None:
                 raise BridgeError(404, "That role menu no longer exists.")
             channel = guild.get_channel(menu["channel_id"])
@@ -1928,7 +2034,7 @@ class PanelBridge(commands.Cog):
 
         ranked = sorted(((rank(m), m.display_name.lower(), m) for m in guild.members if rank(m) is not None), key=lambda item: item[:2])
         found = [self._member_card(guild, member) for _, _, member in ranked[: self.MEMBER_SEARCH_RESULTS]]
-        if not found and query.isdigit():
+        if not found and is_digits(query):
             user = self.bot.get_user(int(query))
             found = [{"user_id": query, "name": str(user) if user else None, "display_name": str(user) if user else None,
                       "avatar": _asset_url(getattr(user, "display_avatar", None)), "bot": bool(getattr(user, "bot", False)),
@@ -1959,7 +2065,7 @@ class PanelBridge(commands.Cog):
         else gets the same 404 as for a server that doesn't exist or doesn't
         take appeals, so the form can't be used to look servers up."""
         raw = request.match_info["guild_id"]
-        guild = self.bot.get_guild(int(raw)) if raw.isdigit() else None
+        guild = self.bot.get_guild(int(raw)) if is_digits(raw) else None
         settings = get_guild_settings(self.storage, guild.id) if guild else {}
         if guild is None or not settings.get("appeals_enabled"):
             raise BridgeError(404, "This server isn't taking appeals.")
@@ -2019,7 +2125,7 @@ class PanelBridge(commands.Cog):
         # Let the moderators know there is something to read: in the channel
         # chosen for appeals, else the mod log.
         raw = str(settings.get("appeals_channel_id") or "")
-        channel_id = int(raw) if raw.isdigit() else get_mod_log_channel_id(self.storage, guild.id)
+        channel_id = int(raw) if is_digits(raw) else get_mod_log_channel_id(self.storage, guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
         notified = False
         if channel is not None:
@@ -2036,7 +2142,7 @@ class PanelBridge(commands.Cog):
                                   "channel": getattr(channel, "name", None) if channel is not None else None})
 
     async def _decide_appeal(self, guild: discord.Guild, admin: discord.Member, approved: bool, appeal_raw: str, note: str, mod_log) -> web.Response:
-        if not appeal_raw.isdigit():
+        if not is_digits(appeal_raw):
             raise BridgeError(400, "An appeal ID is required.")
         appeal_store.ensure_table(self.storage)
         if approved:
@@ -2097,17 +2203,17 @@ class PanelBridge(commands.Cog):
             return await self._decide_appeal(guild, admin, action == "approve_appeal", str(body.get("appeal_id", "")), str(body.get("note", "")), mod_log)
         if action == "remove_appeal":
             appeal_raw = str(body.get("appeal_id", ""))
-            removed = appeal_store.remove_test(self.storage, guild.id, int(appeal_raw)) if appeal_raw.isdigit() else None
+            removed = appeal_store.remove_test(self.storage, guild.id, int(appeal_raw)) if is_digits(appeal_raw) else None
             if removed is None:
                 raise BridgeError(404, "Only test appeals can be removed, and that one no longer exists.")
             return web.json_response({"ok": True, "detail": "Removed the test appeal", "before": removed})
         if action == "remove_note":
             note_raw = str(body.get("note_id", ""))
-            removed = case_store.remove_note(self.storage, guild.id, int(note_raw)) if note_raw.isdigit() else None
+            removed = case_store.remove_note(self.storage, guild.id, int(note_raw)) if is_digits(note_raw) else None
             if removed is None:
                 raise BridgeError(404, "That note no longer exists.")
             return web.json_response({"ok": True, "detail": "Removed the note", "before": removed})
-        if not target_raw.isdigit():
+        if not is_digits(target_raw):
             raise BridgeError(400, "A member ID is required.")
         target_id = int(target_raw)
         if action == "add_note":
@@ -2171,7 +2277,7 @@ class PanelBridge(commands.Cog):
         return None
 
     def _rr_channel(self, guild: discord.Guild, raw: Any) -> discord.abc.GuildChannel:
-        channel = (guild.get_channel(int(raw)) or guild.get_thread(int(raw))) if str(raw).isdigit() else None
+        channel = (guild.get_channel(int(raw)) or guild.get_thread(int(raw))) if is_digits(str(raw)) else None
         if channel is None or not hasattr(channel, "fetch_message"):
             raise BridgeError(404, "That channel isn't in this server.")
         permissions = channel.permissions_for(guild.me)
@@ -2190,7 +2296,7 @@ class PanelBridge(commands.Cog):
 
     async def _rr_add_one(self, guild, message, emoji_text: str, role_raw: Any, member) -> str:
         """Map one emoji on `message` to a role. Returns the stored emoji text."""
-        role = guild.get_role(int(role_raw)) if str(role_raw).isdigit() else None
+        role = guild.get_role(int(role_raw)) if is_digits(str(role_raw)) else None
         if role is None:
             raise BridgeError(404, "That role no longer exists.")
         problem = self._rr_role_problem(guild, role, member)
@@ -2306,7 +2412,7 @@ class PanelBridge(commands.Cog):
         # Check every role before posting anything, so a bad pair can't leave a
         # half-configured message in the channel.
         for pair in pairs:
-            role = guild.get_role(int(pair["role_id"])) if str(pair.get("role_id", "")).isdigit() else None
+            role = guild.get_role(int(pair["role_id"])) if is_digits(str(pair.get("role_id", ""))) else None
             if role is None:
                 raise BridgeError(400, f"Choose a role for {pair['emoji']}.")
             problem = self._rr_role_problem(guild, role, member)
@@ -2349,7 +2455,7 @@ class PanelBridge(commands.Cog):
         body = await self._json(request)
         self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
         raw_message = str(body.get("message_id", ""))
-        if not raw_message.isdigit():
+        if not is_digits(raw_message):
             raise BridgeError(400, "message_id is required.")
         message_id, emoji_text = int(raw_message), str(body.get("emoji") or "")
         # Only this server's mappings are ever touched.
@@ -2431,7 +2537,7 @@ class PanelBridge(commands.Cog):
 
     async def h_newsletter_resume(self, request: web.Request) -> web.Response:
         raw = request.match_info["send_id"]
-        send = newsletter_store.get_send(self.storage, int(raw)) if raw.isdigit() else None
+        send = newsletter_store.get_send(self.storage, int(raw)) if is_digits(raw) else None
         if send is None:
             raise BridgeError(404, "No such newsletter.")
         if send["state"] not in newsletter_store.RESUMABLE_STATES or not send["counts"]["pending"]:

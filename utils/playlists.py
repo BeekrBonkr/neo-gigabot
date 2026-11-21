@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from utils.numbers import is_digits
 from utils.db import connect, write_transaction
 
 MAX_PLAYLISTS_PER_USER = 5
@@ -456,7 +457,7 @@ def import_playlist_raw(
     clean_description = (description or "")[:MAX_DESCRIPTION_LENGTH]
     clean_status = status if status in VALID_STATUSES else "public"
     clean_songs = [sanitize_track(song) for song in (songs or [])]
-    clean_likes = [str(int(uid)) for uid in (likes or []) if str(uid).strip().lstrip("-").isdigit()]
+    clean_likes = [str(int(uid)) for uid in (likes or []) if is_digits(str(uid).strip().lstrip("-"))]
 
     with write_transaction(storage_path) as connection:
         key = normalize_name(display_name)
