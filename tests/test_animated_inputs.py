@@ -69,6 +69,8 @@ def test_every_command_gives_a_moving_gif_for_a_moving_input(storage):
         for name, command in harness.offered().items():
             if name.rsplit(" ", 1)[-1] in image_menu.FACE_COMMANDS:
                 continue  # the drawn test picture has no face; test_image_faces covers the frame handling
+            if name == "animate bitcrush":
+                continue  # works on sound, not on pictures: test_bitcrush
             harness.sent.clear(), harness.errors.clear()
             options = {}
             parameters = {parameter.name: parameter for parameter in command.parameters}
