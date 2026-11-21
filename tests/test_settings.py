@@ -280,3 +280,35 @@ def test_music_limits(storage: Path) -> None:
     update_guild_settings(storage, GUILD_ID, {"music_max_queue_length": 25, "music_max_track_minutes": 10})
     assert get_music_max_queue_length(storage, GUILD_ID) == 25
     assert get_music_max_track_seconds(storage, GUILD_ID) == 600
+
+
+def test_the_command_pages_fit_in_one_dropdown_and_lose_no_command(tmp_path):
+    import asyncio
+
+    import discord
+    from discord import app_commands
+    from discord.ext import commands
+
+    import main
+    from cogs.settings import MAX_SELECT_OPTIONS, UNBLOCKABLE_COMMAND_NAMES, _blockable_command_pages
+
+    async def load():
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none(), help_command=None)
+        bot.project_root = main.Path(main.__file__).resolve().parent
+        bot.storage_path = tmp_path
+        for extension in main.COGS:
+            await bot.load_extension(extension)
+        pages = [(label, [command.qualified_name for command in chunk]) for label, chunk in _blockable_command_pages(bot)]
+        everything = {c.qualified_name for c in bot.tree.walk_commands() if isinstance(c, app_commands.Command)}
+        for extension in main.COGS:
+            await bot.unload_extension(extension)
+        return pages, everything
+
+    pages, everything = asyncio.run(load())
+    assert len(pages) <= MAX_SELECT_OPTIONS, [label for label, _ in pages]
+    assert all(1 <= len(names) <= MAX_SELECT_OPTIONS for _, names in pages)
+    listed = [name for _, names in pages for name in names]
+    assert len(listed) == len(set(listed))
+    missing = {n for n in everything - set(listed) if n.split(" ")[0] not in ("owner", "settings") and n.split(" ")[-1] not in UNBLOCKABLE_COMMAND_NAMES}
+    assert not missing, sorted(missing)
+    print([(label, len(names)) for label, names in pages])
