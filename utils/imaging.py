@@ -26,12 +26,17 @@ from PIL import Image, ImageEnhance, ImageFont, ImageSequence
 
 from utils.discord_links import fetch_message_from_link
 from utils.richtext import PLACEHOLDER_BASE, RichText
+from utils.user_app import home_guild
 
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 # A lot of what Discord shows as a GIF is a short silent video: everything from
 # its GIF picker, and many uploads. These are turned into animated images on the way in.
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
 SOURCE_TTL_SECONDS = 60 * 15
+NO_HISTORY_MESSAGE = (
+    "I can't look back through this channel for an image. Attach one to the command, "
+    "or right-click a message and choose Apps → Edit Image."
+)
 
 # Embed-image URLs are attacker-controlled (any user can post a link that
 # unfurls to an arbitrary URL), so fetches are restricted to Discord's own hosts
@@ -241,7 +246,7 @@ class ImageSourceStore:
     any command that resolves an image, regardless of which cog defines it."""
 
     def __init__(self) -> None:
-        self._sources: dict[int, dict[str, int | float]] = {}
+        self._sources: dict[int, dict[str, int | float | str | None]] = {}
 
     def _prune(self) -> None:
         now = time.time()
@@ -249,17 +254,21 @@ class ImageSourceStore:
         for user_id in stale:
             self._sources.pop(user_id, None)
 
-    def remember(self, user_id: int, channel_id: int, message_id: int) -> None:
+    def remember(self, user_id: int, channel_id: int, message_id: int, *, url: str | None = None, filename: str | None = None) -> None:
+        """`url` is the picture's own link, for when the message cannot be
+        read again: a server the bot is not in, or a DM between people."""
         self._sources[user_id] = {
             "channel_id": channel_id,
             "message_id": message_id,
+            "url": url,
+            "filename": filename,
             "timestamp": time.time(),
         }
 
     def clear(self, user_id: int) -> bool:
         return self._sources.pop(user_id, None) is not None
 
-    def get(self, user_id: int) -> dict[str, int | float] | None:
+    def get(self, user_id: int) -> dict[str, int | float | str | None] | None:
         self._prune()
         return self._sources.get(user_id)
 
@@ -307,7 +316,8 @@ class ImageToolkit:
             raise RuntimeError("That took too long to process. Try a smaller image or less aggressive settings.") from exc
 
     def check_upload_size(self, interaction: discord.Interaction, data: bytes) -> None:
-        limit = interaction.guild.filesize_limit if interaction.guild is not None else DEFAULT_UPLOAD_LIMIT_BYTES
+        guild = home_guild(interaction)  # a server without the bot is not known well enough to have a limit
+        limit = guild.filesize_limit if guild is not None else DEFAULT_UPLOAD_LIMIT_BYTES
         if len(data) > limit:
             raise ValueError(
                 f"The result is {len(data) / 1048576:.1f} MB, more than the {limit // 1048576} MB I can upload here. Try a smaller image or a shorter GIF."
@@ -499,6 +509,14 @@ class ImageToolkit:
     async def fetch_message_from_link(self, interaction: discord.Interaction, message_link: str) -> discord.Message:
         return await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild)
 
+    def message_image_link(self, message: discord.Message) -> tuple[str, str] | None:
+        """The link and filename of the picture extract_image_from_message would take."""
+        for attachment in message.attachments:
+            if self.supported_attachment(attachment):
+                return attachment.url, attachment.filename
+        url = embed_image_url(message)
+        return (url, "embedded_image.png") if url else None
+
     async def extract_image_from_message(self, message: discord.Message) -> tuple[bytes, str]:
         for attachment in message.attachments:
             if self.supported_attachment(attachment):
@@ -519,12 +537,20 @@ class ImageToolkit:
         channel_id = int(source["channel_id"])
         message_id = int(source["message_id"])
 
-        if interaction.guild is not None:
-            channel = interaction.guild.get_channel(channel_id) or interaction.guild.get_thread(channel_id)
+        guild = home_guild(interaction)
+        if guild is not None:
+            channel = guild.get_channel(channel_id) or guild.get_thread(channel_id)
         else:
             channel = self.bot.get_channel(channel_id)
 
         if channel is None or not hasattr(channel, "fetch_message"):
+            # Not a channel the bot can read. Used as a personal app, the
+            # picture's link was kept when it was picked: fetch that.
+            if source.get("url"):
+                try:
+                    return await self.fetch_bytes_from_url(str(source["url"])), str(source.get("filename") or "image.png")
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                    pass
             self.sources.clear(interaction.user.id)
             return None
 
@@ -545,10 +571,15 @@ class ImageToolkit:
         if channel is None or not hasattr(channel, "history"):
             raise ValueError("I could not inspect recent messages in this channel.")
 
-        async for message in channel.history(limit=50):
-            if not self.message_has_image(message):
-                continue
-            return await self.extract_image_from_message(message)
+        if interaction.guild_id is not None and home_guild(interaction) is None:
+            raise ValueError(NO_HISTORY_MESSAGE)
+        try:
+            async for message in channel.history(limit=50):
+                if not self.message_has_image(message):
+                    continue
+                return await self.extract_image_from_message(message)
+        except discord.HTTPException as exc:  # a DM between people, or a channel the bot may not read
+            raise ValueError(NO_HISTORY_MESSAGE) from exc
 
         raise ValueError("No recent image was found in the last 50 messages.")
 

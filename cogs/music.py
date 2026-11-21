@@ -16,6 +16,7 @@ from discord.ext import commands
 
 from utils import playlists as playlist_store
 from utils.playlists import PlaylistError
+from utils.user_app import home_guild
 from utils.website import site_link, site_url
 from utils.settings import (
     get_guild_settings,
@@ -628,6 +629,9 @@ class PlaylistView(discord.ui.View):
 
     @discord.ui.button(label="Queue This Playlist", style=discord.ButtonStyle.success, row=1)
     async def queue_playlist(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if home_guild(interaction) is None:  # looked at as a personal app, away from any server with the bot
+            await interaction.response.send_message(f"Queueing only works in a server that has added {self.cog.bot.user.name}.", ephemeral=True)
+            return
         try:
             playlist = self._fetch()
         except PlaylistError as exc:
@@ -750,12 +754,15 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         return any(role.id == role_id for role in member.roles)
 
     async def ensure_bot_channel_allowed(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
-        """Lighter check for commands that don't touch live playback (playlists, savenow)."""
-        if interaction.guild is None or interaction.channel is None:
-            return False, "This command can only be used in a server."
+        """Lighter check for commands that don't touch live playback (playlists, savenow).
+        Used as a personal app outside a server with the bot, there are no bot
+        channels to keep to: which commands run there is utils/user_app.py's call."""
+        guild = home_guild(interaction)
+        if guild is None or interaction.channel is None:
+            return True, None
 
-        if not is_bot_channel(self.bot.storage_path, interaction.guild.id, interaction.channel.id):
-            settings = get_guild_settings(self.bot.storage_path, interaction.guild.id)
+        if not is_bot_channel(self.bot.storage_path, guild.id, interaction.channel.id):
+            settings = get_guild_settings(self.bot.storage_path, guild.id)
             bot_channels = settings.get("bot_channels", []) or []
             if bot_channels:
                 mentions = ", ".join(f"<#{channel_id}>" for channel_id in bot_channels)

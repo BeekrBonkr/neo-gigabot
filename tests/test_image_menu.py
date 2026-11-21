@@ -91,9 +91,11 @@ class Response:
 class FakeInteraction:
     """Enough of an interaction for the handlers: who, where, and a reply."""
 
-    def __init__(self, guild_id: int | None = GUILD_ID) -> None:
+    def __init__(self, guild_id: int | None = GUILD_ID, *, bot_is_member: bool = True, private: bool = False) -> None:
         self.guild = types.SimpleNamespace(id=guild_id, name="Test", filesize_limit=10 * 1024 * 1024) if guild_id else None
         self.guild_id = guild_id
+        self.bot_is_member = bot_is_member
+        self.context = types.SimpleNamespace(private_channel=private, dm_channel=not guild_id and not private, guild=bool(guild_id))
         self.user = types.SimpleNamespace(id=1, display_name="Tester", mention="<@1>")
         self.channel, self.channel_id, self.command = None, 7, None
         self.type = discord.InteractionType.component
@@ -102,6 +104,9 @@ class FakeInteraction:
         self.followups: list[dict] = []
         self.followup = types.SimpleNamespace(send=self._followup)
         self.deleted = self.edited = 0
+
+    def is_guild_integration(self) -> bool:
+        return self.guild_id is not None and self.bot_is_member
 
     async def _followup(self, *args, **kwargs) -> None:
         self.followups.append(kwargs)

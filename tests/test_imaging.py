@@ -58,6 +58,10 @@ class _Guild:
 
 class _Interaction:
     guild = _Guild()
+    guild_id = 1
+
+    def is_guild_integration(self) -> bool:  # run in a server that has the bot
+        return True
 
 
 def test_results_too_big_to_upload_are_refused_with_a_reason():
@@ -127,7 +131,9 @@ def test_the_channel_search_skips_pictures_it_cannot_fetch_and_a_bad_selection_i
 
     channel = Channel()
     guild = type("Guild", (), {"get_channel": lambda self, _id: channel, "get_thread": lambda self, _id: None})()
-    interaction = type("Interaction", (), {"channel": channel, "guild": guild, "user": type("User", (), {"id": 9})()})()
+    interaction = type("Interaction", (), {
+        "channel": channel, "guild": guild, "guild_id": 1, "is_guild_integration": lambda self: True, "user": type("User", (), {"id": 9})(),
+    })()
     tools.sources.remember(9, 5, 77)
 
     assert asyncio.run(tools.get_source_image(interaction)) == (b"data", "embedded_image.png")

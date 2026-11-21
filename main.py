@@ -11,6 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import user_app
 from utils.command_log import record_command
 from utils.config import load_config
 from utils.embeds import EmbedManager
@@ -125,6 +126,7 @@ class GigaBot(commands.Bot):
         """Sync the command tree if its fingerprint differs from the last
         synced one (or always, with force=True). Returns the number of synced
         commands, or None when the sync was skipped."""
+        user_app.mark_tree(self.tree)  # here, so commands from a reloaded cog are opened again too
         fingerprint = self.tree_fingerprint()
         path = self._fingerprint_path()
         stored = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
@@ -145,7 +147,11 @@ class GigaBot(commands.Bot):
             return True
 
         command = interaction.command
-        if command is None or command.qualified_name == "settings":
+        if command is None:
+            return True
+        if not await user_app.gate(self, interaction, command):
+            return False
+        if command.qualified_name == "settings":
             return True
         # A menu's name is not a path of groups: "Edit Image" must not be
         # switched off by a block on the /edit group, so only its own name counts.
@@ -156,11 +162,13 @@ class GigaBot(commands.Bot):
         list and not part of a module that is turned off. Sends the refusal
         itself. With `exact`, a block on a group of the same first word does
         not count. Also used for commands started some other way than by
-        typing them, such as from the Edit Image menu."""
-        if interaction.guild is None:
+        typing them, such as from the Edit Image menu. A server that has not
+        added the bot has no say."""
+        guild = user_app.home_guild(interaction)
+        if guild is None:
             return True
 
-        settings = get_guild_settings(self.storage_path, interaction.guild.id)
+        settings = get_guild_settings(self.storage_path, guild.id)
         blocked = settings.get("blocked_commands")
         if exact:
             is_blocked = qualified_name.lower() in {str(name).lower() for name in (blocked or [])}
@@ -177,7 +185,7 @@ class GigaBot(commands.Bot):
 
         module = disabled_module_for(qualified_name, settings)
         if module is not None:
-            where = site_link(self, "the website", f"/app/{interaction.guild.id}/settings")
+            where = site_link(self, "the website", f"/app/{guild.id}/settings")
             await self.embeds.error_interaction(
                 interaction,
                 "Turned Off",
@@ -193,10 +201,11 @@ class GigaBot(commands.Bot):
         """Shared per-guild gate for opt-in-restricted commands: the blocked-command
         list and the bot-channel allowlist, in one settings read. Sends the
         rejection message itself and returns False if the command shouldn't run."""
-        if interaction.guild is None or interaction.channel is None:
+        guild = user_app.home_guild(interaction)
+        if guild is None or interaction.channel is None:
             return True
 
-        settings = get_guild_settings(self.storage_path, interaction.guild.id)
+        settings = get_guild_settings(self.storage_path, guild.id)
 
         # Blocks are stored by qualified name; the caller-supplied name is the
         # leaf ("jpegify"), so prefer the interaction's own command identity.

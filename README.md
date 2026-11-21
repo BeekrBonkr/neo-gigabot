@@ -120,6 +120,19 @@ bot channels, disabled commands, activity log, moderation (autoroles, sticky rol
 warning escalation), mod log, welcome/leave, starboard, and music. Settings live in SQLite
 and survive the bot being kicked and re-invited.
 
+### 👤 As a personal app
+With **User Install** switched on for the application (Developer Portal → Installation), people can add the
+bot to their own account and use part of it in servers that never added it, in DMs and in group DMs:
+- Every image command (`/image`, `/filter`, `/animate`, `/memegen`, `/edit`) and the right-click menus
+  (Edit Image, Quote Message, Set Image Source, Clear Image Source)
+- The fun commands that need no server: `/8ball`, `/roll`, `/coinflip`, `/trivia`, `/wiki`, `/weather`,
+  `/gif`, `/meme`, `/hug`, `/tictactoe`, `/simon` and the like, plus `/about` and `/feedback`
+- A person's own playlists (`/music playlist …`, apart from `play`)
+- **Only for people who share a server with the bot**: anyone else is told to join one first
+- Everything else answers "Server Only" there. The list of what is opened lives in `utils/user_app.py`
+- Away from the bot's servers it cannot look back through a channel for an image: attach one, or use
+  Edit Image
+
 ### 🔧 Owner tooling — `/owner …` (DM-only, owner-only)
 | Command | What it does |
 | --- | --- |

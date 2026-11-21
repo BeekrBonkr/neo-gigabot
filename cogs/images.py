@@ -309,7 +309,8 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             )
             return
 
-        self.bot.image_tools.sources.remember(interaction.user.id, message.channel.id, message.id)
+        url, filename = self.bot.image_tools.message_image_link(message) or (None, None)
+        self.bot.image_tools.sources.remember(interaction.user.id, message.channel.id, message.id, url=url, filename=filename)
         await self.bot.image_tools.send_success(
             interaction,
             "Image Source Set",
