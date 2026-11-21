@@ -84,6 +84,20 @@ def test_a_video_keeps_its_picture_and_gets_a_new_sound(clips, tmp_path):
             apply_audio_filter(junk, crush_filter())
 
 
+def test_a_long_one_is_capped_like_the_picture_commands(tmp_path):
+    from utils import imaging
+
+    path = tmp_path / "long.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=50", "-ar", "8000", str(path)], check=True)
+    token = imaging._run_notes.set({})
+    try:
+        made, extension = apply_audio_filter(path.read_bytes(), crush_filter())
+        assert next(iter(video.streams(made, tmp_path).values())) == pytest.approx(45.0, abs=0.2)
+        assert imaging._run_notes.get() == {"cut_at": 45.0}
+    finally:
+        imaging._run_notes.reset(token)
+
+
 def test_sound_files_come_back_as_sound_files(sounds, tmp_path):
     for name, data in sounds.items():
         made, extension = apply_audio_filter(data, crush_filter())

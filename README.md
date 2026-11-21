@@ -62,9 +62,10 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
 - Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
   as an animation of its first few seconds (needs `ffmpeg`)
 - **A video going in comes back as a video**: the effect is applied to its frames and the result is an MP4
-  with the original sound laid back under it (up to 480 px). The whole video is used: up to ten seconds at
-  30 frames a second, longer ones at fewer frames a second down to 10, which covers thirty seconds; past
-  that the end is left off and the reply says so. The sound is left off
+  with the original sound laid back under it (up to 480 px). Up to 45 seconds are used: fifteen seconds or less at
+  30 frames a second, longer ones at fewer frames a second down to 10. Past 45 seconds the end is left off
+  and the reply says so. A command takes as long as it takes, which for the slowest effects on a
+  full-length video is minutes. The sound is left off
   when the result no longer runs like the original (`/animate speed`). `/image effects convert` turns a
   video into a GIF or a GIF into an MP4 on request, and `/animate togif` always gives a GIF
 - **Datamosh** (`/animate datamosh`): breaks a GIF or a video the way a damaged file breaks. The clip is
@@ -79,7 +80,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   and at full size; only the sound is made again. `/animate datamosh` has a `bitcrush` option (light,
   heavy, destroyed) that does the same to its video's sound
 - A long GIF is not cut short either: past 120 frames, frames are left out evenly along it and the rest
-  show for longer, so it lasts as long as it did
+  show for longer, so it lasts as long as it did (up to the same 45 seconds)
 - A GIF going in gives a GIF coming out, for every command except the two whose result is a
   still by nature (`/animate frames`, `/edit palette`): the meme formats, collages and cut-outs are built
   frame by frame, a pat or a bonk plays over the moving picture, and the result lasts exactly as long as

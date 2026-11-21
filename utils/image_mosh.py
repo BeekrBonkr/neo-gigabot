@@ -31,7 +31,7 @@ from utils.imaging import MAX_GIF_FRAMES, Frames, frame_budget, thin_frames
 
 FRAME_START = b"\x00\x00\x01\xb6"  # opens every coded frame in an MPEG-4 stream
 ANY_START = b"\x00\x00\x01"
-FFMPEG_TIMEOUT_SECONDS = 40.0
+FFMPEG_TIMEOUT_SECONDS = 300.0
 MOSH_MAX_EDGE = 480
 BLOCK = 16  # the codec works in squares this size; pictures are sized to a whole number of them
 HOLD = -1  # in a plan: show the last picture again without touching the stream
