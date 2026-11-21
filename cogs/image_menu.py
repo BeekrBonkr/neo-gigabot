@@ -11,6 +11,8 @@ from utils.command_log import record_command
 log = logging.getLogger(__name__)
 
 MENU_NAME = "Edit Image"
+QUOTE_MENU_NAME = "Quote Message"
+QUOTE_COMMAND = "image text quote"  # the slash command the quote menu stands in for
 MAX_SELECT_OPTIONS = 25  # Discord's cap on one dropdown
 MAX_FORM_FIELDS = 5  # and on one pop-up form
 PICKER_TIMEOUT_SECONDS = 300
@@ -245,18 +247,42 @@ class EffectPicker(discord.ui.View):
 
 
 class ImageMenu(commands.Cog):
-    """Right-click a message, then Apps > Edit Image: run an image command on
-    that message's image without copying a link to it."""
+    """Right-click a message, then Apps: Edit Image runs an image command on
+    that message's image, and Quote Message makes a quote image of its text.
+    Neither needs a link to the message."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.menu = app_commands.ContextMenu(name=MENU_NAME, callback=self.edit_image)
+        self.quote_menu = app_commands.ContextMenu(name=QUOTE_MENU_NAME, callback=self.quote_message)
+        app_commands.checks.cooldown(1, 5.0)(self.quote_menu)
 
     async def cog_load(self) -> None:
         self.bot.tree.add_command(self.menu)
+        self.bot.tree.add_command(self.quote_menu)
 
     async def cog_unload(self) -> None:
         self.bot.tree.remove_command(self.menu.name, type=self.menu.type)
+        self.bot.tree.remove_command(self.quote_menu.name, type=self.quote_menu.type)
+
+    async def quote_message(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """/image text quote, for the message that was clicked."""
+        tools = self.bot.image_tools
+        images = self.bot.get_cog("Images")
+        if images is None:
+            await self.bot.embeds.error_interaction(interaction, "Not Available", "Quotes are not available right now.", ephemeral=True)
+            return
+        # a server that turned the slash command off has turned this off too
+        if not await self.bot.command_gate(interaction, QUOTE_COMMAND) or not await tools.ensure_command_allowed(interaction, "quote"):
+            return
+        await tools.defer(interaction)
+        try:
+            data, filename = await images.build_quote_image(message)
+            await tools.send_processed_file(
+                interaction, data=data, filename=filename, title="Quote", description=f"Quoted message from {message.author.mention}.",
+            )
+        except Exception as exc:
+            await tools.send_error(interaction, "Quote Failed", tools.user_error_message(exc))
 
     async def edit_image(self, interaction: discord.Interaction, message: discord.Message) -> None:
         if not self.bot.image_tools.message_has_image(message):

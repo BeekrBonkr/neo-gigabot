@@ -533,7 +533,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             raise FileNotFoundError(f"Missing asset: {filename}. Put the legacy overlay PNGs in `assets/images/`.")
         return path
 
-    async def _build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
+    async def build_quote_image(self, message: discord.Message) -> tuple[bytes, str]:
         raw = (message.content or "").strip()
         if not raw:
             raise ValueError("That message does not have any text to quote.")
@@ -631,7 +631,11 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 "Attachment → message link → selected source → latest image in channel. "
                 "Or right-click a message, then Apps → Edit Image, to pick an effect for its image.",
             ),
-            self.bot.embeds.field("Quote", "`/image text quote <message_link>` only uses a Discord message link."),
+            self.bot.embeds.field(
+                "Quote",
+                "`/image text quote <message_link>` only uses a Discord message link. "
+                "Or right-click the message, then Apps → Quote Message.",
+            ),
             self.bot.embeds.field("Other", "`/image effects deepfry` `/image misc pfp` `/image misc clearimagesource`"),
             self.bot.embeds.field("Color Filters", "`/filter invert/grayscale/sepia/hue/adjust/posterize/edges/emboss/vaporwave`"),
             self.bot.embeds.field(
@@ -659,7 +663,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         await self.bot.image_tools.defer(interaction)
         try:
             message = await self.bot.image_tools.fetch_message_from_link(interaction, message_link)
-            data, filename = await self._build_quote_image(message)
+            data, filename = await self.build_quote_image(message)
             await self.bot.image_tools.send_processed_file(
                 interaction,
                 data=data,
