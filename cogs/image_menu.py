@@ -43,9 +43,6 @@ FORM_TYPES = frozenset({
     discord.AppCommandOptionType.string, discord.AppCommandOptionType.integer,
     discord.AppCommandOptionType.number, discord.AppCommandOptionType.boolean,
 })
-# Commands whose options are all optional but which do nothing when every one is left alone.
-ALWAYS_ASK = frozenset({"image transform crop", "filter adjust", "edit resize"})
-
 NOT_GIVEN = object()
 
 
@@ -91,11 +88,11 @@ def build_catalog(tree: app_commands.CommandTree) -> dict[str, list[app_commands
 
 
 def form_parameters(command: app_commands.Command) -> list[app_commands.Parameter]:
-    """The options to ask for before running the command, or none when it can
-    run as it is. Required ones come first."""
+    """The settings to show in a form before running the command: every one
+    it has that a form can hold, required ones first. They come filled in
+    with the command's defaults, so sending the form as it is runs the
+    command the way typing it bare would. None for a command with no settings."""
     askable = [p for p in command.parameters if p.name not in SOURCE_PARAMETERS and p.type in FORM_TYPES]
-    if not any(p.required for p in askable) and command.qualified_name not in ALWAYS_ASK:
-        return []
     return sorted(askable, key=lambda p: not p.required)[:MAX_FORM_FIELDS]
 
 
@@ -445,7 +442,7 @@ class ImageMenu(commands.Cog):
             )
             return
         embed = self.bot.embeds.info_embed(
-            MENU_NAME, "Pick what to do with that image. Anything that needs text or numbers asks for them first.",
+            MENU_NAME, "Pick what to do with that image. Anything with settings shows them first, ready to change or send as they are.",
         )
         await interaction.response.send_message(embed=embed, view=EffectPicker(self, interaction, message), ephemeral=True)
 
@@ -455,6 +452,12 @@ class ImageMenu(commands.Cog):
             await self.bot.embeds.error_interaction(interaction, "Not Available", "That effect is not available right now.", ephemeral=True)
             return
         if not await self.bot.command_gate(interaction, command.qualified_name):
+            return
+        if command.qualified_name == MOSH_COMMAND:
+            # more settings than a form holds: the list turns into the datamosh panel
+            picker.stop()
+            panel = MoshPanel(self, command, picker.target)
+            await interaction.response.edit_message(embed=panel.embed(), view=panel)
             return
         parameters = form_parameters(command)
         if parameters:

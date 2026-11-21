@@ -76,7 +76,11 @@ def message_with_image(size=(96, 72), gif=False):
 
 class Response:
     def __init__(self) -> None:
-        self.modal, self.sent, self.done = None, [], False
+        self.modal, self.sent, self.edits, self.done = None, [], [], False
+
+    async def edit_message(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+        self.done = True
 
     def is_done(self) -> bool:
         return self.done
@@ -203,13 +207,21 @@ def test_catalog_fits_discord_and_leaves_nothing_out(storage):
     assert run(storage, body) >= 80
 
 
-def test_only_commands_that_need_an_answer_get_a_form(storage):
+def test_every_command_with_settings_shows_them_in_a_form(storage):
     async def body(harness):
         offered = harness.offered()
         asking = {name for name, command in offered.items() if form_parameters(command)}
-        assert asking == set(FORM_ANSWERS)
+        with_settings = {
+            name for name, command in offered.items()
+            if any(p.name not in ("attachment", "message_link", "user", "into") for p in command.parameters)
+        }
+        assert asking == with_settings and set(FORM_ANSWERS) <= asking
+        assert {"filter hue", "animate spin", "animate bitcrush", "image effects jpegify", "edit border"} <= asking  # optional settings count
+        assert not {"filter invert", "image transform flip", "memegen jail", "image template doom"} & asking  # nothing to set: runs at once
         assert [p.name for p in form_parameters(offered["image text toptext"])] == ["text", "max_size"]  # required first
-        assert len(form_parameters(offered["image transform crop"])) == 5
+        assert len(form_parameters(offered["image transform crop"])) == 5 and len(form_parameters(offered["animate bitcrush"])) == 5
+        hue = EffectForm(harness.cog, None, offered["filter hue"], form_parameters(offered["filter hue"]))
+        assert hue.fields[0][1].default == "180" and hue.fields[0][1].required is False  # filled in with what the command does unasked
         for name in asking:  # every form can be built, within Discord's limits
             form = EffectForm(harness.cog, None, offered[name], form_parameters(offered[name]))
             assert 1 <= len(form.children) <= image_menu.MAX_FORM_FIELDS and len(form.title) <= 45
@@ -246,14 +258,23 @@ def test_every_offered_command_runs_on_the_clicked_image(storage):
             interaction, origin = FakeInteraction(), FakeInteraction()
             picker = EffectPicker(harness.cog, origin, message_with_image((160, 120), gif=name in NEEDS_A_GIF))
             await harness.cog.effect_picked(interaction, picker, name)
-            if name in FORM_ANSWERS:
+            if name == "animate datamosh":
+                # too many settings for a form: the list becomes its panel, and Mosh runs it
+                panel = interaction.response.edits[0]["view"]
+                assert isinstance(panel, image_menu.MoshPanel) and panel.target is picker.target and interaction.response.modal is None
+                await panel.run(FakeInteraction())
+                results[name] = (list(harness.sent), list(harness.errors))
+                continue
+            if form_parameters(command):
                 form = interaction.response.modal
                 assert isinstance(form, EffectForm), name
                 assert origin.edited == 1 and origin.deleted == 0  # the list is redrawn while the form is open
-                for parameter, component in form.fields:
-                    answer = FORM_ANSWERS[name].get(parameter.name)
+                for parameter, component in form.fields:  # sent as it came, apart from what has to be typed
+                    answer = FORM_ANSWERS.get(name, {}).get(parameter.name)
+                    if answer is None:
+                        continue
                     if isinstance(component, discord.ui.Select):
-                        component._values = [answer] if answer else []
+                        component._values = [answer]
                     else:
                         component._value = answer
                 await form.on_submit(FakeInteraction())
