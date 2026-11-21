@@ -99,6 +99,9 @@ class GigaBot(commands.Bot):
         super().__init__(
             command_prefix=commands.when_mentioned,
             intents=intents,
+            # A message that does not say otherwise can ping the people it names and nobody else:
+            # never @everyone, @here or a role. The few places meant to (scheduled messages) say so.
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
             help_command=None,
             case_insensitive=True,
         )
