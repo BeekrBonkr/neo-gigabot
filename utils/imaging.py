@@ -213,6 +213,22 @@ def load_frames(image_bytes: bytes, filename: str | None = None, *, max_edge: in
     return Frames(frames, durations, loop, animated and len(frames) > 1)
 
 
+def gif_durations(durations: list[int] | list[float]) -> list[int]:
+    """Frame times a GIF can hold. A GIF counts in hundredths of a second, and
+    a time that is not a whole number of them is cut short when written: a
+    video's 66 ms frames would each show for 60, and the result would run a
+    tenth too fast. Here each frame is rounded and what was lost or gained is
+    passed on to the next, so the whole still lasts as long as it should."""
+    result: list[int] = []
+    owed = 0.0
+    for duration in durations:
+        wanted = max(MIN_GIF_FRAME_MS, float(duration or 100)) + owed
+        shown = max(MIN_GIF_FRAME_MS, int(round(wanted / 10.0)) * 10)
+        owed = wanted - shown
+        result.append(shown)
+    return result
+
+
 def encode_frames(frames: list[Image.Image], durations: list[int] | int, stem: str, *, loop: int = 0) -> tuple[bytes, str]:
     """PNG for one frame, GIF for several. Returns (data, filename)."""
     output = io.BytesIO()
@@ -223,8 +239,63 @@ def encode_frames(frames: list[Image.Image], durations: list[int] | int, stem: s
         durations = [durations] * len(frames)
     frames = [frame.convert("RGBA") for frame in frames]
     frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loop,
-                   duration=[max(MIN_GIF_FRAME_MS, int(d)) for d in durations], disposal=2)
+                   duration=gif_durations(durations), disposal=2)
     return output.getvalue(), f"{stem}.gif"
+
+
+def thin_frames(frames: list, durations: list[int], limit: int) -> tuple[list, list[int]]:
+    """At most `limit` frames, evenly kept, each taking on the time of the
+    ones dropped after it, so the animation lasts as long as before."""
+    count = len(frames)
+    if count <= limit:
+        return frames, durations
+    kept = sorted({round(index * count / limit) for index in range(limit)})
+    edges = kept[1:] + [count]
+    return [frames[start] for start in kept], [sum(durations[start:end]) for start, end in zip(kept, edges)]
+
+
+def play_together(sources: list[Frames], *, limit: int | None = None) -> tuple[list[tuple[Image.Image, ...]], list[int], int]:
+    """Several inputs playing side by side: for each frame of the result, the
+    picture every input is showing at that moment, with the frame's time.
+    Stills just stay put. The input with the most frames sets the pace, and
+    the others are looked up by the clock, looping if they are shorter.
+    Returns (pictures per frame, durations, loop)."""
+    moving = [source for source in sources if source.animated]
+    if not moving:
+        return [tuple(source.frames[0] for source in sources)], [100], 0
+    lead = max(moving, key=lambda source: len(source.frames))
+    order, durations = thin_frames(list(range(len(lead.frames))), lead.durations, limit or MAX_GIF_FRAMES)
+
+    def showing(source: Frames, at: float) -> Image.Image:
+        if not source.animated:
+            return source.frames[0]
+        at %= max(1, sum(source.durations))
+        for frame, duration in zip(source.frames, source.durations):
+            if at < duration:
+                return frame
+            at -= duration
+        return source.frames[-1]
+
+    together, clock = [], 0.0
+    for index, duration in zip(order, durations):
+        together.append(tuple(lead.frames[index] if source is lead else showing(source, clock) for source in sources))
+        clock += duration
+    return together, durations, lead.loop
+
+
+def compose_frames(sources: list[Frames], build: Callable[..., Image.Image], stem: str,
+                   *, max_edge: int | None = None, limit: int | None = None) -> tuple[bytes, str]:
+    """A picture built from one or more inputs: `build(*pictures)` is called
+    once for a still result, or once per frame when any input is a GIF or a
+    video, which gives a GIF. `max_edge` shrinks the frames of an animated
+    result (a still is left at full size), and `limit` caps how many it has."""
+    together, durations, loop = play_together(sources, limit=limit)
+    if len(together) == 1:
+        return encode_frames([build(*together[0])], [100], stem)
+    frames = [build(*pictures) for pictures in together]
+    if max_edge:
+        frames = [fit_within(frame, max_edge) for frame in frames]
+    return encode_frames(frames, durations, stem, loop=loop)
 
 
 def apply_to_frames(image_bytes: bytes, filename: str | None, processor: Callable[[Image.Image], Image.Image], stem: str,
@@ -646,14 +717,25 @@ class ImageToolkit:
         """Iterate a GIF's frames, capped at MAX_GIF_FRAMES. Every frame gets
         expanded to full RGBA in memory during processing, so all GIF loops in
         the image pipeline go through this cap - one upload must not be able to
-        expand into gigabytes."""
-        return itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES)
+        expand into gigabytes.
+
+        How long each frame shows is noted on the way past, for
+        gif_save_kwargs. It is read after the caller has used the frame,
+        because some formats only know a frame's timing once it is decoded."""
+        durations: list[int] = []
+        image._frame_durations = durations
+        for frame in itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES):
+            yield frame
+            durations.append(int(frame.info.get("duration", 100) or 100))
 
     def gif_save_kwargs(self, image: Image.Image) -> dict:
+        """What to save a processed GIF with: each frame's own timing, as
+        noted by gif_frames, in times a GIF can hold."""
+        durations = getattr(image, "_frame_durations", None) or [int(image.info.get("duration", 100) or 100)]
         return {
             "save_all": True,
             "loop": image.info.get("loop", 0),
-            "duration": image.info.get("duration", 100),
+            "duration": gif_durations(durations) if len(durations) > 1 else gif_durations(durations)[0],
             "disposal": 2,
         }
 

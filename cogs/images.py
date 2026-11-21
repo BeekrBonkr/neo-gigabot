@@ -15,7 +15,7 @@ from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequence
 
 from utils import image_carve, image_faces, richtext
-from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS
+from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS, MIN_GIF_FRAME_MS, encode_frames, gif_durations, load_frames
 
 LINE_SPACING = 6
 
@@ -471,18 +471,21 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         speed: int,
         frame_count: int = 10,
     ) -> tuple[bytes, str]:
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            base = next(ImageSequence.Iterator(image)).convert("RGBA") if self.bot.image_tools.is_gif(image, filename) else image.convert("RGBA")
-            frames: list[Image.Image] = []
-            for _ in range(frame_count):
-                x_shift = random.randint(-10, 10)
-                y_shift = random.randint(-10, 10)
-                shifted = Image.new("RGBA", base.size, (0, 0, 0, 0))
-                shifted.paste(base, (x_shift, y_shift), base)
-                frames.append(shifted)
-            output = io.BytesIO()
-            frames[0].save(output, format="GIF", append_images=frames[1:], save_all=True, duration=max(10, speed), loop=0, disposal=2)
-            return output.getvalue(), "shaky.gif"
+        # A still is shaken for `frame_count` frames of `speed` ms. A GIF or a
+        # video keeps playing, at its own pace, with every frame knocked about.
+        loaded = load_frames(image_bytes, filename)
+        if loaded.animated:
+            bases, durations = loaded.frames, loaded.durations
+        else:
+            bases, durations = loaded.frames * frame_count, [max(MIN_GIF_FRAME_MS, speed)] * frame_count
+        frames: list[Image.Image] = []
+        for base in bases:
+            x_shift = random.randint(-10, 10)
+            y_shift = random.randint(-10, 10)
+            shifted = Image.new("RGBA", base.size, (0, 0, 0, 0))
+            shifted.paste(base, (x_shift, y_shift), base)
+            frames.append(shifted)
+        return encode_frames(frames, durations, "shaky", loop=loaded.loop)
 
     def _convert_bytes(
         self,
@@ -494,21 +497,22 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         if target_format not in allowed_types:
             raise ValueError(f"Invalid format. Allowed formats: {', '.join(sorted(allowed_types))}")
 
+        # GIF and WebP can hold an animation, so a GIF or a video stays one in
+        # them. The other formats are stills: they get the first frame.
+        if target_format in {"gif", "webp"}:
+            loaded = load_frames(image_bytes)
+            if loaded.animated or target_format == "gif":
+                output = io.BytesIO()
+                frames = loaded.frames
+                if target_format == "webp":
+                    frames[0].save(output, format="WEBP", save_all=True, append_images=frames[1:], duration=loaded.durations, loop=loaded.loop)
+                else:
+                    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loaded.loop,
+                                   duration=gif_durations(loaded.durations), disposal=2)
+                return output.getvalue(), f"converted.{target_format}"
+
         with Image.open(io.BytesIO(image_bytes)) as image:
             output = io.BytesIO()
-            if target_format == "gif":
-                frames = [frame.convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)] if getattr(image, "is_animated", False) else [image.convert("RGBA")]
-                frames[0].save(
-                    output,
-                    format="GIF",
-                    append_images=frames[1:],
-                    save_all=True,
-                    loop=image.info.get("loop", 0),
-                    duration=image.info.get("duration", 100),
-                    disposal=2,
-                )
-                return output.getvalue(), "converted.gif"
-
             converted = image.convert("RGB") if target_format in {"jpg", "jpeg", "bmp"} else image.convert("RGBA")
             converted.save(output, format="JPEG" if target_format in {"jpg", "jpeg"} else target_format.upper())
             ext = "jpg" if target_format == "jpeg" else target_format

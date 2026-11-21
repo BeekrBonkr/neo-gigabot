@@ -61,6 +61,10 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   you clicked
 - Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
   as an animation of its first few seconds (needs `ffmpeg`)
+- A GIF or a video going in gives a GIF coming out, for every command except the two whose result is a
+  still by nature (`/animate frames`, `/edit palette`): the meme formats, collages and cut-outs are built
+  frame by frame, a pat or a bonk plays over the moving picture, and the result lasts exactly as long as
+  the original
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,
   GIFs capped at 120 processed frames, heavy work runs off the event loop with concurrency caps
 
