@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import functools
 import io
 import itertools
@@ -13,7 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterator
 from urllib.parse import urlparse
 
 import aiohttp
@@ -225,6 +227,11 @@ def apply_to_frames(image_bytes: bytes, filename: str | None, processor: Callabl
     """Run processor over every frame of a still or GIF and encode the result."""
     loaded = load_frames(image_bytes, filename, max_edge=max_edge)
     return encode_frames([processor(frame) for frame in loaded.frames], loaded.durations, stem, loop=loaded.loop)
+
+
+# The message an image command should read its image from, set by
+# ImageToolkit.pinned_source for the length of one command.
+_pinned_message: contextvars.ContextVar[discord.Message | None] = contextvars.ContextVar("pinned_image_message", default=None)
 
 
 class ImageSourceStore:
@@ -545,6 +552,17 @@ class ImageToolkit:
 
         raise ValueError("No recent image was found in the last 50 messages.")
 
+    @contextlib.contextmanager
+    def pinned_source(self, message: discord.Message) -> Iterator[None]:
+        """While this is open, a command run in the same task that was given no
+        attachment and no message link takes its image from `message`. This is
+        how the Edit Image menu hands a command the message that was clicked."""
+        token = _pinned_message.set(message)
+        try:
+            yield
+        finally:
+            _pinned_message.reset(token)
+
     async def get_source_image(
         self,
         interaction: discord.Interaction,
@@ -572,6 +590,10 @@ class ImageToolkit:
         if message_link:
             message = await self.fetch_message_from_link(interaction, message_link)
             return await self.extract_image_from_message(message)
+
+        pinned = _pinned_message.get()
+        if pinned is not None:
+            return await self.extract_image_from_message(pinned)
 
         selected = await self.selected_message_image(interaction)
         if selected is not None:

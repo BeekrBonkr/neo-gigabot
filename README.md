@@ -54,6 +54,9 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   shows mentions as names. Fallback fonts live in `assets/fonts/`
 - Flexible source resolution: attachment → message link → a "Set Image Source" context menu →
   the most recent image in the channel
+- **Edit Image menu**: right-click a message (long-press on mobile), then Apps → Edit Image, and pick an
+  effect from a private list to run it on that message's image, with no link to copy. Commands that need
+  text or numbers ask for them in a pop-up form. Cooldowns and a server's blocked commands apply as usual
 - Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
   as an animation of its first few seconds (needs `ffmpeg`)
 - Hardened: image fetches are restricted to Discord's CDN, downloads capped at 25 MB,
