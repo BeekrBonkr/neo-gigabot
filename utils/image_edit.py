@@ -49,7 +49,7 @@ def tile(frame: Image.Image, columns: int, rows: int) -> Image.Image:
 
 
 def _rounded_mask(size: tuple[int, int], radius: int) -> Image.Image:
-    scale = 3  # drawn large, then shrunk, for a smooth edge
+    scale = 3 if size[0] * size[1] <= 4_000_000 else 1  # drawn large, then shrunk, for a smooth edge (not on huge pictures)
     mask = Image.new("L", (size[0] * scale, size[1] * scale), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] * scale - 1, size[1] * scale - 1), radius=radius * scale, fill=255)
     return mask.resize(size, Image.LANCZOS)

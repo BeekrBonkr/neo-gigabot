@@ -7,6 +7,7 @@ import functools
 import io
 import itertools
 import logging
+import warnings
 import random
 import re
 import shutil
@@ -161,6 +162,18 @@ MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 MAX_GIF_FRAMES = 120
 # A GIF is not read past this many frames, whatever is kept of them.
 MAX_SCANNED_FRAMES = 3000
+# A picture's size on disk says nothing about what it costs to work on: a few
+# kilobytes of GIF can describe thousands of pixels square, and every frame is
+# held as four bytes a pixel. So pictures are also limited by pixels. Pillow
+# refuses to open anything over twice MAX_IMAGE_PIXELS, which makes this limit
+# hold for every Image.open in the bot, whoever calls it.
+MAX_INPUT_PIXELS = 40_000_000  # one picture or one frame: about 160 MB as RGBA
+Image.MAX_IMAGE_PIXELS = MAX_INPUT_PIXELS // 2
+warnings.simplefilter("ignore", Image.DecompressionBombWarning)  # between the two is allowed, quietly
+# All the frames a command holds at once. A bigger animation has its frames
+# shrunk to fit as they are read (about 730 pixels square at 120 frames).
+MAX_TOTAL_PIXELS = 64_000_000
+TOO_LARGE_MESSAGE = "That picture is too large to work on. Anything up to about 40 megapixels (around 7000 by 5500) is fine."
 # Image work runs in executor threads, this many at once, bot-wide. A command
 # takes as long as it takes: the slowest effects on a full-length video run for
 # minutes. The one limit is Discord's, which stops accepting a command's reply
@@ -225,6 +238,24 @@ class Frames:
         return self.frames[0].size
 
 
+def frame_edge_limit(size: tuple[int, int], frames: int, max_edge: int | None = None) -> int | None:
+    """The longest edge frames of an animation may keep so that `frames` of
+    them fit in MAX_TOTAL_PIXELS, or `max_edge` if that is smaller. None when
+    they fit as they are."""
+    width, height = size
+    if width * height * max(1, frames) <= MAX_TOTAL_PIXELS:
+        return max_edge
+    scale = (MAX_TOTAL_PIXELS / (width * height * frames)) ** 0.5
+    edge = max(64, int(max(width, height) * scale))
+    return min(edge, max_edge) if max_edge else edge
+
+
+def check_canvas(width: int, height: int) -> None:
+    """Refuse to build a picture bigger than one that would be accepted."""
+    if width * height > MAX_INPUT_PIXELS:
+        raise ValueError("That would make a picture too large to send. Try a smaller picture or a smaller overlay.")
+
+
 def fit_within(image: Image.Image, max_edge: int) -> Image.Image:
     """The image shrunk so its longer edge is at most max_edge (never enlarged)."""
     longest = max(image.size)
@@ -287,6 +318,7 @@ def load_frames(image_bytes: bytes, filename: str | None = None, *, max_edge: in
             converted = image.convert("RGBA")
             return Frames([fit_within(converted, max_edge) if max_edge else converted], [int(image.info.get("duration", 100) or 100)], loop)
         count, keep = _frames_to_keep(image, frame_budget())
+        max_edge = frame_edge_limit(image.size, count if keep is None else len(keep), max_edge)
         for index, frame in enumerate(itertools.islice(ImageSequence.Iterator(image), count)):
             if keep is not None and index not in keep:
                 frame.load()  # decoded even so: some formats only know a frame's timing once it is read
@@ -752,6 +784,8 @@ class ImageToolkit:
         deliberately user-facing text ("No recent image was found...", "That
         took too long..."). Anything else is a bug - log it and keep
         PIL/aiohttp internals out of the embed."""
+        if isinstance(exc, Image.DecompressionBombError):
+            return TOO_LARGE_MESSAGE
         if isinstance(exc, (ValueError, RuntimeError)):
             return str(exc)
         logging.getLogger(__name__).exception("Unexpected image-command error", exc_info=exc)
@@ -1027,12 +1061,13 @@ class ImageToolkit:
         durations: list[int] = []
         image._frame_durations = durations
         count, keep = _frames_to_keep(image, frame_budget())
+        edge = frame_edge_limit(image.size, count if keep is None else len(keep))
         for index, frame in enumerate(itertools.islice(ImageSequence.Iterator(image), count)):
             if keep is not None and index not in keep:
                 frame.load()
                 durations[-1] += int(frame.info.get("duration", 100) or 100)
                 continue
-            yield frame
+            yield frame if edge is None else fit_within(frame.convert("RGBA"), edge)
             durations.append(int(frame.info.get("duration", 100) or 100))
 
     def process_image_bytes(
@@ -1090,6 +1125,7 @@ class ImageToolkit:
                 pct = max(1.0, scale_percent or 40.0) / 100.0
                 new_width = max(1, int(frame.width * pct))
                 new_height = max(1, int(overlay_image.height * new_width / overlay_image.width))
+                check_canvas(new_width, new_height)
                 resized_overlay = overlay_image.resize((new_width, new_height), Image.LANCZOS)
             else:
                 if placement in {"top", "bottom"}:
@@ -1098,6 +1134,7 @@ class ImageToolkit:
                 else:
                     new_height = frame.height
                     new_width = int(overlay_image.width * new_height / overlay_image.height)
+                check_canvas(new_width, new_height)
                 resized_overlay = overlay_image.resize((new_width, new_height), Image.LANCZOS)
 
             if opacity < 1:
@@ -1142,6 +1179,10 @@ class ImageToolkit:
 
         def add_to_frame(input_frame: Image.Image) -> Image.Image:
             frame = input_frame.convert("RGBA")
+            if placement in {"top", "bottom"}:
+                check_canvas(frame.width, frame.height + int(frame.width * append_image.height / append_image.width))
+            else:
+                check_canvas(frame.width + int(frame.height * append_image.width / append_image.height), frame.height)
             if placement in {"top", "bottom"}:
                 scaled = append_image.resize(
                     (frame.width, int(frame.width * append_image.height / append_image.width)),
