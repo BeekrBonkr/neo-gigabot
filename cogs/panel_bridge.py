@@ -1570,7 +1570,7 @@ class PanelBridge(commands.Cog):
     async def h_playlists(self, request: web.Request) -> web.Response:
         user_id = self._user_id(request)
         own = playlist_store.list_playlists(self.storage, user_id)
-        liked = [p for p in playlist_store.list_liked_playlists(self.storage, user_id) if p["owner_id"] != user_id]
+        liked = [p for p in await asyncio.to_thread(playlist_store.list_liked_playlists, self.storage, user_id) if p["owner_id"] != user_id]
         return web.json_response(
             {
                 "own": [self._playlist_view(p, user_id, with_songs=False) for p in own],
@@ -1588,11 +1588,11 @@ class PanelBridge(commands.Cog):
         return [guild for guild in self.bot.guilds
                 if guild.get_member(viewer_id) is not None and self._web_enabled(guild, "web_discovery_enabled")]
 
-    def _public_playlists(self, viewer_id: int) -> list[dict[str, Any]]:
+    async def _public_playlists(self, viewer_id: int) -> list[dict[str, Any]]:
         """Every public playlist with songs that isn't the viewer's own, most
         liked first. Public means public: these are the ones anyone with the
         link could already open."""
-        found = [p for p in playlist_store.list_public_playlists(self.storage) if p["owner_id"] != viewer_id and p["songs"]]
+        found = [p for p in await asyncio.to_thread(playlist_store.list_public_playlists, self.storage) if p["owner_id"] != viewer_id and p["songs"]]
         found.sort(key=lambda p: (-len(p["likes"]), p["display_name"].lower()))
         return found
 
@@ -1604,7 +1604,7 @@ class PanelBridge(commands.Cog):
         if not words:
             return web.json_response({"playlists": []})
         results = []
-        for playlist in self._public_playlists(user_id):
+        for playlist in await self._public_playlists(user_id):
             view = self._playlist_view(playlist, user_id, with_songs=False)
             haystack = " ".join(
                 [playlist["display_name"], playlist["description"], view["owner_name"] or ""]
@@ -1636,7 +1636,7 @@ class PanelBridge(commands.Cog):
         shared = self._shared_guilds(user_id)
         profiles: dict[int, dict[str, Any] | None] = {}
         found = []
-        for playlist in playlist_store.list_public_playlists(self.storage):
+        for playlist in await asyncio.to_thread(playlist_store.list_public_playlists, self.storage):
             owner_id = playlist["owner_id"]
             if owner_id == user_id or not playlist["songs"]:
                 continue
@@ -1652,7 +1652,7 @@ class PanelBridge(commands.Cog):
             found.append(view)
         found.sort(key=lambda p: (-p["likes"], p["display_name"].lower()))
         people = sorted((p for p in profiles.values() if p), key=lambda p: (-p["playlist_count"], (p["name"] or "").lower()))
-        popular = [self._playlist_view(p, user_id, with_songs=False) for p in self._public_playlists(user_id) if p["likes"]]
+        popular = [self._playlist_view(p, user_id, with_songs=False) for p in await self._public_playlists(user_id) if p["likes"]]
         return web.json_response({"profiles": people, "playlists": found, "popular": popular[:POPULAR_PLAYLISTS]})
 
     async def h_profile(self, request: web.Request) -> web.Response:
