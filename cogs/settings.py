@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.modules import enabled_in
 from utils.numbers import is_digits
 from utils.durations import parse_duration
 from utils.website import site_link
@@ -1031,6 +1032,13 @@ class SettingsDashboardView(discord.ui.View):
             return f"🟢 On — {detail}" if detail else "🟢 On"
         return "⚫ Off"
 
+    def _module_state(self, settings: dict, module: str, configured: bool, detail: str | None = None) -> str:
+        """On or off as the bot itself will treat the module: a channel being
+        set is not enough when the module's switch (on the website) is off."""
+        if configured and not enabled_in(settings, module):
+            return "⚫ Off (switched off on the website). Pick the channel again to turn it back on."
+        return self._on_off(configured, detail)
+
     def _build_embed(self, settings: dict) -> discord.Embed:
         if self._confirming_reset:
             return self.bot.embeds.warning_embed(
@@ -1099,15 +1107,19 @@ class SettingsDashboardView(discord.ui.View):
             welcome_ids = settings.get("welcome_channel_ids") or []
             embed.add_field(
                 name="Welcome Channel",
-                value=self._on_off(bool(welcome_ids), _format_channels(welcome_ids) if welcome_ids else None),
+                value=self._module_state(settings, "welcome", bool(welcome_ids), _format_channels(welcome_ids) if welcome_ids else None),
                 inline=True,
             )
             leave_ids = settings.get("leave_channel_ids") or []
-            embed.add_field(
-                name="Leave Channel",
-                value=_format_channels(leave_ids) if leave_ids else "Same as welcome",
-                inline=True,
-            )
+            leave_where = leave_ids or welcome_ids
+            leave_detail = (_format_channels(leave_ids) if leave_ids else "same channel as welcome") if leave_where else None
+            if leave_where and settings.get("leave_enabled"):
+                leave_state = self._on_off(True, leave_detail)
+            elif leave_where:
+                leave_state = "⚫ Off. Edit the leave message or pick a leave channel to turn them on."
+            else:
+                leave_state = self._on_off(False)
+            embed.add_field(name="Leave Messages", value=leave_state, inline=True)
             delete_after = int(settings.get("welcome_delete_after", 0) or 0)
             embed.add_field(
                 name="Auto-Delete",
@@ -1120,7 +1132,7 @@ class SettingsDashboardView(discord.ui.View):
             channel_id = settings.get("starboard_channel_id")
             detail = f"<#{int(channel_id)}>" if channel_id else None
             star_emoji = str(settings.get("starboard_emoji") or "⭐")
-            embed.add_field(name="Starboard", value=self._on_off(bool(channel_id), detail), inline=False)
+            embed.add_field(name="Starboard", value=self._module_state(settings, "starboard", bool(channel_id), detail), inline=False)
             embed.add_field(
                 name="Star Threshold",
                 value=f"Messages need **{settings.get('starboard_threshold', 3)}** {star_emoji} reaction(s) to be posted.",
