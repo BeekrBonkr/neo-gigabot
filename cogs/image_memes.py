@@ -6,7 +6,7 @@ from discord.ext import commands
 from PIL import Image
 
 from utils import image_memes as mm
-from utils.imaging import Frames, apply_to_frames, compose_frames, encode_frames, fit_within, load_frames
+from utils.imaging import Frames, apply_to_frames, compose_frames, encode_frames, fit_within, frame_budget, load_frames
 
 SOURCE_HELP = {
     "attachment": "Optional image attachment.",
@@ -36,6 +36,7 @@ POSTER_MAX_EDGE = 1024
 MOVING_PICTURE_MAX_EDGE = 360
 MOVING_RESULT_MAX_EDGE = 480
 MOVING_MAX_FRAMES = 60
+MOVING_VIDEO_MAX_FRAMES = 150  # a video holds frames cheaply; what limits it is the time each takes to draw
 
 
 def _picture(data: bytes, filename: str | None = None) -> Frames:
@@ -47,7 +48,7 @@ def _picture(data: bytes, filename: str | None = None) -> Frames:
 
 
 def _compose(pictures: list[Frames], build, stem: str) -> tuple[bytes, str]:
-    return compose_frames(pictures, build, stem, max_edge=MOVING_RESULT_MAX_EDGE, limit=MOVING_MAX_FRAMES)
+    return compose_frames(pictures, build, stem, max_edge=MOVING_RESULT_MAX_EDGE, limit=frame_budget(MOVING_MAX_FRAMES, MOVING_VIDEO_MAX_FRAMES))
 USER_HELP = "Use this member's avatar instead of an image."
 
 

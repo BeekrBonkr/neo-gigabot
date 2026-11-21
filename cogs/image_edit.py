@@ -6,7 +6,7 @@ from discord.ext import commands
 from PIL import Image
 
 from utils import image_edit as ed
-from utils.imaging import apply_to_frames, compose_frames, encode_frames, fit_within, load_frames
+from utils.imaging import apply_to_frames, compose_frames, encode_frames, fit_within, frame_budget, load_frames
 
 SOURCE_HELP = {
     "attachment": "Optional image attachment.",
@@ -24,8 +24,10 @@ GIF_RESIZE_MAX_EDGE = 1024
 # every frame whole: it is kept to this size and this many frames.
 MOVING_MAX_EDGE = 480
 MOVING_MAX_FRAMES = 60
+MOVING_VIDEO_MAX_FRAMES = 150  # when the result is a video, which holds frames cheaply
 # Cutting out a subject takes close to half a second a frame.
 CUTOUT_MAX_FRAMES = 24
+CUTOUT_VIDEO_MAX_FRAMES = 48
 
 
 class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize, frame, combine and cut out images."):
@@ -151,7 +153,7 @@ class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize,
             if any(picture.animated for picture in pictures):
                 for picture in pictures:
                     picture.frames = [fit_within(frame, MOVING_MAX_EDGE) for frame in picture.frames]
-            return compose_frames(pictures, lambda *shown: ed.collage(list(shown), chosen), "collage", max_edge=MOVING_MAX_EDGE, limit=MOVING_MAX_FRAMES)
+            return compose_frames(pictures, lambda *shown: ed.collage(list(shown), chosen), "collage", max_edge=MOVING_MAX_EDGE, limit=frame_budget(MOVING_MAX_FRAMES, MOVING_VIDEO_MAX_FRAMES))
 
         await self.bot.image_tools.run_image_command(
             interaction, "collage", "Collage", work, attachment=image1, extra_sources=[(image, None) for image in others]
@@ -180,7 +182,7 @@ class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize,
             loaded = load_frames(image_bytes, filename, max_edge=WORK_MAX_EDGE)
             if loaded.animated:
                 loaded.frames = [fit_within(frame, MOVING_MAX_EDGE) for frame in loaded.frames]
-            data, out_name = compose_frames([loaded], ed.remove_background, "cutout", limit=CUTOUT_MAX_FRAMES)
+            data, out_name = compose_frames([loaded], ed.remove_background, "cutout", limit=frame_budget(CUTOUT_MAX_FRAMES, CUTOUT_VIDEO_MAX_FRAMES))
             return data, out_name, "Works best on photos with one clear subject."
 
         await self.bot.image_tools.run_image_command(interaction, "removebg", "Background Removed", work, attachment=attachment, message_link=message_link)

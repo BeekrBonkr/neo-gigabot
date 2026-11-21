@@ -73,10 +73,14 @@ def embed_image_url(message: discord.Message) -> str | None:
     return None
 
 
-# Only so much of a video is kept: what a GIF made from it can reasonably hold.
+# How much of a video is worked on. The whole of it is covered wherever that
+# is possible: a short one at its own pace, a longer one with fewer frames a
+# second, down to VIDEO_MIN_FPS. Only past that is the end cut off.
 VIDEO_MAX_EDGE = 480
-VIDEO_MAX_FPS = 25
-VIDEO_TIMEOUT_SECONDS = 30.0
+VIDEO_MAX_FPS = 30
+VIDEO_MIN_FPS = 10
+VIDEO_MAX_FRAMES = 300  # so thirty seconds, at the slowest
+VIDEO_TIMEOUT_SECONDS = 45.0
 VIDEO_CONTAINERS = {"mov": "mov,mp4,m4a,3gp,3g2,mj2", "matroska": "matroska,webm"}
 
 
@@ -90,16 +94,41 @@ def video_container(data: bytes) -> str | None:
     return None
 
 
+def video_seconds(data: bytes) -> float | None:
+    """How long a video runs, or None if that cannot be told."""
+    container = video_container(data)
+    ffprobe = shutil.which("ffprobe")
+    if container is None or ffprobe is None:
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".video") as source:
+        source.write(data)
+        source.flush()
+        command = [ffprobe, "-v", "error", "-protocol_whitelist", "file", "-f", VIDEO_CONTAINERS[container],
+                   "-show_entries", "format=duration", "-of", "csv=p=0", source.name]
+        try:
+            return max(0.0, float(subprocess.run(command, capture_output=True, timeout=10, text=True).stdout.strip()))
+        except (ValueError, subprocess.TimeoutExpired):
+            return None
+
+
+def video_frame_rate(seconds: float | None) -> float:
+    """How many frames a second to take from a video of this length, so that
+    all of it fits in VIDEO_MAX_FRAMES if it can."""
+    if not seconds:
+        return float(VIDEO_MAX_FPS)
+    return float(min(VIDEO_MAX_FPS, max(VIDEO_MIN_FPS, VIDEO_MAX_FRAMES / seconds)))
+
+
 def video_to_animation(data: bytes) -> bytes:
-    """The start of a video as an animated WebP: at most MAX_GIF_FRAMES frames,
-    no faster than VIDEO_MAX_FPS, no larger than VIDEO_MAX_EDGE. Everything
-    downstream reads it the way it reads a GIF, and WebP is several times
-    quicker to make than a GIF and keeps the video's colors."""
+    """A video as an animated WebP: at most VIDEO_MAX_FRAMES frames, spread
+    over as much of it as video_frame_rate allows, no larger than
+    VIDEO_MAX_EDGE. Everything downstream reads it the way it reads a GIF, and
+    WebP is several times quicker to make than a GIF and keeps the video's colors."""
     container = video_container(data)
     ffmpeg = shutil.which("ffmpeg")
     if container is None or ffmpeg is None:
         raise ValueError("I can't read that video.")
-    gap = 0.95 / VIDEO_MAX_FPS
+    gap = 0.95 / video_frame_rate(video_seconds(data))
     steps = (
         f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{gap:.4f})',"
         f"scale='min({VIDEO_MAX_EDGE},iw)':'min({VIDEO_MAX_EDGE},ih)':force_original_aspect_ratio=decrease"
@@ -111,7 +140,7 @@ def video_to_animation(data: bytes) -> bytes:
         # a crafted upload cannot point ffmpeg at a playlist, a URL or another file.
         command = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", VIDEO_CONTAINERS[container],
                    "-i", source.name, "-an", "-sn", "-map", "0:v:0", "-vf", steps, "-fps_mode", "vfr",
-                   "-frames:v", str(MAX_GIF_FRAMES), "-threads", "2", "-c:v", "libwebp_anim", "-q:v", "90",
+                   "-frames:v", str(VIDEO_MAX_FRAMES), "-threads", "2", "-c:v", "libwebp_anim", "-q:v", "90",
                    "-compression_level", "0", "-loop", "0", "-f", "webp", "pipe:1"]
         try:
             done = subprocess.run(command, capture_output=True, timeout=VIDEO_TIMEOUT_SECONDS)
@@ -123,14 +152,19 @@ def video_to_animation(data: bytes) -> bytes:
     return done.stdout
 # Cap what we'll buffer into RAM, whether from a URL or an oversized attachment.
 MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
-# Every GIF frame is expanded to RGBA in memory during processing; anything past
-# this many frames is dropped rather than letting one upload eat gigabytes.
+# Every frame is expanded to RGBA in memory during processing, and a GIF stores
+# every frame whole, so this is as many as a GIF going in is read as and a GIF
+# coming out has. A longer one is not cut short: frames are left out evenly
+# along it, each kept frame showing for the time of the ones dropped after it.
 MAX_GIF_FRAMES = 120
+# A GIF is not read past this many frames, whatever is kept of them.
+MAX_SCANNED_FRAMES = 3000
 # Image work runs in executor threads; this many at once, bot-wide, each with
-# this long to finish. GIFs multiply the cost by their frame count, so the
-# timeout has headroom well past what a single frame needs.
+# this long to finish. GIFs and videos multiply the cost by their frame count:
+# the slowest effect on the longest video takes about 40 seconds on its own,
+# and may be sharing the machine with another.
 MAX_CONCURRENT_CPU_BOUND = 2
-CPU_BOUND_TIMEOUT_SECONDS = 60.0
+CPU_BOUND_TIMEOUT_SECONDS = 120.0
 # What a bot can upload where the server has no boosts (and in DMs).
 DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024
 # GIFs do not go faster than this in most viewers; shorter frames get slowed down instead.
@@ -198,20 +232,45 @@ def fit_within(image: Image.Image, max_edge: int) -> Image.Image:
     return image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), Image.LANCZOS)
 
 
+def frame_budget(gif: int = MAX_GIF_FRAMES, video: int = VIDEO_MAX_FRAMES) -> int:
+    """How many frames the running command may work on: `video` when its
+    picture came from a video (the result is a video too, which holds many
+    frames cheaply), `gif` otherwise."""
+    return video if _video_job.get() is not None else gif
+
+
+def _frames_to_keep(image: Image.Image, limit: int) -> tuple[int, set[int] | None]:
+    """(how many frames of the picture to read, which of them to keep). None
+    means all of them: only a picture with more than `limit` is thinned."""
+    count = min(int(getattr(image, "n_frames", 1) or 1), MAX_SCANNED_FRAMES)
+    if count <= limit:
+        return count, None
+    return count, {round(index * count / limit) for index in range(limit)}
+
+
 def load_frames(image_bytes: bytes, filename: str | None = None, *, max_edge: int | None = None, first_only: bool = False) -> Frames:
-    """Decode an upload into RGBA frames, capped at MAX_GIF_FRAMES. `max_edge`
-    shrinks big inputs; `first_only` takes a GIF's first frame as a still."""
+    """Decode an upload into RGBA frames. An animation with more frames than
+    the command may work on (frame_budget) is thinned evenly, so it lasts as
+    long as it did. `max_edge` shrinks big inputs; `first_only` takes a GIF's
+    first frame as a still."""
     with Image.open(io.BytesIO(image_bytes)) as image:
         animated = bool(getattr(image, "is_animated", False)) and not first_only
         loop = int(image.info.get("loop", 0) or 0)
         frames: list[Image.Image] = []
         durations: list[int] = []
-        source = itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES) if animated else [image]
-        for frame in source:
-            converted = frame.convert("RGBA")  # decoded first: some formats only know a frame's timing once it is read
+        if not animated:
+            converted = image.convert("RGBA")
+            return Frames([fit_within(converted, max_edge) if max_edge else converted], [int(image.info.get("duration", 100) or 100)], loop)
+        count, keep = _frames_to_keep(image, frame_budget())
+        for index, frame in enumerate(itertools.islice(ImageSequence.Iterator(image), count)):
+            if keep is not None and index not in keep:
+                frame.load()  # decoded even so: some formats only know a frame's timing once it is read
+                durations[-1] += int(frame.info.get("duration", 100) or 100)
+                continue
+            converted = frame.convert("RGBA")
             durations.append(int(frame.info.get("duration", 100) or 100))
             frames.append(fit_within(converted, max_edge) if max_edge else converted)
-    return Frames(frames, durations, loop, animated and len(frames) > 1)
+    return Frames(frames, durations, loop, len(frames) > 1)
 
 
 def gif_durations(durations: list[int] | list[float]) -> list[int]:
@@ -256,6 +315,7 @@ class VideoJob:
     frames: list[Image.Image] | None = None
     durations: list[int] | None = None
     sound_filter: str | None = None  # an ffmpeg audio filter for the sound, set by the command
+    cut_at: float | None = None  # seconds used, when the video ran longer than could be worked on
 
 
 _video_job: contextvars.ContextVar[VideoJob | None] = contextvars.ContextVar("video_job", default=None)
@@ -278,6 +338,7 @@ def write_animation(frames: list[Image.Image], durations: list[int], loop: int =
         job.frames, job.durations = list(frames), [int(duration) for duration in durations]
         return VIDEO_PLACEHOLDER
     output = io.BytesIO()
+    frames, durations = thin_frames(list(frames), list(durations), MAX_GIF_FRAMES)  # a GIF from a video's frames: fewer, as long
     frames = [frame.convert("RGBA") for frame in frames]
     frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loop,
                    duration=gif_durations(durations), disposal=2)
@@ -372,7 +433,7 @@ def animation_ms(data: bytes) -> int:
     """How long an animation runs for, start to finish."""
     with Image.open(io.BytesIO(data)) as image:
         total = 0
-        for frame in itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES):
+        for frame in itertools.islice(ImageSequence.Iterator(image), MAX_SCANNED_FRAMES):
             frame.load()
             total += int(frame.info.get("duration", 100) or 100)
         return total
@@ -399,7 +460,7 @@ def play_together(sources: list[Frames], *, limit: int | None = None) -> tuple[l
     if not moving:
         return [tuple(source.frames[0] for source in sources)], [100], 0
     lead = max(moving, key=lambda source: len(source.frames))
-    order, durations = thin_frames(list(range(len(lead.frames))), lead.durations, limit or MAX_GIF_FRAMES)
+    order, durations = thin_frames(list(range(len(lead.frames))), lead.durations, limit or frame_budget())
 
     def showing(source: Frames, at: float) -> Image.Image:
         if not source.animated:
@@ -616,9 +677,13 @@ class ImageToolkit:
         title: str,
         description: str | None = None,
     ) -> None:
+        job = _video_job.get()
         data, filename = await self.finish_video(interaction, data, filename)
         file = discord.File(io.BytesIO(data), filename=filename)
-        embed = self.bot.embeds.info_embed(title, description or f"Generated `{filename}`.")
+        description = description or f"Generated `{filename}`."
+        if job is not None and job.cut_at and job.frames is not None:
+            description += f"\nThat video was longer than I can work on, so this is its first {job.cut_at:.0f} seconds."
+        embed = self.bot.embeds.info_embed(title, description)
         if filename.lower().endswith(SUPPORTED_EXTENSIONS):  # video and sound cannot go inside an embed: Discord shows them under it
             embed.set_image(url=f"attachment://{filename}")
         await interaction.followup.send(embed=embed, file=file)
@@ -875,13 +940,14 @@ class ImageToolkit:
         if video_container(data) is None:
             return data, filename
 
-        def read() -> tuple[bytes, int]:
+        def read() -> tuple[bytes, int, float | None]:
             animation = video_to_animation(data)
-            return animation, animation_ms(animation)
+            return animation, animation_ms(animation), video_seconds(data)
 
-        animation, covered = await self.run_cpu_bound(read)
+        animation, covered, seconds = await self.run_cpu_bound(read)
         if job is None:  # with several videos in one command, the first one's sound is used
-            _video_job.set(VideoJob(source=data, source_ms=covered, interaction=interaction))
+            cut_at = covered / 1000.0 if seconds and seconds * 1000 > covered + 1000 else None
+            _video_job.set(VideoJob(source=data, source_ms=covered, interaction=interaction, cut_at=cut_at))
         return animation, f"{Path(filename).stem}.webp"
 
     async def _find_source_image(
@@ -921,17 +987,23 @@ class ImageToolkit:
         return bool(getattr(image, "is_animated", False))
 
     def gif_frames(self, image: Image.Image):
-        """Iterate a GIF's frames, capped at MAX_GIF_FRAMES. Every frame gets
-        expanded to full RGBA in memory during processing, so all GIF loops in
-        the image pipeline go through this cap - one upload must not be able to
-        expand into gigabytes.
+        """Iterate a GIF's frames, as many as the command may work on
+        (frame_budget). Every frame gets expanded to full RGBA in memory during
+        processing, so all GIF loops in the image pipeline go through this cap -
+        one upload must not be able to expand into gigabytes. A longer GIF is
+        thinned evenly rather than cut short, as load_frames does.
 
         How long each frame shows is noted on the way past, for
         encode_gif. It is read after the caller has used the frame,
         because some formats only know a frame's timing once it is decoded."""
         durations: list[int] = []
         image._frame_durations = durations
-        for frame in itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES):
+        count, keep = _frames_to_keep(image, frame_budget())
+        for index, frame in enumerate(itertools.islice(ImageSequence.Iterator(image), count)):
+            if keep is not None and index not in keep:
+                frame.load()
+                durations[-1] += int(frame.info.get("duration", 100) or 100)
+                continue
             yield frame
             durations.append(int(frame.info.get("duration", 100) or 100))
 

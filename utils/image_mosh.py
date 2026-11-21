@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageOps
 
-from utils.imaging import MAX_GIF_FRAMES, Frames, thin_frames
+from utils.imaging import MAX_GIF_FRAMES, Frames, frame_budget, thin_frames
 
 FRAME_START = b"\x00\x00\x01\xb6"  # opens every coded frame in an MPEG-4 stream
 ANY_START = b"\x00\x00\x01"
@@ -164,7 +164,8 @@ def datamosh(clip: Frames, settings: Settings, into: Frames | None = None) -> tu
     out_size = clip.size
     size = _work_size(out_size, BLOCK_SIZES[settings.block_size])
     parts = [clip] + ([into] if into is not None else [])
-    share = MAX_GIF_FRAMES // len(parts)
+    budget = frame_budget()
+    share = budget // len(parts)
 
     header, stream, keyframes, durations = b"", [], [], []
     for number, part in enumerate(parts):
@@ -186,7 +187,7 @@ def datamosh(clip: Frames, settings: Settings, into: Frames | None = None) -> tu
 
     if all(keyframes[1:]):
         raise ValueError("Every frame of that clip is a new scene, so there is no motion in it to mosh.")
-    order = plan(keyframes, settings)
+    order = plan(keyframes, settings, limit=budget)
     pictures = decode(header, [stream[frame] for frame in order if frame != HOLD], size)
     result, times, shown = [], [], iter(pictures)
     current = None
