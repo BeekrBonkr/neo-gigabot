@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
 from utils.image_filters import hue_shift
-from utils.imaging import MIN_GIF_FRAME_MS, Frames, load_font
+from utils.imaging import MAX_GIF_FRAMES, MIN_GIF_FRAME_MS, Frames, load_font, thin_frames
 
 # Stills are shrunk to this before being animated: a GIF stores every frame
 # whole, so size is what decides whether the result fits Discord's upload cap.
@@ -35,6 +35,31 @@ def _cycle(loaded: Frames) -> list[tuple[Image.Image, float]]:
 
 def _durations(loaded: Frames, speed_ms: int) -> list[int]:
     return loaded.durations if loaded.animated else [speed_ms] * STILL_FRAMES
+
+
+def _steps(loaded: Frames, step_ms: list[int]) -> list[tuple[Image.Image, int, int]]:
+    """For an effect that is a short loop of its own (a pat, a bonk): each
+    frame of the result as (the picture to use, which step of the effect, how
+    long it shows). A still gets one pass of the effect. A GIF or a video
+    keeps playing underneath while the effect repeats, until the input has
+    played through and the effect is back at its start."""
+    count = len(step_ms)
+    if not loaded.animated:
+        return [(loaded.frames[0], step, duration) for step, duration in enumerate(step_ms)]
+    total = max(1, sum(loaded.durations))
+    steps: list[tuple[Image.Image, int, int]] = []
+    clock = 0
+    while (clock < total or len(steps) % count) and len(steps) + (count - len(steps) % count) % count < MAX_GIF_FRAMES + 1:
+        at, picture = clock % total, loaded.frames[-1]
+        for frame, duration in zip(loaded.frames, loaded.durations):
+            if at < duration:
+                picture = frame
+                break
+            at -= duration
+        step = len(steps) % count
+        steps.append((picture, step, step_ms[step]))
+        clock += step_ms[step]
+    return steps
 
 
 def spin(loaded: Frames, speed_ms: int = 50, clockwise: bool = True) -> tuple[list[Image.Image], list[int]]:
@@ -111,15 +136,17 @@ def _pet_hands() -> list[Image.Image]:
 
 def pet(loaded: Frames, speed_ms: int = 60) -> tuple[list[Image.Image], list[int]]:
     """The petpet GIF: a hand pats the picture, which squashes under each pat."""
-    base = loaded.frames[0]
-    frames = []
-    for (left, top, width, height), drop, hand in zip(PET_BOXES, PET_HAND_DROP, _pet_hands()):
+    hands = _pet_hands()
+    frames, durations = [], []
+    for base, step, duration in _steps(loaded, [speed_ms] * PET_FRAMES):
+        left, top, width, height = PET_BOXES[step]
         canvas = Image.new("RGBA", (PET_SIZE, PET_SIZE), (0, 0, 0, 0))
         squashed = base.resize((width * PET_SCALE, height * PET_SCALE), Image.LANCZOS)
         canvas.alpha_composite(squashed, (left * PET_SCALE, top * PET_SCALE))
-        canvas.alpha_composite(hand, (0, drop * PET_SCALE))
+        canvas.alpha_composite(hands[step], (0, PET_HAND_DROP[step] * PET_SCALE))
         frames.append(canvas)
-    return frames, [speed_ms] * PET_FRAMES
+        durations.append(duration)
+    return frames, durations
 
 
 # ---------- triggered ----------
@@ -136,17 +163,23 @@ def triggered(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], li
     """The picture shakes under a red cast, over the TRIGGERED label."""
     margin, size = TRIGGERED_MARGIN, TRIGGERED_SIZE
     side = size + margin * 2
-    base = Image.new("RGBA", (side, side), (255, 255, 255, 255))
-    base.alpha_composite(ImageOps.fit(loaded.frames[0], (side, side), Image.LANCZOS))
-    base = Image.blend(base, Image.new("RGBA", base.size, (255, 40, 0, 255)), 0.22)
+    red = Image.new("RGBA", (side, side), (255, 40, 0, 255))
     label = Image.open(TRIGGERED_LABEL).convert("RGBA").resize((side, TRIGGERED_LABEL_HEIGHT + margin), Image.LANCZOS)
-    frames = []
-    for index, (dx, dy) in enumerate(TRIGGERED_SHAKES):
+    tinted: dict[int, Image.Image] = {}  # a still is tinted once, a GIF once per frame it has
+    frames, durations = [], []
+    for picture, index, duration in _steps(loaded, [speed_ms] * len(TRIGGERED_SHAKES)):
+        base = tinted.get(id(picture))
+        if base is None:
+            base = Image.new("RGBA", (side, side), (255, 255, 255, 255))
+            base.alpha_composite(ImageOps.fit(picture, (side, side), Image.LANCZOS))
+            base = tinted[id(picture)] = Image.blend(base, red, 0.22)
+        dx, dy = TRIGGERED_SHAKES[index]
         frame = base.crop((margin + dx, margin + dy, margin + dx + size, margin + dy + size))
         label_dx, label_dy = TRIGGERED_SHAKES[(index + 3) % len(TRIGGERED_SHAKES)]
         frame.paste(label, (label_dx // 3 - margin, size - TRIGGERED_LABEL_HEIGHT + label_dy // 2))
         frames.append(frame)
-    return frames, [speed_ms] * len(frames)
+        durations.append(duration)
+    return frames, durations
 
 
 # ---------- bonk ----------
@@ -196,24 +229,25 @@ def _bonk_label() -> Image.Image:
 def bonk(loaded: Frames, speed_ms: int = 50) -> tuple[list[Image.Image], list[int]]:
     """The bonk meme: the dog brings a bat down on the picture, which squashes when hit."""
     scene, bat, label = Image.open(BONK_SCENE).convert("RGBA"), _bat_sprite(BONK_BAT_LENGTH), _bonk_label()
-    base = loaded.frames[0]
     left, top, right, bottom = BONK_TARGET_BOX
     box_w, box_h = right - left, bottom - top
-    scale = min(box_w / base.width, box_h / base.height)
-    target = base.resize((max(1, int(base.width * scale)), max(1, int(base.height * scale))), Image.LANCZOS)
-    squashed = target.resize((max(1, int(target.width * 1.1)), max(1, int(target.height * 0.75))), Image.LANCZOS)
-    frames = []
-    for lift in BONK_LIFTS:
+    scale = min(box_w / loaded.size[0], box_h / loaded.size[1])
+    width, height = max(1, int(loaded.size[0] * scale)), max(1, int(loaded.size[1] * scale))
+    frames, durations = [], []
+    step_ms = [speed_ms * (4 if index == BONK_HELD else 1) for index in range(len(BONK_LIFTS))]
+    for base, index, duration in _steps(loaded, step_ms):
+        lift = BONK_LIFTS[index]
         hit = lift == 0
         canvas = scene.copy()
-        shown = squashed if hit else target
+        shown = base.resize((max(1, int(width * 1.1)), max(1, int(height * 0.75))) if hit else (width, height), Image.LANCZOS)
         canvas.paste(shown, (left + (box_w - shown.width) // 2, bottom - shown.height), shown)
         swung = bat.rotate(BONK_HIT_ANGLE + lift, resample=Image.BICUBIC)
         canvas.paste(swung, (BONK_PIVOT[0] - swung.width // 2, BONK_PIVOT[1] - swung.height // 2), swung)
         if hit:
             canvas.paste(label, BONK_LABEL_AT, label)
         frames.append(canvas)
-    return frames, [speed_ms * (4 if index == BONK_HELD else 1) for index in range(len(BONK_LIFTS))]
+        durations.append(duration)
+    return frames, durations
 
 
 # ---------- boom ----------
@@ -332,15 +366,24 @@ def pick_frame(loaded: Frames, number: int) -> tuple[Image.Image, str]:
     return loaded.frames[number - 1], f"Frame {number} of {count} · {width}x{height} · {seconds:.1f}s per loop"
 
 
-def join(stills: list[Image.Image], delay_ms: int) -> tuple[list[Image.Image], list[int]]:
-    """Several pictures as the frames of one GIF, each centered on a canvas
-    the size of the first."""
-    width, height = stills[0].size
-    frames = []
-    for still in stills:
-        scale = min(width / still.width, height / still.height)
-        fitted = still.resize((max(1, int(still.width * scale)), max(1, int(still.height * scale))), Image.LANCZOS)
-        canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        canvas.alpha_composite(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
-        frames.append(canvas)
-    return frames, [delay_ms] * len(frames)
+def join(pictures: list[Frames], delay_ms: int) -> tuple[list[Image.Image], list[int]]:
+    """Several pictures one after another as one GIF, each centered on a
+    canvas the size of the first. A still shows for `delay_ms`; a GIF or a
+    video plays through at its own pace. When there is more than a GIF can
+    reasonably hold, every clip gives up frames evenly."""
+    width, height = pictures[0].size
+    share = max(1, MAX_GIF_FRAMES // len(pictures))
+    frames, durations = [], []
+    for picture in pictures:
+        if picture.animated:
+            shown, times = thin_frames(picture.frames, picture.durations, share)
+        else:
+            shown, times = picture.frames[:1], [delay_ms]
+        for still, time in zip(shown, times):
+            scale = min(width / still.width, height / still.height)
+            fitted = still.resize((max(1, int(still.width * scale)), max(1, int(still.height * scale))), Image.LANCZOS)
+            canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            canvas.alpha_composite(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+            frames.append(canvas)
+            durations.append(time)
+    return frames, durations

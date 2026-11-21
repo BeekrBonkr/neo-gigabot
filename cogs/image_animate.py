@@ -29,12 +29,12 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         super().__init__()
 
     async def _animate(self, interaction: discord.Interaction, name: str, title: str, build, attachment, message_link,
-                       *, user: discord.User | None = None, still_only: bool = False) -> None:
+                       *, user: discord.User | None = None) -> None:
         """`build(Frames)` returns (frames, durations). Stills are shrunk
-        before being animated; GIFs keep their own frames unless `still_only`."""
+        before being animated; GIFs and videos keep their own frames."""
 
         def work(image_bytes: bytes, filename: str) -> tuple[bytes, str]:
-            loaded = load_frames(image_bytes, filename, max_edge=an.GIF_MAX_EDGE, first_only=still_only)
+            loaded = load_frames(image_bytes, filename, max_edge=an.GIF_MAX_EDGE)
             if not loaded.animated:
                 loaded = load_frames(image_bytes, filename, max_edge=an.STILL_MAX_EDGE, first_only=True)
             frames, durations = build(loaded)
@@ -92,7 +92,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 60,
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
-        await self._animate(interaction, "pet", "Pet", lambda loaded: an.pet(loaded, speed), attachment, message_link, user=user, still_only=True)
+        await self._animate(interaction, "pet", "Pet", lambda loaded: an.pet(loaded, speed), attachment, message_link, user=user)
 
     @app_commands.command(name="triggered", description="An image or someone's avatar shakes over a TRIGGERED label.")
     @app_commands.describe(user=USER_HELP, speed=SPEED_HELP, **SOURCE_HELP)
@@ -102,7 +102,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
         await self._animate(
-            interaction, "triggered", "Triggered", lambda loaded: an.triggered(loaded, speed), attachment, message_link, user=user, still_only=True,
+            interaction, "triggered", "Triggered", lambda loaded: an.triggered(loaded, speed), attachment, message_link, user=user,
         )
 
     @app_commands.command(name="bonk", description="The bonk meme: a bat comes down on an image or someone's avatar.")
@@ -112,7 +112,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         self, interaction: discord.Interaction, user: discord.User | None = None, speed: Speed = 50,
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
-        await self._animate(interaction, "bonk", "Bonk", lambda loaded: an.bonk(loaded, speed), attachment, message_link, user=user, still_only=True)
+        await self._animate(interaction, "bonk", "Bonk", lambda loaded: an.bonk(loaded, speed), attachment, message_link, user=user)
 
     @app_commands.command(name="boom", description="An image, GIF or avatar swells up, then goes off in a nuclear explosion.")
     @app_commands.describe(user=USER_HELP, speed="Milliseconds per frame while a still image swells. Lower is faster.", **SOURCE_HELP)
@@ -162,10 +162,10 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
 
         await self.bot.image_tools.run_image_command(interaction, "frames", "Frame", work, attachment=attachment, message_link=message_link)
 
-    @app_commands.command(name="togif", description="Join two to six images into a looping GIF.")
+    @app_commands.command(name="togif", description="Join two to six images, GIFs or videos into one looping GIF.")
     @app_commands.describe(
         image1="First frame. It sets the size of the GIF.", image2="Second frame.", image3="Third frame.", image4="Fourth frame.",
-        image5="Fifth frame.", image6="Sixth frame.", delay="Milliseconds each image is shown.",
+        image5="Fifth frame.", image6="Sixth frame.", delay="Milliseconds each still image is shown. A GIF or a video plays at its own pace.",
     )
     @app_commands.checks.cooldown(1, 5.0)
     async def togif(
@@ -177,8 +177,8 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         others = [image for image in (image2, image3, image4, image5, image6) if image is not None]
 
         def work(image_bytes: bytes, filename: str, *more: bytes) -> tuple[bytes, str]:
-            stills = [load_frames(data, max_edge=an.GIF_MAX_EDGE, first_only=True).frames[0] for data in (image_bytes, *more)]
-            frames, durations = an.join(stills, delay)
+            pictures = [load_frames(data, max_edge=an.GIF_MAX_EDGE) for data in (image_bytes, *more)]
+            frames, durations = an.join(pictures, delay)
             return encode_frames(frames, durations, "joined")
 
         await self.bot.image_tools.run_image_command(

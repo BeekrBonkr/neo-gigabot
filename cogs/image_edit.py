@@ -6,7 +6,7 @@ from discord.ext import commands
 from PIL import Image
 
 from utils import image_edit as ed
-from utils.imaging import apply_to_frames, encode_frames, load_frames
+from utils.imaging import apply_to_frames, compose_frames, encode_frames, fit_within, load_frames
 
 SOURCE_HELP = {
     "attachment": "Optional image attachment.",
@@ -20,6 +20,12 @@ LAYOUTS = [
 # Pictures going into a collage or the background remover are shrunk to this first.
 WORK_MAX_EDGE = 1600
 GIF_RESIZE_MAX_EDGE = 1024
+# A collage or a cut-out made from a GIF or a video is a GIF itself, which stores
+# every frame whole: it is kept to this size and this many frames.
+MOVING_MAX_EDGE = 480
+MOVING_MAX_FRAMES = 60
+# Cutting out a subject takes close to half a second a frame.
+CUTOUT_MAX_FRAMES = 24
 
 
 class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize, frame, combine and cut out images."):
@@ -140,8 +146,12 @@ class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize,
         chosen = layout.value if layout else "auto"
 
         def work(image_bytes: bytes, filename: str, *more: bytes) -> tuple[bytes, str]:
-            pictures = [load_frames(data, max_edge=WORK_MAX_EDGE, first_only=True).frames[0] for data in (image_bytes, *more)]
-            return encode_frames([ed.collage(pictures, chosen)], [100], "collage")
+            # a GIF or a video among them makes the collage a GIF, with every moving picture playing
+            pictures = [load_frames(data, max_edge=WORK_MAX_EDGE) for data in (image_bytes, *more)]
+            if any(picture.animated for picture in pictures):
+                for picture in pictures:
+                    picture.frames = [fit_within(frame, MOVING_MAX_EDGE) for frame in picture.frames]
+            return compose_frames(pictures, lambda *shown: ed.collage(list(shown), chosen), "collage", max_edge=MOVING_MAX_EDGE, limit=MOVING_MAX_FRAMES)
 
         await self.bot.image_tools.run_image_command(
             interaction, "collage", "Collage", work, attachment=image1, extra_sources=[(image, None) for image in others]
@@ -166,9 +176,12 @@ class ImageEdit(commands.GroupCog, group_name="edit", group_description="Resize,
     @app_commands.checks.cooldown(1, 8.0)
     async def removebg(self, interaction: discord.Interaction, attachment: discord.Attachment | None = None, message_link: str | None = None) -> None:
         def work(image_bytes: bytes, filename: str) -> tuple[bytes, str, str]:
-            loaded = load_frames(image_bytes, filename, max_edge=WORK_MAX_EDGE, first_only=True)
-            data, out_name = encode_frames([ed.remove_background(loaded.frames[0])], [100], "cutout")
-            return data, out_name, "Works best on photos with one clear subject. GIFs are cut from their first frame."
+            # every frame of a GIF or a video is cut out on its own, so there are fewer of them, and smaller
+            loaded = load_frames(image_bytes, filename, max_edge=WORK_MAX_EDGE)
+            if loaded.animated:
+                loaded.frames = [fit_within(frame, MOVING_MAX_EDGE) for frame in loaded.frames]
+            data, out_name = compose_frames([loaded], ed.remove_background, "cutout", limit=CUTOUT_MAX_FRAMES)
+            return data, out_name, "Works best on photos with one clear subject."
 
         await self.bot.image_tools.run_image_command(interaction, "removebg", "Background Removed", work, attachment=attachment, message_link=message_link)
 

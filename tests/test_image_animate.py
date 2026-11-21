@@ -120,8 +120,8 @@ def test_reverse_and_pick_frame():
 
 
 def test_join_fits_every_picture_on_the_first_ones_canvas():
-    wide = Image.new("RGBA", (80, 20), (0, 255, 0, 255))
-    frames, durations = an.join([still().frames[0], wide], 300)
+    wide = Frames([Image.new("RGBA", (80, 20), (0, 255, 0, 255))], [100])
+    frames, durations = an.join([still(), wide], 300)
     assert [frame.size for frame in frames] == [(60, 40), (60, 40)] and durations == [300, 300]
     assert frames[1].getpixel((30, 20))[1] == 255 and frames[1].getpixel((30, 2))[3] == 0  # letterboxed, not stretched
 
