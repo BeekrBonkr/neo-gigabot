@@ -15,7 +15,9 @@ from discord.ext import commands
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageSequence
 
 from utils import image_carve, image_faces, richtext
-from utils.imaging import CPU_BOUND_TIMEOUT_SECONDS, MIN_GIF_FRAME_MS, encode_frames, gif_durations, load_frames
+from utils.imaging import (
+    CPU_BOUND_TIMEOUT_SECONDS, MIN_GIF_FRAME_MS, current_video_source, encode_frames, frames_to_video, gif_durations, load_frames,
+)
 
 LINE_SPACING = 6
 
@@ -240,10 +242,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
 
             output = io.BytesIO()
             if is_gif:
-                processed[0].save(
-                    output, format="GIF", append_images=processed[1:], **self.bot.image_tools.gif_save_kwargs(image)
-                )
-                return output.getvalue(), gif_name
+                return self.bot.image_tools.encode_gif(processed, image), gif_name
             processed[0].save(output, format="PNG")
             return output.getvalue(), static_name
 
@@ -493,12 +492,17 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
         target_format: str,
     ) -> tuple[bytes, str]:
         target_format = target_format.lower()
-        allowed_types = {"jpg", "jpeg", "png", "bmp", "gif", "webp"}
+        allowed_types = {"jpg", "jpeg", "png", "bmp", "gif", "webp", "mp4"}
         if target_format not in allowed_types:
             raise ValueError(f"Invalid format. Allowed formats: {', '.join(sorted(allowed_types))}")
 
         # GIF and WebP can hold an animation, so a GIF or a video stays one in
         # them. The other formats are stills: they get the first frame.
+        if target_format == "mp4":
+            loaded = load_frames(image_bytes)
+            if not loaded.animated:
+                raise ValueError("Only a GIF or a video can be made into an MP4.")
+            return frames_to_video(loaded.frames, loaded.durations, sound_from=current_video_source()), "converted.mp4"
         if target_format in {"gif", "webp"}:
             loaded = load_frames(image_bytes)
             if loaded.animated or target_format == "gif":
@@ -523,8 +527,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             output = io.BytesIO()
             if self.bot.image_tools.is_gif(image, filename):
                 frames = [frame.copy().convert("RGBA") for frame in self.bot.image_tools.gif_frames(image)]
-                frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                return output.getvalue(), "extracted.gif"
+                return self.bot.image_tools.encode_gif(frames, image), "extracted.gif"
 
             image.save(output, format=image.format or "PNG")
             ext = (image.format or "PNG").lower()
@@ -924,7 +927,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
 
     @effects.command(name="convert", description="Convert an image into another format.")
     @app_commands.describe(
-        format="Target format: png, jpg, jpeg, bmp, gif, or webp.",
+        format="Target format: png, jpg, jpeg, bmp, gif, webp, or mp4. A video made into a GIF loses its sound.",
         attachment="Optional image attachment.",
         message_link="Optional Discord message link containing the image.",
     )
@@ -1115,9 +1118,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                     self._caption_frame(frame, arranged, box_height, margin_x, position=position)
                     for frame in self.bot.image_tools.gif_frames(image)
                 ]
-                output = io.BytesIO()
-                frames[0].save(output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image))
-                return output.getvalue(), "caption.gif"
+                return self.bot.image_tools.encode_gif(frames, image), "caption.gif"
 
             output = io.BytesIO()
             rendered = self._caption_frame(first_frame, arranged, box_height, margin_x, position=position)
@@ -1234,11 +1235,7 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
                 return output.getvalue(), "motivate.png"
 
             frames = [render(frame) for frame in self.bot.image_tools.gif_frames(image)]
-            output = io.BytesIO()
-            frames[0].save(
-                output, format="GIF", append_images=frames[1:], **self.bot.image_tools.gif_save_kwargs(image)
-            )
-            return output.getvalue(), "motivate.gif"
+            return self.bot.image_tools.encode_gif(frames, image), "motivate.gif"
 
     @text.command(
         name="motivate",

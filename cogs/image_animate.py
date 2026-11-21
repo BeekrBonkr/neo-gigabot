@@ -179,7 +179,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         def work(image_bytes: bytes, filename: str, *more: bytes) -> tuple[bytes, str]:
             pictures = [load_frames(data, max_edge=an.GIF_MAX_EDGE) for data in (image_bytes, *more)]
             frames, durations = an.join(pictures, delay)
-            return encode_frames(frames, durations, "joined")
+            return encode_frames(frames, durations, "joined", keep_gif=True)  # the command is named for it
 
         await self.bot.image_tools.run_image_command(
             interaction, "togif", "Joined", work, attachment=image1, extra_sources=[(image, None) for image in others]

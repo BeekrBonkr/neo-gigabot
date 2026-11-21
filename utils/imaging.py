@@ -229,18 +229,137 @@ def gif_durations(durations: list[int] | list[float]) -> list[int]:
     return result
 
 
-def encode_frames(frames: list[Image.Image], durations: list[int] | int, stem: str, *, loop: int = 0) -> tuple[bytes, str]:
-    """PNG for one frame, GIF for several. Returns (data, filename)."""
+def encode_frames(frames: list[Image.Image], durations: list[int] | int, stem: str, *, loop: int = 0,
+                  keep_gif: bool = False) -> tuple[bytes, str]:
+    """PNG for one frame, GIF for several. Returns (data, filename). A command
+    working on a video gets a stand-in for the GIF (see write_animation)
+    unless it asks to `keep_gif`."""
     output = io.BytesIO()
     if len(frames) == 1:
         frames[0].save(output, format="PNG")
         return output.getvalue(), f"{stem}.png"
     if isinstance(durations, int):
         durations = [durations] * len(frames)
+    return write_animation(frames, durations, loop, keep_gif=keep_gif), f"{stem}.gif"
+
+
+@dataclass(slots=True)
+class VideoJob:
+    """A command whose picture came from a video. The result goes back as a
+    video with the original sound, so the finished frames are kept here
+    instead of being written as a GIF; send_processed_file makes the video."""
+
+    source: bytes  # the video as it was uploaded: where the sound comes from
+    source_ms: int  # how much of it the frames cover
+    interaction: object = None
+    frames: list[Image.Image] | None = None
+    durations: list[int] | None = None
+
+
+_video_job: contextvars.ContextVar[VideoJob | None] = contextvars.ContextVar("video_job", default=None)
+# What a command is handed in place of a GIF while a video job holds its frames.
+def _placeholder() -> bytes:
+    output = io.BytesIO()
+    Image.new("L", (1, 1)).save(output, format="GIF", comment=b"neo-gigabot video job")
+    return output.getvalue()
+
+
+VIDEO_PLACEHOLDER = _placeholder()
+
+
+def write_animation(frames: list[Image.Image], durations: list[int], loop: int = 0, *, keep_gif: bool = False) -> bytes:
+    """The frames as a GIF. When the command's picture came from a video (and
+    the command is not one that promises a GIF: `keep_gif`), they are set
+    aside for the video instead and VIDEO_PLACEHOLDER is returned."""
+    job = _video_job.get()
+    if job is not None and not keep_gif:
+        job.frames, job.durations = list(frames), [int(duration) for duration in durations]
+        return VIDEO_PLACEHOLDER
+    output = io.BytesIO()
     frames = [frame.convert("RGBA") for frame in frames]
     frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], loop=loop,
                    duration=gif_durations(durations), disposal=2)
-    return output.getvalue(), f"{stem}.gif"
+    return output.getvalue()
+
+
+VIDEO_OUT_FPS_LIMIT = 50
+VIDEO_OUT_MAX_TICKS = 1500
+VIDEO_OUT_TIMEOUT_SECONDS = 45.0
+
+
+def frames_to_video(frames: list[Image.Image], durations: list[int], *, sound_from: bytes | None = None) -> bytes:
+    """The frames as an MP4 (H.264, plays in Discord and on phones), with the
+    sound of the video `sound_from` laid under it from its start, cut to the
+    length of the frames. Transparent parts come out black."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ValueError("I can't make videos here.")
+    width, height = frames[0].size
+    total_ms = max(1, sum(durations))
+    # ffmpeg is fed plain pictures at one steady rate. Frames that all last
+    # about the same go in as they are; uneven ones are repeated on a finer
+    # clock, which costs nothing in the file since a repeat compresses away.
+    if max(durations) - min(durations) <= 3:
+        rate, order = len(frames) * 1000.0 / total_ms, list(range(len(frames)))
+    else:
+        tick = max(1000.0 / VIDEO_OUT_FPS_LIMIT, float(min(durations)), total_ms / VIDEO_OUT_MAX_TICKS)
+        rate, order, ends, clock = 1000.0 / tick, [], list(itertools.accumulate(durations)), 0.0
+        index = 0
+        while clock < total_ms:
+            while index < len(frames) - 1 and clock >= ends[index]:
+                index += 1
+            order.append(index)
+            clock += tick
+    sound = video_container(sound_from) if sound_from else None
+    with tempfile.TemporaryDirectory() as folder:
+        target = Path(folder) / "out.mp4"
+        command = [ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
+                   "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-framerate", f"{rate:.4f}", "-i", "pipe:0"]
+        if sound:
+            original = Path(folder) / "original.video"
+            original.write_bytes(sound_from)
+            # named outright, as when it was read: a crafted upload cannot point ffmpeg anywhere else
+            command += ["-f", VIDEO_CONTAINERS[sound], "-i", str(original), "-map", "0:v:0", "-map", "1:a:0?",
+                        "-c:a", "aac", "-b:a", "128k"]
+        command += ["-t", f"{total_ms / 1000.0:.3f}", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-preset", "veryfast",
+                    "-crf", "23", "-pix_fmt", "yuv420p", "-threads", "2", "-movflags", "+faststart", "-f", "mp4", str(target)]
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        shown, pixels = -1, b""
+        try:
+            for index in order:
+                if index != shown:  # a repeat is written again as it is
+                    frame = frames[index].convert("RGBA")
+                    if frame.size != (width, height):
+                        frame = frame.resize((width, height), Image.LANCZOS)
+                    ground = Image.new("RGB", (width, height), (0, 0, 0))
+                    ground.paste(frame, (0, 0), frame)
+                    shown, pixels = index, ground.tobytes()
+                process.stdin.write(pixels)
+            _, errors = process.communicate(timeout=VIDEO_OUT_TIMEOUT_SECONDS)
+        except (BrokenPipeError, subprocess.TimeoutExpired) as exc:
+            process.kill()
+            process.communicate()
+            raise ValueError("That video took too long to make. Try a shorter one.") from exc
+        if process.returncode != 0 or not target.is_file():
+            logging.getLogger(__name__).info("ffmpeg could not make a video: %s", (errors or b"").decode(errors="replace")[-300:])
+            raise ValueError("I couldn't make that into a video.")
+        return target.read_bytes()
+
+
+def current_video_source() -> bytes | None:
+    """The video the running command's picture came from, if it was one."""
+    job = _video_job.get()
+    return job.source if job is not None else None
+
+
+def animation_ms(data: bytes) -> int:
+    """How long an animation runs for, start to finish."""
+    with Image.open(io.BytesIO(data)) as image:
+        total = 0
+        for frame in itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES):
+            frame.load()
+            total += int(frame.info.get("duration", 100) or 100)
+        return total
 
 
 def thin_frames(frames: list, durations: list[int], limit: int) -> tuple[list, list[int]]:
@@ -370,7 +489,8 @@ class ImageToolkit:
         loop = asyncio.get_running_loop()
         await self._cpu_semaphore.acquire()
         try:
-            future = loop.run_in_executor(None, func)
+            # run in a copy of this task's context, so the work can see the command's video job
+            future = loop.run_in_executor(None, contextvars.copy_context().run, func)
         except BaseException:
             self._cpu_semaphore.release()
             raise
@@ -467,6 +587,7 @@ class ImageToolkit:
         return await self.bot.ensure_command_allowed(interaction, command_name)
 
     async def defer(self, interaction: discord.Interaction) -> None:
+        _video_job.set(None)
         if not interaction.response.is_done():
             await interaction.response.defer(thinking=True)
 
@@ -479,10 +600,41 @@ class ImageToolkit:
         title: str,
         description: str | None = None,
     ) -> None:
+        data, filename = await self.finish_video(interaction, data, filename)
         file = discord.File(io.BytesIO(data), filename=filename)
         embed = self.bot.embeds.info_embed(title, description or f"Generated `{filename}`.")
-        embed.set_image(url=f"attachment://{filename}")
+        if not filename.endswith(".mp4"):  # a video cannot go inside an embed: Discord shows it under it
+            embed.set_image(url=f"attachment://{filename}")
         await interaction.followup.send(embed=embed, file=file)
+
+    async def finish_video(self, interaction: discord.Interaction, data: bytes, filename: str) -> tuple[bytes, str]:
+        """If the command worked on a video and its result moves, make the
+        video: the finished frames with the original sound. Anything else is
+        passed through as it is."""
+        job = _video_job.get()
+        _video_job.set(None)
+        if job is None or job.frames is None or data != VIDEO_PLACEHOLDER:
+            return data, filename
+        frames, durations = job.frames, job.durations
+        total = sum(durations)
+        # The sound only fits if the result still runs like the original: not
+        # sped up, slowed down or cut short. A second of extra at the end is fine.
+        fits = job.source_ms * 0.9 <= total <= job.source_ms + 1000
+        try:
+            video = await self.run_cpu_bound(lambda: frames_to_video(frames, durations, sound_from=job.source if fits else None))
+        except ValueError:
+            # no video after all: the GIF every other animated result gets
+            return await self.run_cpu_bound(lambda: write_animation(frames, durations, keep_gif=True)), filename
+        self.check_upload_size(interaction, video)
+        return video, f"{Path(filename).stem}.mp4"
+
+    def encode_gif(self, frames: list[Image.Image], image: Image.Image) -> bytes:
+        """The processed frames of `image` as a GIF with its timing (or, for a
+        command working on a video, the stand-in: see write_animation)."""
+        durations = getattr(image, "_frame_durations", None) or [int(image.info.get("duration", 100) or 100)]
+        if len(durations) != len(frames):
+            durations = [durations[0]] * len(frames)
+        return write_animation(frames, durations, int(image.info.get("loop", 0) or 0))
 
     def user_error_message(self, exc: Exception) -> str:
         """ValueError/RuntimeError raised inside the image pipeline carry
@@ -671,11 +823,25 @@ class ImageToolkit:
         attachment: discord.Attachment | None = None,
         message_link: str | None = None,
     ) -> tuple[bytes, str]:
-        """The image a command should work on. A video comes back as an animated WebP."""
+        """The image a command should work on. A video comes back as an
+        animated WebP, and starts a video job: the command's result will be
+        sent as a video with this one's sound (see VideoJob)."""
+        job = _video_job.get()
+        if job is not None and job.interaction is not interaction:
+            _video_job.set(None)  # left by an earlier command
+            job = None
         data, filename = await self._find_source_image(interaction, attachment, message_link)
         if video_container(data) is None:
             return data, filename
-        return await self.run_cpu_bound(lambda: video_to_animation(data)), f"{Path(filename).stem}.webp"
+
+        def read() -> tuple[bytes, int]:
+            animation = video_to_animation(data)
+            return animation, animation_ms(animation)
+
+        animation, covered = await self.run_cpu_bound(read)
+        if job is None:  # with several videos in one command, the first one's sound is used
+            _video_job.set(VideoJob(source=data, source_ms=covered, interaction=interaction))
+        return animation, f"{Path(filename).stem}.webp"
 
     async def _find_source_image(
         self,
@@ -720,24 +886,13 @@ class ImageToolkit:
         expand into gigabytes.
 
         How long each frame shows is noted on the way past, for
-        gif_save_kwargs. It is read after the caller has used the frame,
+        encode_gif. It is read after the caller has used the frame,
         because some formats only know a frame's timing once it is decoded."""
         durations: list[int] = []
         image._frame_durations = durations
         for frame in itertools.islice(ImageSequence.Iterator(image), MAX_GIF_FRAMES):
             yield frame
             durations.append(int(frame.info.get("duration", 100) or 100))
-
-    def gif_save_kwargs(self, image: Image.Image) -> dict:
-        """What to save a processed GIF with: each frame's own timing, as
-        noted by gif_frames, in times a GIF can hold."""
-        durations = getattr(image, "_frame_durations", None) or [int(image.info.get("duration", 100) or 100)]
-        return {
-            "save_all": True,
-            "loop": image.info.get("loop", 0),
-            "duration": gif_durations(durations) if len(durations) > 1 else gif_durations(durations)[0],
-            "disposal": 2,
-        }
 
     def process_image_bytes(
         self,
@@ -755,9 +910,7 @@ class ImageToolkit:
                 for frame in self.gif_frames(image):
                     processed = processor(frame.convert("RGBA"))
                     frames.append(processed.convert("RGBA"))
-                output = io.BytesIO()
-                frames[0].save(output, format="GIF", append_images=frames[1:], **self.gif_save_kwargs(image))
-                return output.getvalue(), gif_name
+                return self.encode_gif(frames, image), gif_name
 
             processed = processor(image.convert("RGBA"))
             output = io.BytesIO()
