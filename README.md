@@ -61,7 +61,11 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   you clicked
 - Videos count as images: an MP4, WebM or MOV, or a GIF from Discord's picker (which is a video), is read
   as an animation of its first few seconds (needs `ffmpeg`)
-- A GIF or a video going in gives a GIF coming out, for every command except the two whose result is a
+- **A video going in comes back as a video**: the effect is applied to its frames and the result is an MP4
+  with the original sound laid back under it (first few seconds, up to 480 px). The sound is left off
+  when the result no longer runs like the original (`/animate speed`). `/image effects convert` turns a
+  video into a GIF or a GIF into an MP4 on request, and `/animate togif` always gives a GIF
+- A GIF going in gives a GIF coming out, for every command except the two whose result is a
   still by nature (`/animate frames`, `/edit palette`): the meme formats, collages and cut-outs are built
   frame by frame, a pat or a bonk plays over the moving picture, and the result lasts exactly as long as
   the original
