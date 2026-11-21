@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils.checks import may_manage_channel, server_permissions
 from utils.cases import add_case
 from utils.website import site_link
 from utils.durations import parse_duration
@@ -262,9 +263,24 @@ class Moderation(commands.Cog):
         *bot's* top role."""
         if interaction.guild.owner_id == interaction.user.id:
             return True
-        if not isinstance(interaction.user, discord.Member):
-            return False
-        return interaction.user.top_role > target.top_role
+        own_top = getattr(interaction.user, "top_role", None)  # a plain User (no roles) outranks nobody
+        return own_top is not None and own_top > target.top_role
+
+    def _role_problem(self, interaction: discord.Interaction, role: discord.Role, *, automatic: bool = False) -> str | None:
+        """Why the invoker may not have the bot hand out (or take away) `role`,
+        or None when they may. Discord never lets someone with Manage Roles
+        touch a role at or above their own; the bot must not do it for them.
+        `automatic` is for roles given without anyone choosing each time
+        (autoroles): those may not carry moderation permissions at all."""
+        if role.is_default() or role.managed:
+            return "That role can't be given or removed by a bot."
+        if role >= interaction.guild.me.top_role:
+            return "That role is above (or equal to) my highest role."
+        if interaction.guild.owner_id != interaction.user.id and role >= interaction.user.top_role:
+            return "That role is above (or equal to) your highest role."
+        if automatic and self._role_is_elevated(role):
+            return "That role carries moderation permissions, so it can't be given out automatically."
+        return None
 
     def _appeal_note(self, guild: discord.Guild) -> str:
         """A line for ban DMs pointing at the appeal form, when this server
@@ -690,6 +706,9 @@ class Moderation(commands.Cog):
         if not hasattr(target, "slowmode_delay"):
             await self.bot.embeds.error_interaction(interaction, "Not Supported", "Slowmode can't be set on this kind of channel.", ephemeral=True)
             return
+        if not may_manage_channel(interaction, target):
+            await self.bot.embeds.error_interaction(interaction, "Missing Permissions", f"You need Manage Channel in {target.mention} to do that.", ephemeral=True)
+            return
         seconds = parse_slowmode(delay)
         if seconds is None:
             await self.bot.embeds.error_interaction(
@@ -975,6 +994,9 @@ class Moderation(commands.Cog):
                 interaction, "Not Lockable", "This only works on regular text channels - run it there or pass one explicitly.", ephemeral=True
             )
             return
+        if not may_manage_channel(interaction, target):
+            await self.bot.embeds.error_interaction(interaction, "Missing Permissions", f"You need Manage Channel in {target.mention} to do that.", ephemeral=True)
+            return
         everyone = interaction.guild.default_role
         overwrite = target.overwrites_for(everyone)
 
@@ -997,6 +1019,9 @@ class Moderation(commands.Cog):
             await self.bot.embeds.error_interaction(
                 interaction, "Not Unlockable", "This only works on regular text channels - run it there or pass one explicitly.", ephemeral=True
             )
+            return
+        if not may_manage_channel(interaction, target):
+            await self.bot.embeds.error_interaction(interaction, "Missing Permissions", f"You need Manage Channel in {target.mention} to do that.", ephemeral=True)
             return
         everyone = interaction.guild.default_role
         overwrite = target.overwrites_for(everyone)
@@ -1042,12 +1067,13 @@ class Moderation(commands.Cog):
     @app_commands.command(name="role", description="Add or remove a role for every non-bot member.")
     @app_commands.describe(action="add or remove", role="The role to apply")
     @app_commands.choices(action=ROLE_ACTION_CHOICES)
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def role(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role) -> None:
-        if role >= interaction.guild.me.top_role:
-            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "That role is above (or equal to) my highest role.", ephemeral=True)
+        problem = self._role_problem(interaction, role)
+        if problem:
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", problem, ephemeral=True)
             return
 
         adding = action.value == "add"
@@ -1076,7 +1102,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="autorole", description="Manage roles automatically assigned to new members.")
     @app_commands.describe(action="add, remove, or apply to everyone right now", role="The role (not needed for 'apply')")
     @app_commands.choices(action=AUTOROLE_ACTION_CHOICES)
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def autorole(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role | None = None) -> None:
@@ -1089,6 +1115,10 @@ class Moderation(commands.Cog):
                 return
             if role.id in autoroles:
                 await self.bot.embeds.warning_interaction(interaction, "Already An Autorole", f"{role.mention} is already an autorole.", ephemeral=True)
+                return
+            problem = self._role_problem(interaction, role, automatic=True)
+            if problem:
+                await self.bot.embeds.error_interaction(interaction, "Not Allowed", problem, ephemeral=True)
                 return
             autoroles.append(role.id)
             update_guild_settings(self.bot.storage_path, interaction.guild.id, {"autoroles": autoroles})
@@ -1113,9 +1143,9 @@ class Moderation(commands.Cog):
             return
 
         roles = [interaction.guild.get_role(rid) for rid in autoroles]
-        roles = [r for r in roles if r is not None and r < interaction.guild.me.top_role]
+        roles = [r for r in roles if r is not None and self._role_problem(interaction, r, automatic=True) is None]
         if not roles:
-            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "None of the configured autoroles are below my highest role.", ephemeral=True)
+            await self.bot.embeds.error_interaction(interaction, "Not Allowed", "None of the configured autoroles are ones I can give out for you.", ephemeral=True)
             return
 
         targets = [m for m in interaction.guild.members if not m.bot and any(r not in m.roles for r in roles)]
@@ -1166,6 +1196,19 @@ class Moderation(commands.Cog):
             await self.bot.embeds.info_interaction(interaction, "Nothing To Do", "No members matched that criteria.", ephemeral=True)
             return
 
+        # the same rank rules as /kick: nobody at or above the moderator, nobody the bot can't kick
+        matched = len(kick_list)
+        kick_list = [
+            m for m in kick_list
+            if m.id != interaction.guild.owner_id and m.top_role < interaction.guild.me.top_role and self._invoker_outranks(interaction, m)
+        ]
+        skipped = matched - len(kick_list)
+        if not kick_list:
+            await self.bot.embeds.error_interaction(
+                interaction, "Not Allowed", f"All {matched} matching member(s) are at or above your highest role, or mine.", ephemeral=True
+            )
+            return
+
         capped = kick_list[:MAX_MASS_ACTION_TARGETS]
         view = ConfirmView(author_id=interaction.user.id)
         await interaction.response.send_message(
@@ -1173,7 +1216,9 @@ class Moderation(commands.Cog):
                 "Confirm Prune",
                 f"About to kick **{len(capped)}** member(s) for {reason_label}"
                 + (f" (of {len(kick_list)} matched, capped at {MAX_MASS_ACTION_TARGETS})" if len(kick_list) > MAX_MASS_ACTION_TARGETS else "")
-                + ".\n\nThis cannot be undone.",
+                + "."
+                + (f"\n{skipped} more matched but are at or above your highest role, or mine, and will be left alone." if skipped else "")
+                + "\n\nThis cannot be undone.",
             ),
             view=view,
         )
@@ -1221,7 +1266,13 @@ class Moderation(commands.Cog):
 
         for role_id in settings.get("autoroles", []) or []:
             role = member.guild.get_role(role_id)
-            if role is not None and role < member.guild.me.top_role and role not in roles_to_add:
+            if (
+                role is not None
+                and role < member.guild.me.top_role
+                and not role.managed
+                and not self._role_is_elevated(role)  # an autorole saved before this was refused, or set from the website
+                and role not in roles_to_add
+            ):
                 roles_to_add.append(role)
 
         if not roles_to_add:
