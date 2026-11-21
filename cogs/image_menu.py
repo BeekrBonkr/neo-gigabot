@@ -330,6 +330,11 @@ class MoshPanel(discord.ui.View):
         self.reverse_button = discord.ui.Button(label="Reverse: off", style=discord.ButtonStyle.secondary, row=4)
         self.reverse_button.callback = self.toggle_reverse
         self.add_item(self.reverse_button)
+        # the fifth pick-one setting has no row left for a dropdown: a button that steps through its choices
+        self.sound = self.parameters["bitcrush"]
+        self.sound_button = discord.ui.Button(label=f"Sound: {self.sound.choices[0].name.lower()}", style=discord.ButtonStyle.secondary, row=4)
+        self.sound_button.callback = self.next_sound
+        self.add_item(self.sound_button)
 
     def current(self, name: str) -> object:
         """A setting as it stands: what was entered, or else the command's own default."""
@@ -355,6 +360,14 @@ class MoshPanel(discord.ui.View):
         self.values["reverse"] = not self.values.get("reverse", False)
         self.reverse_button.label = f"Reverse: {'on' if self.values['reverse'] else 'off'}"
         self.reverse_button.style = discord.ButtonStyle.success if self.values["reverse"] else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def next_sound(self, interaction: discord.Interaction) -> None:
+        values = [choice.value for choice in self.sound.choices]
+        picked = (values.index(self.values.get("bitcrush", values[0])) + 1) % len(values)
+        self.values["bitcrush"] = values[picked]
+        self.sound_button.label = f"Sound: {self.sound.choices[picked].name.lower()}"
+        self.sound_button.style = discord.ButtonStyle.success if picked else discord.ButtonStyle.secondary
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
     async def run(self, interaction: discord.Interaction) -> None:

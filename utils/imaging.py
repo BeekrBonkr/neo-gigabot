@@ -32,6 +32,7 @@ SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 # A lot of what Discord shows as a GIF is a short silent video: everything from
 # its GIF picker, and many uploads. These are turned into animated images on the way in.
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
+MEDIA_AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac")
 SOURCE_TTL_SECONDS = 60 * 15
 NO_HISTORY_MESSAGE = (
     "I can't look back through this channel for an image. Attach one to the command, "
@@ -254,6 +255,7 @@ class VideoJob:
     interaction: object = None
     frames: list[Image.Image] | None = None
     durations: list[int] | None = None
+    sound_filter: str | None = None  # an ffmpeg audio filter for the sound, set by the command
 
 
 _video_job: contextvars.ContextVar[VideoJob | None] = contextvars.ContextVar("video_job", default=None)
@@ -287,10 +289,12 @@ VIDEO_OUT_MAX_TICKS = 1500
 VIDEO_OUT_TIMEOUT_SECONDS = 45.0
 
 
-def frames_to_video(frames: list[Image.Image], durations: list[int], *, sound_from: bytes | None = None) -> bytes:
+def frames_to_video(frames: list[Image.Image], durations: list[int], *, sound_from: bytes | None = None,
+                    sound_filter: str | None = None) -> bytes:
     """The frames as an MP4 (H.264, plays in Discord and on phones), with the
     sound of the video `sound_from` laid under it from its start, cut to the
-    length of the frames. Transparent parts come out black."""
+    length of the frames, and run through the ffmpeg audio filter
+    `sound_filter` if there is one. Transparent parts come out black."""
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise ValueError("I can't make videos here.")
@@ -321,6 +325,8 @@ def frames_to_video(frames: list[Image.Image], durations: list[int], *, sound_fr
             # named outright, as when it was read: a crafted upload cannot point ffmpeg anywhere else
             command += ["-f", VIDEO_CONTAINERS[sound], "-i", str(original), "-map", "0:v:0", "-map", "1:a:0?",
                         "-c:a", "aac", "-b:a", "128k"]
+            if sound_filter:
+                command += ["-af", sound_filter]
         command += ["-t", f"{total_ms / 1000.0:.3f}", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-preset", "veryfast",
                     "-crf", "23", "-pix_fmt", "yuv420p", "-threads", "2", "-movflags", "+faststart", "-f", "mp4", str(target)]
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -344,6 +350,16 @@ def frames_to_video(frames: list[Image.Image], durations: list[int], *, sound_fr
             logging.getLogger(__name__).info("ffmpeg could not make a video: %s", (errors or b"").decode(errors="replace")[-300:])
             raise ValueError("I couldn't make that into a video.")
         return target.read_bytes()
+
+
+def set_video_sound_filter(audio_filter: str | None) -> bool:
+    """Have the running command's video come back with its sound put through
+    an ffmpeg audio filter. False when the command is not working on a video."""
+    job = _video_job.get()
+    if job is None:
+        return False
+    job.sound_filter = audio_filter
+    return True
 
 
 def current_video_source() -> bytes | None:
@@ -603,7 +619,7 @@ class ImageToolkit:
         data, filename = await self.finish_video(interaction, data, filename)
         file = discord.File(io.BytesIO(data), filename=filename)
         embed = self.bot.embeds.info_embed(title, description or f"Generated `{filename}`.")
-        if not filename.endswith(".mp4"):  # a video cannot go inside an embed: Discord shows it under it
+        if filename.lower().endswith(SUPPORTED_EXTENSIONS):  # video and sound cannot go inside an embed: Discord shows them under it
             embed.set_image(url=f"attachment://{filename}")
         await interaction.followup.send(embed=embed, file=file)
 
@@ -621,7 +637,9 @@ class ImageToolkit:
         # sped up, slowed down or cut short. A second of extra at the end is fine.
         fits = job.source_ms * 0.9 <= total <= job.source_ms + 1000
         try:
-            video = await self.run_cpu_bound(lambda: frames_to_video(frames, durations, sound_from=job.source if fits else None))
+            video = await self.run_cpu_bound(
+                lambda: frames_to_video(frames, durations, sound_from=job.source if fits else None, sound_filter=job.sound_filter)
+            )
         except ValueError:
             # no video after all: the GIF every other animated result gets
             return await self.run_cpu_bound(lambda: write_animation(frames, durations, keep_gif=True)), filename
@@ -731,6 +749,29 @@ class ImageToolkit:
 
     async def fetch_message_from_link(self, interaction: discord.Interaction, message_link: str) -> discord.Message:
         return await fetch_message_from_link(self.bot, message_link, hint_guild=interaction.guild)
+
+    async def get_media_source(
+        self, interaction: discord.Interaction, attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> tuple[bytes, str]:
+        """The video or audio file a sound command should work on, as it was
+        uploaded: the attachment, the linked message's, or the message the
+        Edit Image menu was opened on. Unlike get_source_image, nothing is
+        decoded and there is no looking back through the channel."""
+        if attachment is not None:
+            self._checked_attachment_size(attachment)
+            return await attachment.read(), attachment.filename
+        message = await self.fetch_message_from_link(interaction, message_link) if message_link else _pinned_message.get()
+        if message is None:
+            raise ValueError("Attach a video or an audio file, or give a link to a message that has one.")
+        for found in message.attachments:
+            kind, name = (found.content_type or "").lower(), found.filename.lower()
+            if kind.startswith(("video/", "audio/")) or name.endswith(VIDEO_EXTENSIONS + MEDIA_AUDIO_EXTENSIONS):
+                self._checked_attachment_size(found)
+                return await found.read(), found.filename
+        url = embed_image_url(message)
+        if url and urlparse(url).path.lower().endswith(VIDEO_EXTENSIONS):
+            return await self.fetch_bytes_from_url(url), "embedded_video" + Path(urlparse(url).path).suffix
+        raise ValueError("That message has no video or audio file in it.")
 
     def message_image_link(self, message: discord.Message) -> tuple[str, str] | None:
         """The link and filename of the picture extract_image_from_message would take."""

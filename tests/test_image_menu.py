@@ -240,6 +240,8 @@ def test_every_offered_command_runs_on_the_clicked_image(storage):
     async def body(harness):
         results = {}
         for name, command in harness.offered().items():
+            if name == "animate bitcrush":
+                continue  # needs a video or a sound file in the message: test_bitcrush clicks one
             harness.sent.clear(), harness.errors.clear()
             interaction, origin = FakeInteraction(), FakeInteraction()
             picker = EffectPicker(harness.cog, origin, message_with_image((160, 120), gif=name in NEEDS_A_GIF))
@@ -263,6 +265,7 @@ def test_every_offered_command_runs_on_the_clicked_image(storage):
 
     results = run(storage, body)
     log = "\n".join(path.read_text() for path in storage.rglob("*.log"))
+    assert len(results) >= 80
     for name, (sent, errors) in results.items():
         if name.rsplit(" ", 1)[-1] in image_menu.FACE_COMMANDS:
             # the test picture has no face in it: the command says so, in its own words

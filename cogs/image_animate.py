@@ -6,9 +6,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import audio_fx
 from utils import image_animate as an
 from utils import image_mosh as mosh
-from utils.imaging import encode_frames, load_frames
+from utils.imaging import encode_frames, load_frames, set_video_sound_filter
 
 SOURCE_HELP = {
     "attachment": "Optional image attachment.",
@@ -37,6 +38,16 @@ MOSH_CUTS = [
 MOSH_LENGTH = [
     app_commands.Choice(name="Keep the clip's length", value="keep"),
     app_commands.Choice(name="Stretch: melting adds frames", value="stretch"),
+]
+MOSH_SOUND = [
+    app_commands.Choice(name="Clean", value="clean"),
+    app_commands.Choice(name="Light crush", value="light"),
+    app_commands.Choice(name="Heavy crush", value="heavy"),
+    app_commands.Choice(name="Destroyed", value="destroyed"),
+]
+CRUSH_SHAPES = [
+    app_commands.Choice(name="Hard: even steps", value="lin"),
+    app_commands.Choice(name="Soft: finer steps where it is quiet", value="log"),
 ]
 
 
@@ -196,11 +207,12 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         motion="Smear follows what moves. Ghost leaves trails in place.",
         cuts="What happens where the scene changes.",
         length="Whether melting stretches the clip. Keeping the length keeps a video's sound.",
+        bitcrush="Bit crush a video's sound to go with the picture.",
         reverse="Mosh the clip played backward.",
         seed="The same seed gives the same shuffle again.",
         **SOURCE_HELP,
     )
-    @app_commands.choices(block_size=MOSH_BLOCKS, motion=MOSH_MOTION, cuts=MOSH_CUTS, length=MOSH_LENGTH)
+    @app_commands.choices(block_size=MOSH_BLOCKS, motion=MOSH_MOTION, cuts=MOSH_CUTS, length=MOSH_LENGTH, bitcrush=MOSH_SOUND)
     @app_commands.checks.cooldown(1, 8.0)
     async def datamosh(
         self, interaction: discord.Interaction,
@@ -211,6 +223,7 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
         blockiness: app_commands.Range[int, 1, 31] = 5,
         block_size: app_commands.Choice[str] | None = None, motion: app_commands.Choice[str] | None = None,
         cuts: app_commands.Choice[str] | None = None, length: app_commands.Choice[str] | None = None,
+        bitcrush: app_commands.Choice[str] | None = None,
         reverse: bool = False, seed: app_commands.Range[int, 0, 999999] | None = None,
         attachment: discord.Attachment | None = None, message_link: str | None = None,
     ) -> None:
@@ -224,17 +237,52 @@ class ImageAnimate(commands.GroupCog, group_name="animate", group_description="T
             reverse=reverse, seed=seed if seed is not None else random.randrange(1000000),
         )
 
+        crush = bitcrush.value if bitcrush and bitcrush.value != "clean" else None
+
         def work(image_bytes: bytes, filename: str, *more: bytes) -> tuple[bytes, str, str]:
             clip = load_frames(image_bytes, filename, max_edge=mosh.MOSH_MAX_EDGE)
             second = load_frames(more[0], max_edge=mosh.MOSH_MAX_EDGE) if more else None
             frames, durations = mosh.datamosh(clip, settings, second)
+            summary = f"Melt {melt} every {every} frames · blockiness {blockiness} · seed {settings.seed}"
+            if crush and set_video_sound_filter(audio_fx.crush_filter(*audio_fx.CRUSH_PRESETS[crush])):
+                summary += f" · sound: {bitcrush.name.lower()}"  # only said when there is a video, and so a sound, to crush
             data, out_name = encode_frames(frames, durations, "datamosh", loop=clip.loop)
-            return data, out_name, f"Melt {melt} every {every} frames · blockiness {blockiness} · seed {settings.seed}"
+            return data, out_name, summary
 
         await self.bot.image_tools.run_image_command(
             interaction, "datamosh", "Datamoshed", work, attachment=attachment, message_link=message_link,
             extra_sources=[(into, None)] if into is not None else None,
         )
+
+    @app_commands.command(name="bitcrush", description="Bit crush the sound of a video or an audio file. The picture is left as it is.")
+    @app_commands.describe(
+        bits="Bits left for each sample. Fewer is fizzier: 8 is an old console, 3 is rubble.",
+        downsample="How many samples become one. More is more metallic and muffled.",
+        mix="Percent of crushed sound against the original.",
+        shape="How the steps are spaced. Soft keeps quiet sounds that hard steps would round down to silence.",
+        drive="Decibels of boost going in, for more distortion. The result is kept from getting louder.",
+        attachment="A video or an audio file.",
+        message_link="Or a link to a message that has one.",
+    )
+    @app_commands.choices(shape=CRUSH_SHAPES)
+    @app_commands.checks.cooldown(1, 8.0)
+    async def bitcrush(
+        self, interaction: discord.Interaction,
+        bits: app_commands.Range[int, 2, 16] = 6, downsample: app_commands.Range[int, 1, 100] = 8,
+        mix: app_commands.Range[int, 1, 100] = 100, shape: app_commands.Choice[str] | None = None,
+        drive: app_commands.Range[int, 0, 30] = 0,
+        attachment: discord.Attachment | None = None, message_link: str | None = None,
+    ) -> None:
+        crush = audio_fx.crush_filter(bits, downsample, shape.value if shape else "lin", mix=mix, drive=drive)
+
+        def work(media: bytes, filename: str) -> tuple[bytes, str, str]:
+            data, extension = audio_fx.apply_audio_filter(media, crush)
+            return data, f"bitcrushed.{extension}", f"{bits} bits · every {downsample} samples become one · {mix}% crushed"
+
+        async def media() -> tuple[bytes, str]:
+            return await self.bot.image_tools.get_media_source(interaction, attachment, message_link)
+
+        await self.bot.image_tools.run_image_command(interaction, "bitcrush", "Bit Crushed", work, source=media)
 
     @app_commands.command(name="togif", description="Join two to six images, GIFs or videos into one looping GIF.")
     @app_commands.describe(

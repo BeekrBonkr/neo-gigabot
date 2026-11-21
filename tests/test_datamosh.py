@@ -141,7 +141,7 @@ def test_the_right_click_panel_sets_things_up_and_runs_the_command(storage):
         assert isinstance(panel, MoshPanel) and opened.response.sent[0]["ephemeral"] is True
         # four dropdowns, one for each pick-one setting, and a row of buttons
         assert [type(item).__name__ for item in panel.children].count("MoshChoice") == 4
-        assert [item.label for item in panel.children if hasattr(item, "label")] == ["Mosh", "Amounts", "Range and seed", "Reverse: off"]
+        assert [item.label for item in panel.children if hasattr(item, "label")] == ["Mosh", "Amounts", "Range and seed", "Reverse: off", "Sound: clean"]
         assert "melt **6**" in panel.embed().description and "seed **random**" in panel.embed().description
 
         edits = []
@@ -178,6 +178,10 @@ def test_the_right_click_panel_sets_things_up_and_runs_the_command(storage):
         chunky._values = ["chunky"]
         await chunky.callback(press())
         await panel.toggle_reverse(press())
+        for expected in ("light crush", "heavy crush", "destroyed", "clean", "light crush"):  # steps through, and round again
+            await panel.next_sound(press())
+            assert panel.sound_button.label == f"Sound: {expected}"
+        assert panel.values["bitcrush"] == "light"
         assert panel.values["block_size"] == "chunky" and panel.values["reverse"] is True and panel.reverse_button.label == "Reverse: on"
         assert [option.default for option in chunky.options] == [False, False, True]
 
