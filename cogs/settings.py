@@ -51,6 +51,7 @@ MOD_LOG_EVENT_LABELS = {
 UNBLOCKABLE_COMMAND_NAMES = {"settings"}
 UNBLOCKABLE_BUCKETS = {"Owner", "Settings"}
 MAX_SELECT_OPTIONS = 25
+OTHER_BUCKET = "Other"
 
 
 def _iter_leaf_commands(
@@ -83,8 +84,19 @@ def _blockable_command_pages(bot: commands.Bot) -> list[tuple[str, list[app_comm
             continue
         buckets.setdefault(label, []).extend(c for c in leaves if c.name not in UNBLOCKABLE_COMMAND_NAMES)
 
+    # The pages are themselves options of one dropdown, so there can be at most 25 of them.
+    # Small groups share an "Other" page, smallest first, until the pages fit.
+    def page_count() -> int:
+        return sum(max(1, -(-len({c.qualified_name for c in commands_}) // MAX_SELECT_OPTIONS)) for commands_ in buckets.values())
+
+    while page_count() > MAX_SELECT_OPTIONS:
+        smallest = min((label for label in buckets if label != OTHER_BUCKET), key=lambda label: (len(buckets[label]), label), default=None)
+        if smallest is None:
+            break
+        buckets.setdefault(OTHER_BUCKET, []).extend(buckets.pop(smallest))
+
     pages: list[tuple[str, list[app_commands.Command]]] = []
-    for label in sorted(buckets):
+    for label in sorted(buckets, key=lambda label: (label == OTHER_BUCKET, label)):
         seen: set[str] = set()
         unique = [c for c in sorted(buckets[label], key=lambda c: c.qualified_name) if not (c.qualified_name in seen or seen.add(c.qualified_name))]
         chunks = [unique[i : i + MAX_SELECT_OPTIONS] for i in range(0, len(unique), MAX_SELECT_OPTIONS)]
