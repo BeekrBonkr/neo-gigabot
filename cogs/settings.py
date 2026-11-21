@@ -474,8 +474,27 @@ class SettingsDashboardView(discord.ui.View):
         )
 
         async def _on_autoroles(interaction: discord.Interaction) -> None:
-            update_guild_settings(self.bot.storage_path, self.guild_id, {"autoroles": [r.id for r in autorole_select.values]})
+            # the rules /autorole add applies: nothing at or above the admin's own rank or the bot's,
+            # nothing managed, and nothing that carries moderation permissions
+            guild, user = interaction.guild, interaction.user
+            elevated = discord.Permissions.elevated().value
+            allowed = [
+                r for r in autorole_select.values
+                if not r.is_default() and not r.managed and not (r.permissions.value & elevated)
+                and r < guild.me.top_role and (guild.owner_id == user.id or r < user.top_role)
+            ]
+            update_guild_settings(self.bot.storage_path, self.guild_id, {"autoroles": [r.id for r in allowed]})
             await self.refresh(interaction)
+            refused = len(autorole_select.values) - len(allowed)
+            if refused:
+                await interaction.followup.send(
+                    embed=self.bot.embeds.warning_embed(
+                        "Some Roles Were Left Out",
+                        f"{refused} role(s) can't be autoroles: they are at or above your highest role or mine, "
+                        "are managed by an integration, or carry moderation permissions.",
+                    ),
+                    ephemeral=True,
+                )
 
         autorole_select.callback = _on_autoroles
         self.add_item(autorole_select)

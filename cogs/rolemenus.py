@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import rolemenus as store
+from utils.checks import server_permissions
 from utils.modules import module_enabled
 
 LOGGER = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ class RoleMenus(commands.Cog):
         style=[app_commands.Choice(name="Buttons", value="buttons"), app_commands.Choice(name="Dropdown", value="dropdown")],
         mode=[app_commands.Choice(name="Any number of these roles", value="multiple"), app_commands.Choice(name="Only one of these roles", value="single")],
     )
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     async def create(self, interaction: discord.Interaction, roles: str, title: app_commands.Range[str, 1, 200] = "Pick your roles",
                      style: app_commands.Choice[str] | None = None, mode: app_commands.Choice[str] | None = None,
@@ -153,7 +154,7 @@ class RoleMenus(commands.Cog):
         style=[app_commands.Choice(name="Buttons", value="buttons"), app_commands.Choice(name="Dropdown", value="dropdown")],
         mode=[app_commands.Choice(name="Any number of these roles", value="multiple"), app_commands.Choice(name="Only one of these roles", value="single")],
     )
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     async def edit(self, interaction: discord.Interaction, menu_id: int, roles: str | None = None, title: app_commands.Range[str, 1, 200] | None = None,
                    description: app_commands.Range[str, 1, 1000] | None = None, style: app_commands.Choice[str] | None = None,
@@ -175,7 +176,7 @@ class RoleMenus(commands.Cog):
         )
 
     @rolemenu.command(name="list", description="List this server's role menus.")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     async def list_menus(self, interaction: discord.Interaction) -> None:
         menus = store.list_menus(self.bot.storage_path, interaction.guild.id)
         lines = [
@@ -186,7 +187,7 @@ class RoleMenus(commands.Cog):
 
     @rolemenu.command(name="delete", description="Delete a role menu and its message.")
     @app_commands.describe(menu_id="The menu's number, shown in /rolemenu list")
-    @app_commands.checks.has_permissions(manage_roles=True)
+    @server_permissions(manage_roles=True)
     async def delete(self, interaction: discord.Interaction, menu_id: int) -> None:
         menu = store.delete_menu(self.bot.storage_path, interaction.guild.id, menu_id)
         if menu is None:
