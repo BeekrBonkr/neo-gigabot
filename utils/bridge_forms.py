@@ -277,8 +277,8 @@ class FormsRoutes:
         the spreadsheet), and what they add up to."""
         guild = self._guild(request)
         user_id = self._user_id(request, request.query.get("user_id", ""))
-        self._site_access(guild, "forms", "view", user_id)
         form = self._form(guild, request.match_info["form"])
+        self._site_access(guild, ("forms", "moderation") if form["kind"] == forms.APPEAL else "forms", "view", user_id)
         everything = request.query.get("all") == "1"
         page = int(request.query.get("page", "1")) if is_digits(request.query.get("page", "1")) else 1
         status = str(request.query.get("status", ""))
@@ -288,7 +288,8 @@ class FormsRoutes:
         )
         return web.json_response({
             "form": {**self._summary_line(form), "items": form["items"], "options": form["options"]},
-            "can_manage": self._staff(guild, user_id, "manage"), "responses": [self._for_staff(form, response) for response in found],
+            "can_manage": self._staff(guild, user_id, "manage") or (form["kind"] == forms.APPEAL and self._member_access(guild, user_id)["access"]["moderation"]["manage"]),
+            "responses": [self._for_staff(form, response) for response in found],
             "total": total, "page": page, "per_page": RESPONSES_PER_PAGE,
             "summary": forms.summary(self.storage, form) if request.query.get("summary") == "1" else None,
         })
@@ -297,8 +298,9 @@ class FormsRoutes:
         """approve, deny or remove a response. For whoever manages the Forms area."""
         guild = self._guild(request)
         body = await self._json(request)
-        member = self._site_access(guild, "forms", "manage", self._user_id(request, str(body.get("user_id", ""))))
         form = self._form(guild, request.match_info["form"])
+        member = self._site_access(guild, ("forms", "moderation") if form["kind"] == forms.APPEAL else "forms", "manage",
+                                   self._user_id(request, str(body.get("user_id", ""))))
         action, raw = str(body.get("action", "")), str(body.get("response_id", ""))
         if not is_digits(raw):
             raise self.Error(400, "A response ID is required.")
