@@ -97,6 +97,40 @@ def _format_options(interaction: discord.Interaction) -> str:
     return ", ".join(items)
 
 
+# How a line says where a command was run. A server that has the bot is written
+# with its name and ID. People who added the bot to their own account can also
+# run it in a server that has not added it, where Discord tells the bot the
+# server's ID and nothing else, and in private chats between people. Both get a
+# form no real server can have: a server's name is never empty, and a server
+# always comes with an ID. The web panel reads these (panel/cmdlog.py).
+OUTSIDE_SERVER_NAME = ""  # guild= (123) channel=#unknown (456)
+PRIVATE_CHAT = "PRIVATE"  # guild=PRIVATE
+BOT_DM = "DM"  # guild=DM
+
+
+def _location(interaction: discord.Interaction) -> str:
+    guild = interaction.guild
+    if guild is not None:
+        try:
+            is_home = bool(interaction.is_guild_integration())
+        except Exception:  # noqa: BLE001 - an interaction that cannot say is taken at its word
+            is_home = True
+        channel_name = getattr(interaction.channel, "name", None) or "unknown"
+        name = guild.name if is_home else OUTSIDE_SERVER_NAME
+        return f"guild={name} ({guild.id}) channel=#{channel_name} ({interaction.channel_id})"
+    context = getattr(interaction, "context", None)
+    return f"guild={PRIVATE_CHAT}" if getattr(context, "private_channel", False) else f"guild={BOT_DM}"
+
+
+def place_label(guild: str) -> str:
+    """A log line's guild field as a person would say it."""
+    if guild == PRIVATE_CHAT:
+        return "Personal app (private chats)"
+    if guild.startswith(" ("):
+        return "Personal app (servers without the bot)"
+    return guild
+
+
 def format_entry(
     interaction: discord.Interaction,
     command: app_commands.Command | app_commands.ContextMenu | app_commands.Group | None,
@@ -106,14 +140,7 @@ def format_entry(
 ) -> str:
     timestamp = discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    if interaction.guild is not None:
-        channel_name = getattr(interaction.channel, "name", None) or "unknown"
-        location = (
-            f"guild={interaction.guild.name} ({interaction.guild.id}) "
-            f"channel=#{channel_name} ({interaction.channel_id})"
-        )
-    else:
-        location = "guild=DM"
+    location = _location(interaction)
 
     name = getattr(command, "qualified_name", None) or "unknown"
     options = _format_options(interaction)
@@ -201,7 +228,7 @@ def summarize_log(path: Path) -> CommandLogStats:
             stats.by_command[entry["command"]] += 1
             stats.by_status[entry.get("status", "UNKNOWN")] += 1
             stats.by_user[entry.get("user", "unknown")] += 1
-            stats.by_guild[entry.get("guild", "unknown")] += 1
+            stats.by_guild[place_label(entry.get("guild", "unknown"))] += 1
     return stats
 
 

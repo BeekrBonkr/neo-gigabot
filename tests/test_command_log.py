@@ -86,3 +86,40 @@ def test_summarize_log_counts(storage: Path) -> None:
     assert stats.by_status == {"OK": 3, "ERROR": 1}
     assert stats.by_user["alice (1)"] == 3
     assert stats.by_guild == {"My Server (123)": 3, "DM": 1}
+
+
+def test_a_line_says_whether_the_command_ran_in_a_server_with_the_bot() -> None:
+    from types import SimpleNamespace as NS
+
+    from utils.command_log import format_entry, parse_entry, place_label
+
+    user = type("U", (), {"id": 42, "__str__": lambda self: "robin"})()
+    command = NS(qualified_name="filter invert")
+
+    def run(guild=None, home=True, private=False):
+        return format_entry(NS(guild=guild, channel=NS(name="general"), channel_id=7, user=user, namespace=NS(), data={},
+                               is_guild_integration=lambda: home, context=NS(private_channel=private)), command)
+
+    home = run(NS(name="My Server", id=123))
+    outside = run(NS(name="", id=555), home=False)          # the bot is told this server's ID and nothing else
+    named = run(NS(name="Spoofed Name", id=555), home=False)  # and a name is never taken from a server it is not in
+    private, dm = run(private=True), run()
+    assert "guild=My Server (123) channel=#general (7)" in home
+    assert "guild= (555) channel=#general (7)" in outside and "guild= (555)" in named
+    assert "| guild=PRIVATE |" in private and "| guild=DM |" in dm
+    labels = [place_label(parse_entry(line)["guild"]) for line in (home, outside, private, dm)]
+    assert labels == ["My Server (123)", "Personal app (servers without the bot)", "Personal app (private chats)", "DM"]
+
+
+def test_the_days_summary_groups_personal_app_use(storage: Path) -> None:
+    from utils.command_log import summarize_log
+
+    path = storage / "day.log"
+    path.write_text(
+        "2026-07-08 12:00:00 UTC | guild= (555) channel=#unknown (7) | user=a (1) | command=/filter invert | status=OK\n"
+        "2026-07-08 12:00:01 UTC | guild= (556) channel=#unknown (8) | user=a (1) | command=/filter invert | status=OK\n"
+        "2026-07-08 12:00:02 UTC | guild=PRIVATE | user=a (1) | command=/roll | status=OK\n"
+        "2026-07-08 12:00:03 UTC | guild=DM | user=a (1) | command=/roll | status=OK\n",
+        encoding="utf-8",
+    )
+    assert dict(summarize_log(path).by_guild) == {"Personal app (servers without the bot)": 2, "Personal app (private chats)": 1, "DM": 1}
