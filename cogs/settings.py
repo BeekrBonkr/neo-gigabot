@@ -1261,6 +1261,7 @@ class Settings(commands.Cog):
 
     @app_commands.command(name="settings", description="Open the interactive server settings dashboard.")
     @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def settings_dashboard(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:

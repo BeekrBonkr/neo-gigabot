@@ -72,6 +72,7 @@ class Stickies(commands.Cog):
     @app_commands.command(name="stick", description="Stick a message to the bottom of this channel (or replace the one there).")
     @app_commands.describe(message="The text to keep at the bottom. Type \\n for a new line")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def stick(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, store.MAX_CONTENT_LENGTH]) -> None:
         await self._stick(interaction, message, embed=False, slow=False)
@@ -79,6 +80,7 @@ class Stickies(commands.Cog):
     @app_commands.command(name="stickembed", description="Stick a message to this channel as an embed.")
     @app_commands.describe(message="The text to keep at the bottom. Type \\n for a new line")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.checks.bot_has_permissions(embed_links=True)
     @app_commands.guild_only()
     async def stickembed(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, store.MAX_CONTENT_LENGTH]) -> None:
@@ -87,12 +89,14 @@ class Stickies(commands.Cog):
     @app_commands.command(name="stickslow", description="Stick a message that is re-posted less often, for busy channels.")
     @app_commands.describe(message="The text to keep at the bottom. Type \\n for a new line")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def stickslow(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, store.MAX_CONTENT_LENGTH]) -> None:
         await self._stick(interaction, message, embed=False, slow=True)
 
     @app_commands.command(name="stickstop", description="Stop the sticky in this channel. /stickstart brings it back.")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def stickstop(self, interaction: discord.Interaction) -> None:
         sticky = store.set_active(self.bot.storage_path, interaction.channel.id, False)
@@ -103,6 +107,7 @@ class Stickies(commands.Cog):
 
     @app_commands.command(name="stickstart", description="Restart this channel's stopped sticky with its previous message.")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def stickstart(self, interaction: discord.Interaction) -> None:
         sticky = store.set_active(self.bot.storage_path, interaction.channel.id, True)
@@ -114,6 +119,7 @@ class Stickies(commands.Cog):
 
     @app_commands.command(name="stickremove", description="Stop and delete the sticky in this channel.")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def stickremove(self, interaction: discord.Interaction) -> None:
         sticky = store.remove(self.bot.storage_path, interaction.channel.id)
@@ -130,6 +136,7 @@ class Stickies(commands.Cog):
 
     @app_commands.command(name="getstickies", description="List the stickies in this server.")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def getstickies(self, interaction: discord.Interaction) -> None:
         stickies = store.list_for_guild(self.bot.storage_path, interaction.guild.id)

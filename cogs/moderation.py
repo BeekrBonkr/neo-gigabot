@@ -442,6 +442,7 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="say", description="Send an embed containing your message.")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def say(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 4000]) -> None:
         embed = self.bot.embeds.create(
@@ -455,6 +456,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="kick", description="Kick a member from the server.")
     @app_commands.describe(user="Member to kick", reason="Reason (shown to the member and in the audit log)")
     @app_commands.checks.has_permissions(kick_members=True)
+    @app_commands.default_permissions(kick_members=True)
     @app_commands.checks.bot_has_permissions(kick_members=True)
     @app_commands.guild_only()
     async def kick(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
@@ -497,6 +499,7 @@ class Moderation(commands.Cog):
         delete_message_days="Delete this many days of their recent messages (0-7, default 0)",
     )
     @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.default_permissions(ban_members=True)
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
     async def ban(
@@ -552,6 +555,7 @@ class Moderation(commands.Cog):
         delete_message_days="Delete this many days of their recent messages (0-7, default 0)",
     )
     @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.default_permissions(ban_members=True)
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
     async def tempban(
@@ -618,6 +622,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="unban", description="Unban a user by their ID.")
     @app_commands.describe(user_id="The banned user's ID", reason="Optional reason")
     @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.default_permissions(ban_members=True)
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
     async def unban(self, interaction: discord.Interaction, user_id: str, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
@@ -656,6 +661,7 @@ class Moderation(commands.Cog):
         delete_message_days="Delete this many days of their recent messages (1-7, default 1)",
     )
     @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.default_permissions(ban_members=True)
     @app_commands.checks.bot_has_permissions(ban_members=True)
     @app_commands.guild_only()
     async def softban(
@@ -718,6 +724,7 @@ class Moderation(commands.Cog):
         channel="Channel to change (defaults to the current channel)",
     )
     @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.default_permissions(manage_channels=True)
     @app_commands.checks.bot_has_permissions(manage_channels=True)
     @app_commands.guild_only()
     async def slowmode(self, interaction: discord.Interaction, delay: str, channel: discord.TextChannel | None = None) -> None:
@@ -747,6 +754,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="mute", description="Temporarily prevent a member from sending messages or speaking.")
     @app_commands.describe(user="Member to mute", duration="e.g. 10m, 2h, 1d (max 28 days)", reason="Optional reason")
     @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.default_permissions(moderate_members=True)
     @app_commands.checks.bot_has_permissions(moderate_members=True)
     @app_commands.guild_only()
     async def mute(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
@@ -792,6 +800,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="unmute", description="Remove an active mute from a member.")
     @app_commands.describe(user="Member to unmute", reason="Optional reason")
     @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.default_permissions(moderate_members=True)
     @app_commands.checks.bot_has_permissions(moderate_members=True)
     @app_commands.guild_only()
     async def unmute(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH] | None = None) -> None:
@@ -817,6 +826,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="warn", description="Issue a warning to a member.")
     @app_commands.describe(user="Member to warn", reason="Reason for the warning")
     @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.default_permissions(moderate_members=True)
     @app_commands.guild_only()
     async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, MAX_REASON_LENGTH]) -> None:
         if user.id == interaction.user.id:
@@ -938,6 +948,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="nick", description="Change the bot's nickname in this server.")
     @app_commands.describe(nickname="New nickname (leave empty to reset)")
     @app_commands.checks.has_permissions(manage_nicknames=True)
+    @app_commands.default_permissions(manage_nicknames=True)
     @app_commands.checks.bot_has_permissions(change_nickname=True)
     @app_commands.guild_only()
     async def nick(self, interaction: discord.Interaction, nickname: app_commands.Range[str, 0, 32] | None = None) -> None:
@@ -986,6 +997,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="purge", description="Bulk-delete recent messages in this channel.")
     @app_commands.describe(count="How many messages to delete (max 100)")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.checks.bot_has_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def purge(self, interaction: discord.Interaction, count: app_commands.Range[int, 1, 100]) -> None:
@@ -1000,6 +1012,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="clean", description="Delete this bot's own recent messages in this channel.")
     @app_commands.describe(count="How many of the bot's messages to look through (max 200)")
     @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.checks.bot_has_permissions(manage_messages=True)
     @app_commands.guild_only()
     async def clean(self, interaction: discord.Interaction, count: app_commands.Range[int, 1, 200] = 50) -> None:
@@ -1013,6 +1026,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="lock", description="Prevent @everyone from sending messages in a channel.")
     @app_commands.describe(channel="Channel to lock (defaults to the current channel)")
     @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.default_permissions(manage_channels=True)
     @app_commands.checks.bot_has_permissions(manage_channels=True)
     @app_commands.guild_only()
     async def lock(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None) -> None:
@@ -1039,6 +1053,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="unlock", description="Allow @everyone to send messages in a channel again.")
     @app_commands.describe(channel="Channel to unlock (defaults to the current channel)")
     @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.default_permissions(manage_channels=True)
     @app_commands.checks.bot_has_permissions(manage_channels=True)
     @app_commands.guild_only()
     async def unlock(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None) -> None:
@@ -1096,6 +1111,7 @@ class Moderation(commands.Cog):
     @app_commands.describe(action="add or remove", role="The role to apply")
     @app_commands.choices(action=ROLE_ACTION_CHOICES)
     @server_permissions(manage_roles=True)
+    @app_commands.default_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def role(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role) -> None:
@@ -1131,6 +1147,7 @@ class Moderation(commands.Cog):
     @app_commands.describe(action="add, remove, or apply to everyone right now", role="The role (not needed for 'apply')")
     @app_commands.choices(action=AUTOROLE_ACTION_CHOICES)
     @server_permissions(manage_roles=True)
+    @app_commands.default_permissions(manage_roles=True)
     @app_commands.checks.bot_has_permissions(manage_roles=True)
     @app_commands.guild_only()
     async def autorole(self, interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role | None = None) -> None:
@@ -1198,6 +1215,7 @@ class Moderation(commands.Cog):
     )
     @app_commands.choices(mode=PRUNE_MODE_CHOICES)
     @app_commands.checks.has_permissions(kick_members=True)
+    @app_commands.default_permissions(kick_members=True)
     @app_commands.checks.bot_has_permissions(kick_members=True)
     @app_commands.guild_only()
     async def prune(self, interaction: discord.Interaction, mode: app_commands.Choice[str], role: discord.Role | None = None) -> None:

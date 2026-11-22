@@ -31,6 +31,7 @@ class Cases(commands.Cog):
     @app_commands.command(name="modhistory", description="Show a member's moderation history and moderator notes.")
     @app_commands.describe(user="Whose history to show")
     @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.default_permissions(moderate_members=True)
     @app_commands.guild_only()
     async def modhistory(self, interaction: discord.Interaction, user: discord.User) -> None:
         storage, guild_id = self.bot.storage_path, interaction.guild.id
