@@ -83,7 +83,7 @@ class FormsRoutes:
         """A response as staff see it. Who sent it is left out of an anonymous form's."""
         hidden = form["options"]["anonymous"] and not response["test"]
         return {
-            "id": response["id"], "status": response["status"], "test": bool(response["test"]), "answers": response["answers"],
+            "id": response["id"], "number": response.get("number") or 0, "status": response["status"], "test": bool(response["test"]), "answers": response["answers"],
             "created_at": response["created_at"], "updated_at": response["updated_at"], "decided_at": response["decided_at"],
             "decided_by": str(response["decided_by"]) if response["decided_by"] else None, "decision_note": response["decision_note"],
             "thread_id": str(response["thread_id"]) if response["thread_id"] and not hidden else None,
