@@ -123,3 +123,12 @@ def test_the_store_makes_each_sample_once_from_the_bots_own_picture():
         assert len(reads) == 1
 
     asyncio.run(run())
+
+
+def test_a_command_that_changes_only_the_sound_has_no_example():
+    from cogs.image_animate import ImageAnimate
+
+    cog = ImageAnimate(SimpleNamespace())
+    by_name = {command.qualified_name: command for command in cog.walk_app_commands()}
+    assert not samples.can_sample(by_name["animate bitcrush"])   # its result is a sound: nothing to show in a picture
+    assert samples.can_sample(by_name["animate datamosh"])
