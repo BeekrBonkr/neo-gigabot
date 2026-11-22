@@ -57,7 +57,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
             "nick", "poll", "say", "modhistory", "note", "softban", "slowmode", "lockdown", "verification", "honeypot",
         ],
     ),
-    ("community", "💬", "Community", ["suggest", "suggestion", "tag", "tags", "schedule", "stick", "stickembed", "stickslow", "stickstop", "stickstart", "stickremove", "getstickies"]),
+    ("community", "💬", "Community", ["suggest", "suggestion", "tag", "tags", "form", "schedule", "stick", "stickembed", "stickslow", "stickstop", "stickstart", "stickremove", "getstickies"]),
     ("reactionroles", "🎭", "Reaction Roles & Role Menus", ["reactionrole", "rolemenu"]),
     ("settings", "⚙️", "Server Settings", ["settings"]),
     ("info", "ℹ️", "Info & Support", ["about", "whatsnew", "userinfo", "feedback"]),

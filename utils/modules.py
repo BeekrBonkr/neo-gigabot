@@ -32,6 +32,7 @@ MODULES: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "starboard": ("starboard_enabled", "Starboard", ()),
     "music": ("music_enabled", "Music", ("music", "playlist")),
     "tags": ("tags_enabled", "Tags", ("tag", "tags")),
+    "forms": ("forms_enabled", "Forms", ("form",)),
     "stickies": ("stickies_enabled", "Sticky messages", ("stick", "stickembed", "stickslow", "stickstop", "stickstart", "stickremove", "getstickies")),
     "rolemenus": ("rolemenus_enabled", "Role menus", ("rolemenu",)),
     "reactionroles": ("reactionroles_enabled", "Reaction roles", ("reactionrole",)),

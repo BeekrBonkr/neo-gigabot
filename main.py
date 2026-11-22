@@ -42,6 +42,7 @@ COGS = [
     "cogs.honeypot",
     "cogs.suggestions",
     "cogs.tags",
+    "cogs.forms",
     "cogs.tempvoice",
     "cogs.schedules",
     "cogs.stickies",

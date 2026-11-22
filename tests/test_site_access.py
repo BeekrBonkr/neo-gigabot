@@ -19,7 +19,7 @@ OWNER, ADMIN, MOD, HELPER, MEMBER = 1, 4, 5, 6, 7
 
 
 def test_every_area_needs_administrator_until_an_admin_chooses_otherwise():
-    assert all(DEFAULT_GUILD_SETTINGS[key] == "administrator" for key in site_access.KEYS) and len(site_access.KEYS) == 9
+    assert all(DEFAULT_GUILD_SETTINGS[key] == "administrator" for key in site_access.KEYS) and len(site_access.KEYS) == 11
     moderator = discord.Permissions(moderate_members=True, ban_members=True, manage_guild=True)
     locked = site_access.access_for(moderator, dict(DEFAULT_GUILD_SETTINGS))
     assert locked == site_access.no_access()
