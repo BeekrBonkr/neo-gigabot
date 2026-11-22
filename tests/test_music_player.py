@@ -340,3 +340,54 @@ def test_playlist_entries_become_songs_and_unsafe_links_are_dropped() -> None:
     assert flat_entry_to_song({"url": "https://evil.example/x", "title": "x"}) is None
     assert flat_entry_to_song({"url": "file:///etc/passwd"}) is None
     assert track_key("https://youtu.be/abc?t=3") == track_key("https://music.youtube.com/watch?v=abc") == "yt:abc"
+
+
+def _voice_channel(*, view=True, connect=True, move=False, limit=0, members=0):
+    permissions = SimpleNamespace(view_channel=view, connect=connect, move_members=move)
+    return SimpleNamespace(
+        mention="#General", user_limit=limit, members=[object()] * members, permissions_for=lambda _me: permissions
+    )
+
+
+def test_join_is_refused_with_a_reason_when_the_bot_lacks_permission_or_the_channel_is_full() -> None:
+    guild = SimpleNamespace(me=object())
+    Music.check_can_join(guild, _voice_channel())
+    Music.check_can_join(guild, _voice_channel(limit=2, members=1))
+    Music.check_can_join(guild, _voice_channel(limit=2, members=2, move=True))
+    with pytest.raises(RuntimeError, match="I need Connect there"):
+        Music.check_can_join(guild, _voice_channel(connect=False))
+    with pytest.raises(RuntimeError, match="View Channel and Connect"):
+        Music.check_can_join(guild, _voice_channel(view=False, connect=False))
+    with pytest.raises(RuntimeError, match="is full"):
+        Music.check_can_join(guild, _voice_channel(limit=2, members=2))
+
+
+def test_a_join_that_times_out_clears_the_unfinished_connection(monkeypatch) -> None:
+    import cogs.music as music_module
+
+    monkeypatch.setattr(music_module, "VOICE_CONNECT_TIMEOUT_SECONDS", 0.01)
+    cleared = []
+
+    async def disconnect(force=False):
+        cleared.append(force)
+        guild.voice_client = None
+
+    async def connect(self_deaf=False):
+        guild.voice_client = SimpleNamespace(disconnect=disconnect)
+        await asyncio.get_running_loop().create_future()  # Discord never answers
+
+    guild = SimpleNamespace(id=GUILD_ID, me=object(), voice_client=None)
+    channel = _voice_channel()
+    channel.connect = connect
+
+    async def scenario():
+        cog = Music.__new__(Music)
+        cog._connect_locks = {}
+        cog._get_connect_lock = lambda _gid: asyncio.Lock()
+        cog.get_state = lambda _gid: SimpleNamespace(text_channel_id=None)
+        cog.reset_session_volume = lambda _gid: None
+        with pytest.raises(RuntimeError, match="Timed out"):
+            await cog.connect_to_channel(guild, channel)
+
+    asyncio.run(scenario())
+    assert cleared == [True] and guild.voice_client is None
