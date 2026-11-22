@@ -127,3 +127,74 @@ def test_whatsnew_sums_up_then_shows_one_command_a_page_with_its_sample(monkeypa
         assert "Nothing new" in (await cog.build_whats_new(3))[0].description
 
     asyncio.run(run())
+
+
+def test_help_lists_only_what_the_person_can_use_in_that_server(tmp_path):
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    import discord
+    from discord.ext import commands
+
+    import main
+    from cogs import help as help_module
+    from utils.settings import clear_settings_caches, update_guild_settings
+
+    clear_settings_caches()
+
+    async def scenario():
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none(), help_command=None)
+        bot.project_root = main.Path(main.__file__).resolve().parent
+        bot.storage_path = tmp_path
+        bot.config = NS(website_url="", beta_build=False)
+        from utils.embeds import EmbedManager
+
+        bot.embeds = EmbedManager(bot)
+        for extension in main.COGS:
+            await bot.load_extension(extension)
+        cog = bot.get_cog("Help")
+        import sys
+
+        help_module = sys.modules[type(cog).__module__]  # load_extension imports the cog afresh: use that copy's state
+        guild = NS(id=4242)
+
+        def listed(permissions):
+            help_module._usable.set(help_module.usable_by(bot, guild, NS(guild_permissions=permissions)))
+            names = {command.qualified_name for _key, _emoji, _label, groups in help_module.CATEGORY_DEFS for command in cog._commands_in(groups)}
+            options = [option.label for option in help_module.HelpCategorySelect(cog).options]
+            return names, options, cog.build_home_embed().description
+
+        everything = len(listed(discord.Permissions.all())[0])
+        member, member_options, member_home = listed(discord.Permissions(send_messages=True))
+        assert "ban" not in member and "settings" not in member and "reactionrole create" not in member and "music autoplay" not in member
+        assert {"ping", "music play", "filter invert", "about"} <= member and len(member) < everything
+        assert "Moderation" in member_options          # /poll and other open commands still live there
+        assert "Server Settings" not in member_options and "Reaction Roles & Role Menus" not in member_options
+        assert "are left out" in member_home and "Server Settings" not in member_home
+
+        moderator = listed(discord.Permissions(send_messages=True, ban_members=True, moderate_members=True))[0]
+        assert {"ban", "warn", "mute"} <= moderator and "kick" not in moderator and "settings" not in moderator
+
+        update_guild_settings(tmp_path, guild.id, {"blocked_commands": ["music", "ping"], "tags_enabled": False})
+        admin, admin_options, _ = listed(discord.Permissions.all())
+        assert "music play" not in admin and "ping" not in admin and "tag" not in admin and "settings" in admin
+        assert "Music" not in admin_options
+
+        help_module._usable.set(help_module.usable_by(bot, None, NS(guild_permissions=discord.Permissions.none())))
+        assert help_module._usable.get() is None       # in DMs, or where the bot is not a member: everything is listed
+        assert len({c.qualified_name for _k, _e, _l, groups in help_module.CATEGORY_DEFS for c in cog._commands_in(groups)}) >= everything
+        for extension in main.COGS:
+            await bot.unload_extension(extension)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        clear_settings_caches()
+
+
+def test_the_website_still_shows_what_a_command_needs():
+    from cogs.moderation import Moderation
+    from utils.checks import required_permissions
+
+    assert required_permissions(Moderation.role) == ["manage_roles"]     # a server-wide check
+    assert required_permissions(Moderation.ban) == ["ban_members"]       # a plain has_permissions check

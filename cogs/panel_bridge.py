@@ -36,6 +36,7 @@ from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
+from utils.checks import required_permissions
 from utils.numbers import is_digits
 from utils import appeals as appeal_store
 from utils import cases as case_store
@@ -1090,13 +1091,7 @@ class PanelBridge(commands.Cog):
     def _required_permissions(command) -> list[str]:
         """Member permissions a command demands, read from its has_permissions
         check (discord.py keeps them in the check's closure)."""
-        required: list[str] = []
-        for check in getattr(command, "checks", []):
-            if "has_permissions" not in getattr(check, "__qualname__", "") or "bot_has" in check.__qualname__:
-                continue
-            for cell in check.__closure__ or ():
-                if isinstance(cell.cell_contents, dict):
-                    required += [name for name, wanted in cell.cell_contents.items() if wanted]
+        required = required_permissions(command)
         return [name.replace("_", " ").replace("guild", "server").title() for name in dict.fromkeys(required)]
 
     def _command_categories(self) -> tuple[list[dict[str, str]], dict[str, str]]:

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import contextvars
 import datetime
 import io
 import time
-from typing import Final
+from typing import Any, Callable, Final
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from utils import command_dates
+from utils.checks import required_permissions
 from utils.config import beta_notice
+from utils.modules import disabled_module_for
+from utils.settings import blocking_entry, get_guild_settings
+from utils.user_app import home_guild
 from utils.website import site_link, site_url
 
 HELP_COLOR = discord.Color.blurple()
@@ -62,11 +67,45 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
 NEW_KEY, NEW_EMOJI, NEW_LABEL = "new", "🆕", "What's New"
 
 
+# Who the menu is being built for: a test of whether that person can use a
+# command where they are, or None to list everything. It is set where a help
+# menu is opened or one of its controls is used, and read wherever commands
+# are listed, so every page and every count agree.
+_usable: contextvars.ContextVar[Callable[[app_commands.Command], bool] | None] = contextvars.ContextVar("help_usable", default=None)
+
+
+def usable_by(bot: commands.Bot, guild: discord.Guild | None, member: Any) -> Callable[[app_commands.Command], bool] | None:
+    """A test for "this person can use this command in this server": they hold
+    the permissions it needs, and the server has not disabled it or turned its
+    module off. None (no filtering) outside a server that has the bot, where
+    there are no server permissions or settings to go by."""
+    permissions = getattr(member, "guild_permissions", None)
+    if guild is None or permissions is None:
+        return None
+    settings = get_guild_settings(bot.storage_path, guild.id)
+    blocked = settings.get("blocked_commands")
+
+    def usable(command: app_commands.Command) -> bool:
+        name = command.qualified_name
+        if name != "settings" and (blocking_entry(name, blocked) is not None or disabled_module_for(name, settings) is not None):
+            return False
+        if permissions.administrator:
+            return True
+        root = command.root_parent or command
+        needed = getattr(root, "default_permissions", None)
+        if needed is not None and not permissions >= needed:
+            return False
+        return all(getattr(permissions, permission, False) for permission in required_permissions(command))
+
+    return usable
+
+
 class HelpCategorySelect(discord.ui.Select["HelpView"]):
     def __init__(self, cog: "Help") -> None:
         options = [
             discord.SelectOption(label=label, emoji=emoji, value=key)
-            for key, emoji, label, _names in CATEGORY_DEFS
+            for key, emoji, label, names in CATEGORY_DEFS
+            if _usable.get() is None or cog._commands_in(names)  # a category with nothing this person can use is left out
         ]
         if cog.new_commands():
             options.insert(0, discord.SelectOption(label=NEW_LABEL, emoji=NEW_EMOJI, value=NEW_KEY))
@@ -137,6 +176,9 @@ class HelpView(discord.ui.View):
                 ephemeral=True,
             )
             return False
+        # the page about to be shown is built for whoever pressed, as they stand now
+        bot = getattr(self.cog, "bot", None)
+        _usable.set(usable_by(bot, home_guild(interaction), interaction.user) if bot is not None else None)
         return True
 
     async def on_timeout(self) -> None:
@@ -213,7 +255,8 @@ class Help(commands.Cog):
                 found.extend(sub for sub in node.walk_commands() if isinstance(sub, app_commands.Command))
             elif node is not None:
                 found.append(node)
-        return found
+        usable = _usable.get()
+        return found if usable is None else [command for command in found if usable(command)]
 
     def new_commands(self) -> list[app_commands.Command]:
         """Recently added commands from the help categories, newest first."""
@@ -227,29 +270,22 @@ class Help(commands.Cog):
         return f"**/{command.qualified_name}**{marker} - {command.description or 'No description.'}"
 
     def _category_command_count(self, names: list[str]) -> int:
-        total = 0
-        for name in names:
-            node = self.bot.tree.get_command(name)
-            if node is None:
-                continue
-            if isinstance(node, app_commands.Group):
-                total += sum(1 for c in node.walk_commands() if isinstance(c, app_commands.Command))
-            else:
-                total += 1
-        return total
+        return len(self._commands_in(names))
 
     def build_home_embed(self) -> discord.Embed:
-        lines = [
-            f"{emoji} **{label}** - {self._category_command_count(names)} command(s)"
-            for _key, emoji, label, names in CATEGORY_DEFS
-        ]
+        counts = [(emoji, label, self._category_command_count(names)) for _key, emoji, label, names in CATEGORY_DEFS]
+        lines = [f"{emoji} **{label}** - {count} command(s)" for emoji, label, count in counts if count]
+        hidden = _usable.get() is not None and any(count == 0 for _emoji, _label, count in counts)
         fresh = len(self.new_commands())
         if fresh:
             lines.insert(0, f"{NEW_EMOJI} **{NEW_LABEL}** - {fresh} command(s) added in the last month")
         return self.bot.embeds.create(
             title="📖 GigaBot Help",
             description=(f"{beta_notice(self.bot.config)}\n\n" if beta_notice(self.bot.config) else "")
-            + "Pick a category below to see what I can do.\n\n" + "\n".join(lines)
+            + ("Pick a category below to see what you can use in this server.\n\n" if _usable.get() is not None
+               else "Pick a category below to see what I can do.\n\n")
+            + "\n".join(lines)
+            + ("\n\n*Commands you don't have the permissions for, and ones this server has turned off, are left out.*" if hidden else "")
             + (f"\n\n🌐 **Website** - {site_link(self.bot, 'open it')} for the web music player, playlists, the full command list, "
                "and a settings dashboard for admins." if site_url(self.bot) else ""),
             color=HELP_COLOR,
@@ -325,6 +361,7 @@ class Help(commands.Cog):
 
     @app_commands.command(name="help", description="Show a categorized list of everything I can do.")
     async def help_command(self, interaction: discord.Interaction) -> None:
+        _usable.set(usable_by(self.bot, home_guild(interaction), interaction.user))
         view = HelpView(cog=self, author_id=interaction.user.id)
         embed = self.build_home_embed()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -348,6 +385,7 @@ class Help(commands.Cog):
         if self._mention_on_cooldown(message.author.id):
             return
 
+        _usable.set(None)  # this menu is read in DMs, away from any one server: it lists everything
         embed = self.build_home_embed()
         view = HelpView(cog=self, author_id=message.author.id)
 
