@@ -8,31 +8,31 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from utils import forms
+from utils import forms, site_access
 from utils.forms import FormError
 from utils.forms_service import FormsService
 from utils.modules import module_enabled
+from utils.settings import get_guild_settings
 from utils.user_app import home_guild
 
 LOGGER = logging.getLogger(__name__)
 
 FORM_COLOR = discord.Color.blurple()
-POPUP_QUESTIONS = 5  # as many fields as a Discord pop-up holds
-# What a pop-up can ask: typed answers, and choosing from a list.
-POPUP_KINDS = (*forms.TEXT_KINDS, *forms.OPTION_KINDS, "number", "date", "scale")
 BUTTON_ID = re.compile(r"gform:open:(?P<form_id>\d+)")
+PROGRESS_SECONDS = 30 * 60  # how long half-answered pages are kept between pop-ups
 
 
-def fits_popup(form: dict[str, Any]) -> bool:
-    """Whether the form is short and plain enough to be answered inside Discord."""
-    asked = forms.questions(form["items"])
-    return bool(form["options"]["in_discord"]) and 1 <= len(asked) <= POPUP_QUESTIONS and all(item["kind"] in POPUP_KINDS for item in asked)
+def label(text: str, limit: int) -> str:
+    """Text the form's maker wrote, as a pop-up shows it: no Markdown, cut to fit."""
+    flat = " ".join(forms.plain(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
 class OpenFormButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_ID.pattern):
@@ -56,7 +56,7 @@ class OpenFormButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_
 def form_message(bot: Any, form: dict[str, Any]) -> tuple[discord.Embed, discord.ui.View]:
     """What the bot posts in a channel for a form: its title, what it is for, and the button."""
     asked = len(forms.questions(form["items"]))
-    embed = bot.embeds.create(title=f"📝 {form['title']}"[:256], description=form["description"] or "Press the button below to fill it in.",
+    embed = bot.embeds.create(title=f"📝 {label(form['title'], 250)}", description=form["description"] or "Press the button below to fill it in.",
                               color=FORM_COLOR, footer=f"{asked} question{'s' if asked != 1 else ''}")
     view = discord.ui.View(timeout=None)
     view.add_item(OpenFormButton(form["id"]))
@@ -64,40 +64,92 @@ def form_message(bot: Any, form: dict[str, Any]) -> tuple[discord.Embed, discord
 
 
 class FormPopup(discord.ui.Modal):
-    """A short form, asked in a Discord pop-up."""
+    """One page of a form answered in Discord: up to five questions and section
+    headings. Headings and their text are shown with their formatting."""
 
-    def __init__(self, cog: "Forms", form: dict[str, Any]) -> None:
-        super().__init__(title=form["title"][:45], timeout=30 * 60)
-        self.cog, self.form = cog, form
+    def __init__(self, cog: "Forms", form: dict[str, Any], page: int, *, test: bool = False) -> None:
+        pages = forms.discord_pages(form["items"])
+        title = forms.plain(form["title"])
+        title = f"{title[:38].rstrip()} {page + 1}/{len(pages)}" if len(pages) > 1 else title
+        super().__init__(title=title[:45], timeout=PROGRESS_SECONDS)
+        self.cog, self.form, self.page, self.last, self.test = cog, form, page, page == len(pages) - 1, test
         self.fields: list[tuple[dict[str, Any], discord.ui.Item]] = []
-        for item in forms.questions(form["items"]):
-            kind, required = item["kind"], bool(item["required"])
-            if kind in forms.OPTION_KINDS:
-                many = len(item["options"]) if kind == "checkboxes" else 1
-                component: discord.ui.Item = discord.ui.Select(
-                    options=[discord.SelectOption(label=option[:100], value=str(index)) for index, option in enumerate(item["options"])],
-                    min_values=1 if required else 0, max_values=many, required=required,
-                )
-            else:
-                hint = {"number": f"A whole number from {item.get('min')} to {item.get('max')}", "date": "A date, like 2026-12-24",
-                        "scale": f"{item.get('min')} ({item.get('low') or 'lowest'}) to {item.get('max')} ({item.get('high') or 'highest'})"}.get(kind)
-                component = discord.ui.TextInput(
-                    style=discord.TextStyle.paragraph if kind == "paragraph" else discord.TextStyle.short, required=required,
-                    max_length={"paragraph": forms.MAX_ANSWER, "short": forms.MAX_SHORT_ANSWER}.get(kind, 20), placeholder=hint and hint[:100],
-                )
-            self.add_item(discord.ui.Label(text=item["text"][:45], description=(item["help"] or (item["text"] if len(item["text"]) > 45 else ""))[:100] or None,
-                                           component=component))
-            self.fields.append((item, component))
+        self.items = pages[page]
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
+    def build(self, saved: dict[str, Any]) -> "FormPopup":
+        """Add the page's components, showing what was answered before (after a mistake, or on going back)."""
+        for item in self.items:
+            if item["kind"] == forms.SECTION:
+                self.add_item(discord.ui.TextDisplay(f"## {item['text']}" + (f"\n{item['help']}" if item["help"] else "")))
+                continue
+            component = self._component(item, saved.get(item["id"]))
+            described = label(item["help"], 100) if item["help"] else (label(item["text"], 100) if len(forms.plain(item["text"])) > 45 else None)
+            self.add_item(discord.ui.Label(text=label(item["text"], 45), description=described, component=component))
+            self.fields.append((item, component))
+        return self
+
+    @staticmethod
+    def _component(item: dict[str, Any], before: Any) -> discord.ui.Item:
+        kind, required = item["kind"], bool(item["required"])
+        if kind in ("choice", "dropdown", "checkboxes", "scale"):
+            if kind == "scale":
+                choices = [str(step) for step in range(item["min"], item["max"] + 1)]
+                notes = {choices[0]: item.get("low", ""), choices[-1]: item.get("high", "")}
+            else:
+                choices, notes = list(item["options"]), {}
+            picked = {str(entry) for entry in (before if isinstance(before, list) else [before]) if entry not in (None, "")}
+            return discord.ui.Select(
+                options=[discord.SelectOption(label=choice[:100], value=str(index), description=(notes.get(choice) or None) and notes[choice][:100],
+                                              default=choice in picked) for index, choice in enumerate(choices)],
+                min_values=1 if required else 0, max_values=len(choices) if kind == "checkboxes" else 1, required=required,
+            )
+        if kind in forms.PICKER_KINDS:
+            picker = {"member": discord.ui.UserSelect, "role": discord.ui.RoleSelect, "channel": discord.ui.ChannelSelect}[kind]
+            extra = {"channel_types": [discord.ChannelType.text, discord.ChannelType.news]} if kind == "channel" else {}
+            default = [discord.Object(id=int(before))] if str(before or "").isdigit() else []
+            return picker(min_values=1 if required else 0, max_values=1, required=required, default_values=default, **extra)
+        hint = {"number": f"A whole number from {item.get('min')} to {item.get('max')}", "date": "A date, like 2026-12-24"}.get(kind)
+        return discord.ui.TextInput(
+            style=discord.TextStyle.paragraph if kind == "paragraph" else discord.TextStyle.short, required=required,
+            max_length={"paragraph": forms.MAX_ANSWER, "short": forms.MAX_SHORT_ANSWER}.get(kind, 20), placeholder=hint,
+            default=str(before)[:forms.MAX_ANSWER] if before not in (None, "") else None,
+        )
+
+    def entered(self) -> dict[str, Any]:
         answers: dict[str, Any] = {}
         for item, component in self.fields:
-            if isinstance(component, discord.ui.Select):
-                picked = [item["options"][int(value)] for value in component.values if value.isdigit() and int(value) < len(item["options"])]
-                answers[item["id"]] = picked if item["kind"] == "checkboxes" else (picked[0] if picked else "")
+            kind = item["kind"]
+            if kind in forms.PICKER_KINDS:
+                answers[item["id"]] = str(component.values[0].id) if component.values else ""
+            elif isinstance(component, discord.ui.Select):
+                choices = [str(step) for step in range(item["min"], item["max"] + 1)] if kind == "scale" else item["options"]
+                picked = [choices[int(value)] for value in component.values if value.isdigit() and int(value) < len(choices)]
+                answers[item["id"]] = picked if kind == "checkboxes" else (picked[0] if picked else "")
             else:
                 answers[item["id"]] = component.value
-        await self.cog.take(interaction, self.form, answers)
+        return answers
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.page_done(interaction, self.form, self.page, self.entered(), test=self.test)
+
+
+class NextPage(discord.ui.View):
+    """Between two pop-ups: Discord opens a pop-up only in answer to a press."""
+
+    def __init__(self, cog: "Forms", form: dict[str, Any], page: int, user_id: int, *, test: bool, again: bool = False) -> None:
+        super().__init__(timeout=PROGRESS_SECONDS)
+        self.cog, self.form, self.page, self.user_id, self.test = cog, form, page, user_id, test
+        total = len(forms.discord_pages(form["items"]))
+        button = discord.ui.Button(label="Try again" if again else f"Continue to page {page + 1} of {total}", style=discord.ButtonStyle.primary,
+                                   emoji="✏️" if again else "➡️")
+        button.callback = self.go
+        self.add_item(button)
+
+    async def go(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This form is someone else's to fill in.", ephemeral=True)
+            return
+        await interaction.response.send_modal(self.cog.popup(self.form, self.page, interaction.user.id, test=self.test))
 
 
 class Forms(commands.Cog):
@@ -106,6 +158,7 @@ class Forms(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.service = FormsService(bot)
+        self._progress: dict[tuple[int, int], dict[str, Any]] = {}  # (user, form) -> pages answered so far
 
     async def cog_load(self) -> None:
         self.bot.add_dynamic_items(OpenFormButton)
@@ -141,13 +194,31 @@ class Forms(commands.Cog):
 
     # ---------- opening a form ----------
 
-    def open_forms(self, guild_id: int) -> list[dict[str, Any]]:
-        return [form for form in forms.list_forms(self.bot.storage_path, guild_id)
-                if form["kind"] == forms.GENERAL and forms.is_open(form, form["responses"])[0]]
+    def open_forms(self, guild_id: int, *, drafts: bool = False) -> list[dict[str, Any]]:
+        listed = [form for form in forms.list_forms(self.bot.storage_path, guild_id) if form["kind"] == forms.GENERAL]
+        return [form for form in listed if forms.is_open(form, form["responses"])[0] or (drafts and form["status"] != forms.OPEN)]
+
+    def is_staff(self, guild: discord.Guild, user: Any) -> bool:
+        """Whether this person may read the server's forms: they can try a draft out in Discord."""
+        permissions = getattr(user, "guild_permissions", None)
+        if permissions is None:
+            return False
+        settings = get_guild_settings(self.bot.storage_path, guild.id)
+        return site_access.access_for(permissions, settings, is_owner=user.id == guild.owner_id)["forms"]["view"]
+
+    def saved(self, form_id: int, user_id: int) -> dict[str, Any]:
+        now = time.monotonic()
+        for key in [key for key, entry in self._progress.items() if now - entry["at"] > PROGRESS_SECONDS]:
+            del self._progress[key]
+        return self._progress.get((user_id, form_id), {}).get("answers", {})
+
+    def popup(self, form: dict[str, Any], page: int, user_id: int, *, test: bool) -> FormPopup:
+        return FormPopup(self, form, page, test=test).build(self.saved(form["id"], user_id))
 
     async def open(self, interaction: discord.Interaction, form_id: int) -> None:
-        """Someone asked for a form, by its button or by /form: let them
-        answer it here if it fits a pop-up, else hand them its link."""
+        """Someone asked for a form, by its button or by /form. A Discord form
+        opens its first pop-up; a website form hands out its link. Staff can
+        try out a form that is still a draft: what they send is a test."""
         guild = home_guild(interaction)
         form = self.service.get(guild.id, int(form_id)) if guild is not None else None
         if form is None or form["kind"] != forms.GENERAL:
@@ -156,17 +227,26 @@ class Forms(commands.Cog):
         if not module_enabled(self.bot.storage_path, guild.id, "forms"):
             await self.bot.embeds.error_interaction(interaction, "Turned Off", "Forms are turned off in this server.", ephemeral=True)
             return
-        try:
-            standing = await self.service.standing(guild, form, interaction.user.id)
-        except FormError as exc:
-            await self.bot.embeds.error_interaction(interaction, "Form", str(exc), ephemeral=True)
+        test = form["status"] != forms.OPEN and self.is_staff(guild, interaction.user)
+        if form["options"]["answered_in"] != forms.DISCORD:
+            await self._send_link(interaction, form)
             return
-        if not standing["can_respond"]:
-            await self.bot.embeds.info_interaction(interaction, form["title"][:200], standing["reason"] or "You can't answer this form right now.", ephemeral=True)
+        if not test:
+            try:
+                standing = await self.service.standing(guild, form, interaction.user.id)
+            except FormError as exc:
+                await self.bot.embeds.error_interaction(interaction, "Form", str(exc), ephemeral=True)
+                return
+            if not standing["can_respond"]:
+                await self.bot.embeds.info_interaction(interaction, label(form["title"], 200), standing["reason"] or "You can't answer this form right now.", ephemeral=True)
+                return
+        if not forms.discord_pages(form["items"]):
+            await self.bot.embeds.error_interaction(interaction, "Form", "This form has no questions yet.", ephemeral=True)
             return
-        if fits_popup(form):
-            await interaction.response.send_modal(FormPopup(self, form))
-            return
+        self._progress[(interaction.user.id, form["id"])] = {"answers": {}, "at": time.monotonic()}
+        await interaction.response.send_modal(self.popup(form, 0, interaction.user.id, test=test))
+
+    async def _send_link(self, interaction: discord.Interaction, form: dict[str, Any]) -> None:
         link = self.service.link(form)
         if not link:
             await self.bot.embeds.error_interaction(interaction, "Form", "This form is answered on the bot's website, which isn't set up here.", ephemeral=True)
@@ -175,26 +255,52 @@ class Forms(commands.Cog):
         view.add_item(discord.ui.Button(label="Open the form", url=link, style=discord.ButtonStyle.link, emoji="🌐"))
         asked = len(forms.questions(form["items"]))
         await interaction.response.send_message(
-            embed=self.bot.embeds.create(title=f"📝 {form['title']}"[:256], color=FORM_COLOR,
+            embed=self.bot.embeds.create(title=f"📝 {label(form['title'], 250)}", color=FORM_COLOR,
                                          description=(form["description"] + "\n\n" if form["description"] else "")
                                          + f"This form has {asked} question{'s' if asked != 1 else ''} and is filled in on the website."),
             view=view, ephemeral=True,
         )
 
-    async def take(self, interaction: discord.Interaction, form: dict[str, Any], answers: dict[str, Any]) -> None:
-        """Answers from a pop-up, through the same checks as the website's."""
+    async def page_done(self, interaction: discord.Interaction, form: dict[str, Any], page: int, answers: dict[str, Any], *, test: bool) -> None:
+        """One page was sent: check it, keep it, and offer the next page, or send the whole response."""
         guild = home_guild(interaction)
         fresh = self.service.get(guild.id, form["id"]) if guild is not None else None
         if fresh is None:
             await self.bot.embeds.error_interaction(interaction, "Form Not Found", "That form no longer exists.", ephemeral=True)
             return
+        pages = forms.discord_pages(fresh["items"])
+        key = (interaction.user.id, fresh["id"])
+        progress = self._progress.setdefault(key, {"answers": {}, "at": time.monotonic()})
+        progress["answers"].update(answers)
+        progress["at"] = time.monotonic()
         try:
-            await self.service.respond(guild, fresh, interaction.user.id, str(interaction.user), answers)
+            forms.clean_answers(pages[page] if page < len(pages) else [], answers, self.service.names(guild), partial=True)
+        except FormError as exc:
+            await interaction.response.send_message(embed=self.bot.embeds.error_embed("Check That Page", str(exc)),
+                                                    view=NextPage(self, fresh, page, interaction.user.id, test=test, again=True), ephemeral=True)
+            return
+        if page + 1 < len(pages):
+            await interaction.response.send_message(
+                embed=self.bot.embeds.info_embed(label(fresh["title"], 200), f"Page {page + 1} of {len(pages)} is saved. Nothing is sent until the last page."),
+                view=NextPage(self, fresh, page + 1, interaction.user.id, test=test), ephemeral=True)
+            return
+        await self.take(interaction, fresh, dict(progress["answers"]), test=test)
+
+    async def take(self, interaction: discord.Interaction, form: dict[str, Any], answers: dict[str, Any], *, test: bool = False) -> None:
+        """A whole response from the pop-ups, through the same checks as any other."""
+        guild = home_guild(interaction)
+        try:
+            await self.service.respond(guild, form, interaction.user.id, str(interaction.user), answers, test=test, via=forms.DISCORD)
         except FormError as exc:
             await self.bot.embeds.error_interaction(interaction, "Not Sent", str(exc), ephemeral=True)
             return
-        waiting = " It is waiting to be read, and you will be told what is decided." if fresh["options"]["review"] and fresh["options"]["notify_outcome"] else ""
-        await self.bot.embeds.success_interaction(interaction, "Sent", f"Your answers to **{fresh['title']}** were sent.{waiting}", ephemeral=True)
+        self._progress.pop((interaction.user.id, form["id"]), None)
+        if test:
+            await self.bot.embeds.success_interaction(interaction, "Test Sent", f"Your test response to **{label(form['title'], 200)}** is listed with the others, marked as a test. "
+                                                      "None of the form's actions ran.", ephemeral=True)
+            return
+        waiting = " It is waiting to be read, and you will be told what is decided." if form["options"]["review"] and form["options"]["notify_outcome"] else ""
+        await self.bot.embeds.success_interaction(interaction, "Sent", f"Your answers to **{label(form['title'], 200)}** were sent.{waiting}", ephemeral=True)
 
     # ---------- /form ----------
 
@@ -202,9 +308,9 @@ class Forms(commands.Cog):
         guild = home_guild(interaction)
         if guild is None:
             return []
-        typed = current.lower()
-        return [app_commands.Choice(name=form["title"][:100], value=str(form["id"]))
-                for form in self.open_forms(guild.id) if typed in form["title"].lower()][:25]
+        typed, staff = current.lower(), self.is_staff(guild, interaction.user)
+        return [app_commands.Choice(name=(("Draft (test): " if form["status"] != forms.OPEN else "") + label(form["title"], 80))[:100], value=str(form["id"]))
+                for form in self.open_forms(guild.id, drafts=staff) if typed in form["title"].lower()][:25]
 
     @app_commands.command(name="form", description="Fill in one of this server's forms.")
     @app_commands.describe(form="The form to open. Leave it out to see the ones that are open.")
@@ -216,12 +322,14 @@ class Forms(commands.Cog):
         if guild is None:
             await self.bot.embeds.error_interaction(interaction, "Server Only", "Forms belong to a server that has added me.", ephemeral=True)
             return
-        available = self.open_forms(guild.id)
+        available = self.open_forms(guild.id, drafts=self.is_staff(guild, interaction.user))
         if form is None:
+            available = [entry for entry in available if entry["status"] == forms.OPEN]
             if not available:
                 await self.bot.embeds.info_interaction(interaction, "No Open Forms", "This server has no forms open right now.", ephemeral=True)
                 return
-            lines = [f"**{entry['title']}**" + (f"\n{entry['description'][:150]}" if entry["description"] else "") for entry in available[:15]]
+            lines = [f"**{label(entry['title'], 100)}**" + (" (website)" if entry["options"]["answered_in"] == forms.WEBSITE else "")
+                     + (f"\n{entry['description'][:150]}" if entry["description"] else "") for entry in available[:15]]
             await self.bot.embeds.info_interaction(interaction, "Open Forms", "\n\n".join(lines) + "\n\nRun `/form` again and pick one to fill it in.", ephemeral=True)
             return
         chosen = next((entry for entry in available if str(entry["id"]) == form or entry["title"].lower() == form.lower()), None)

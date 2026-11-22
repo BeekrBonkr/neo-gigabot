@@ -29,7 +29,8 @@ MAX_TITLE, MAX_DESCRIPTION = 100, 1000
 MAX_QUESTION_TEXT, MAX_HELP_TEXT = 200, 300
 MAX_ANSWER, MAX_SHORT_ANSWER = 2000, 200
 MAX_OPTIONS, MAX_OPTION_TEXT = 25, 100
-MAX_ACTIONS, MAX_ACTION_TEXT = 5, 1000
+MAX_ACTIONS, MAX_ACTION_TEXT = 10, 1000
+MAX_CHANNEL_ROLES = 5
 MAX_NOTE = 500
 
 SECTION = "section"
@@ -40,11 +41,16 @@ QUESTION_KINDS = (*TEXT_KINDS, *OPTION_KINDS, "number", "date", "scale", *PICKER
 KINDS = (SECTION, *QUESTION_KINDS)
 
 GENERAL, APPEAL = "general", "appeal"
+WEBSITE, DISCORD = "website", "discord"
+MAX_DISCORD_QUESTIONS = 25
+DISCORD_PAGE = 5  # what one Discord pop-up holds: questions and headings together
 OPEN, CLOSED = "open", "closed"
 # A response to a form that is not reviewed is simply "submitted"; one that is reviewed waits as "pending".
 SUBMITTED, PENDING, APPROVED, DENIED = "submitted", "pending", "approved", "denied"
 ACTION_MOMENTS = ("submit", "approve", "deny")
-ACTION_KINDS = ("add_role", "remove_role", "post", "dm", "thread")
+ACTION_KINDS = ("add_role", "remove_role", "picked_role", "nickname", "post", "summary", "dm", "thread", "channel")
+# Actions that would show the staff who answered, so an anonymous form cannot have them.
+REVEALING_ACTIONS = ("nickname", "thread", "channel")
 
 DEFAULT_OPTIONS: dict[str, Any] = {
     "audience": "members",  # or "anyone": anybody signed in with Discord who has the link
@@ -63,7 +69,7 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "max_responses": 0,  # 0: no limit of its own
     "when_full": "close",  # or "rotate": the oldest response makes room
     "keep_days": 0,  # 0: until deleted
-    "in_discord": False,  # short forms can be answered in a Discord pop-up
+    "answered_in": WEBSITE,  # or DISCORD: answered in pop-ups in the Discord app, a page of up to five at a time
     "actions": [],
 }
 
@@ -106,7 +112,14 @@ CREATE TABLE IF NOT EXISTS form_departures (guild_id INTEGER PRIMARY KEY, left_a
 
 
 class FormError(ValueError):
-    """Raised with a message that is safe to show to whoever caused it."""
+    """Raised with a message that is safe to show to whoever caused it.
+    `field` says what was wrong, for the builder to point at: "title",
+    "item:<n>" (the n-th question or heading, from 0), "action:<n>", or
+    "option:<name>"."""
+
+    def __init__(self, message: str, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 def ensure_tables(storage_path: Path) -> None:
@@ -154,14 +167,29 @@ def clean_items(value: Any) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for number, raw in enumerate(value, 1):
+        try:
+            counter = _clean_item(raw, number, taken, seen, counter, items)
+        except FormError as exc:
+            exc.field = exc.field or f"item:{number - 1}"
+            raise
+    if sum(1 for item in items if item["kind"] != SECTION) > MAX_QUESTIONS:
+        raise FormError(f"A form can have up to {MAX_QUESTIONS} questions.", f"item:{len(items) - 1}")
+    return items
+
+
+def _clean_item(raw: Any, number: int, taken: set[str], seen: set[str], counter: int, items: list[dict[str, Any]]) -> int:
+    """Check one question or heading, append it to `items`, and return the last ID number used."""
+    if True:
         if not isinstance(raw, dict):
             raise FormError(f"Item {number} is malformed.")
         kind = str(raw.get("kind") or raw.get("type") or "paragraph")
         if kind not in KINDS:
             raise FormError(f"Item {number} has an unknown type.")
         text = str(raw.get("text") or "").strip()
-        if not text or len(text) > MAX_QUESTION_TEXT:
-            raise FormError(f"Item {number} needs text of up to {MAX_QUESTION_TEXT} characters.")
+        if not text:
+            raise FormError("This one needs some text." if kind == SECTION else "This question needs its text.")
+        if len(text) > MAX_QUESTION_TEXT:
+            raise FormError(f"This one is longer than {MAX_QUESTION_TEXT} characters.")
         item_id = str(raw.get("id") or "")
         if item_id not in taken or item_id in seen:
             counter += 1
@@ -177,20 +205,28 @@ def clean_items(value: Any) -> list[dict[str, Any]]:
                 if option and option not in options:
                     options.append(option)
             if not 2 <= len(options) <= MAX_OPTIONS or any(len(option) > MAX_OPTION_TEXT for option in options):
-                raise FormError(f"\"{text}\" needs 2 to {MAX_OPTIONS} options of up to {MAX_OPTION_TEXT} characters each.")
+                raise FormError(f"\"{plain(text)}\" needs 2 to {MAX_OPTIONS} options of up to {MAX_OPTION_TEXT} characters each.")
             item["options"] = options
         if kind == "number":
             low, high = _whole(raw.get("min"), -10**9, 10**9, 0), _whole(raw.get("max"), -10**9, 10**9, 100)
             if low >= high:
-                raise FormError(f"\"{text}\" needs a smallest number below its largest.")
+                raise FormError(f"\"{plain(text)}\" needs a smallest number below its largest.")
             item["min"], item["max"] = low, high
         if kind == "scale":
             low, high = _whole(raw.get("min"), 0, 1, 1), _whole(raw.get("max"), 2, 10, 5)
             item.update(min=low, max=high, low=str(raw.get("low") or "").strip()[:40], high=str(raw.get("high") or "").strip()[:40])
         items.append(item)
-    if sum(1 for item in items if item["kind"] != SECTION) > MAX_QUESTIONS:
-        raise FormError(f"A form can have up to {MAX_QUESTIONS} questions.")
-    return items
+    return counter
+
+
+MARKDOWN = re.compile(r"(\*\*|__|~~|\*|_|`)(?=\S)(.+?)(?<=\S)\1|\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+
+
+def plain(text: str) -> str:
+    """Text the form's maker wrote, without its Markdown, for places that show
+    it as it is typed (a Discord pop-up's labels, error messages)."""
+    stripped = MARKDOWN.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(3), str(text))
+    return re.sub(r"^\s{0,3}(#{1,3}\s+|[-*]\s+|\d+\.\s+|>\s?)", "", stripped, flags=re.M)
 
 
 def questions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -212,34 +248,117 @@ def clean_options(value: Any, current: dict[str, Any] | None = None) -> dict[str
         "when_full": merged["when_full"] if merged["when_full"] in ("close", "rotate") else "close",
         "keep_days": _whole(merged["keep_days"], 0, 3650),
     }
-    for flag in ("multiple", "editable", "anonymous", "review", "notify_outcome", "in_discord"):
+    for flag in ("multiple", "editable", "anonymous", "review", "notify_outcome"):
         options[flag] = merged[flag] is True or str(merged[flag]).lower() in ("1", "true", "on", "yes")
+    legacy_discord = merged.get("in_discord") is True and "answered_in" not in given and (current or {}).get("answered_in") is None
+    options["answered_in"] = DISCORD if merged.get("answered_in") == DISCORD or legacy_discord else WEBSITE
+    if options["answered_in"] == DISCORD:
+        options["audience"] = "members"  # a form in a Discord pop-up is opened from the server itself
     for key in ("opens_at", "closes_at"):
         moment = _moment(merged[key])
         options[key] = moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00") if moment else ""
     if options["opens_at"] and options["closes_at"] and options["opens_at"] >= options["closes_at"]:
-        raise FormError("The form has to open before it closes.")
+        raise FormError("The form has to open before it closes.", "option:closes_at")
+    raw_actions = merged["actions"] if isinstance(merged["actions"], list) else []
+    if len(raw_actions) > MAX_ACTIONS:
+        raise FormError(f"A form can have up to {MAX_ACTIONS} actions.", f"action:{MAX_ACTIONS}")
     actions = []
-    for raw in merged["actions"] if isinstance(merged["actions"], list) else []:
+    for index, raw in enumerate(raw_actions):
         if not isinstance(raw, dict):
             continue
-        action = {"on": str(raw.get("on")), "do": str(raw.get("do")), "role_id": _digits(raw.get("role_id")),
-                  "channel_id": _digits(raw.get("channel_id")), "text": str(raw.get("text") or "").strip()[:MAX_ACTION_TEXT]}
-        if action["on"] not in ACTION_MOMENTS or action["do"] not in ACTION_KINDS:
-            raise FormError("One of the actions is not something a form can do.")
-        if action["do"] in ("add_role", "remove_role") and not action["role_id"]:
-            raise FormError("A role action needs a role.")
-        if action["do"] in ("post", "thread") and not action["channel_id"]:
-            raise FormError("That action needs a channel.")
-        if action["do"] in ("post", "dm") and not action["text"]:
-            raise FormError("A message action needs its message.")
+        try:
+            action = clean_action(raw)
+            if action["on"] != "submit" and not options["review"]:
+                raise FormError("This happens on approval or denial, so the form has to be reviewed (Settings, Review).")
+            if options["anonymous"] and action["do"] in REVEALING_ACTIONS:
+                raise FormError("This would show who answered, so an anonymous form can't do it.")
+        except FormError as exc:
+            exc.field = exc.field or f"action:{index}"
+            raise
         actions.append(action)
-    if len(actions) > MAX_ACTIONS:
-        raise FormError(f"A form can have up to {MAX_ACTIONS} actions.")
-    if actions and not options["review"] and any(action["on"] != "submit" for action in actions):
-        raise FormError("Actions on approval or denial need the form to be reviewed.")
     options["actions"] = actions
     return options
+
+
+def clean_action(raw: dict[str, Any]) -> dict[str, Any]:
+    """One action, checked for what it needs. Whether the person saving it may
+    set it up is for whoever knows the server (utils/forms_service.py)."""
+    roles = raw.get("roles") if isinstance(raw.get("roles"), list) else []
+    action = {
+        "on": str(raw.get("on") or ""), "do": str(raw.get("do") or ""),
+        "role_id": _digits(raw.get("role_id")), "channel_id": _digits(raw.get("channel_id")), "category_id": _digits(raw.get("category_id")),
+        "ping_role_id": _digits(raw.get("ping_role_id")), "roles": [role for role in dict.fromkeys(_digits(r) for r in roles) if role][:MAX_CHANNEL_ROLES],
+        "question": str(raw.get("question") or "") if re.fullmatch(r"q\d{1,4}", str(raw.get("question") or "")) else "",
+        "name": str(raw.get("name") or "").strip()[:100], "text": str(raw.get("text") or "").strip()[:MAX_ACTION_TEXT],
+        "if_question": str(raw.get("if_question") or "") if re.fullmatch(r"q\d{1,4}", str(raw.get("if_question") or "")) else "",
+        "if_value": str(raw.get("if_value") or "").strip()[:MAX_OPTION_TEXT], "by": _digits(raw.get("by")),
+    }
+    if action["on"] not in ACTION_MOMENTS:
+        raise FormError("Choose when this action happens.")
+    if action["do"] not in ACTION_KINDS:
+        raise FormError("This is not something a form can do.")
+    needs = {
+        "add_role": ("role_id", "Choose the role."), "remove_role": ("role_id", "Choose the role."),
+        "picked_role": ("question", "Choose the 'Pick a role' question whose answer is the role to give."),
+        "nickname": ("text", "Write the nickname, for example {q2}."), "post": ("channel_id", "Choose the channel."),
+        "summary": ("channel_id", "Choose the channel."), "dm": ("text", "Write the message."), "thread": ("channel_id", "Choose the channel."),
+    }
+    if action["do"] in needs and not action[needs[action["do"]][0]]:
+        raise FormError(needs[action["do"]][1])
+    if action["do"] == "post" and not action["text"]:
+        raise FormError("Write the message.")
+    if action["if_question"] and not action["if_value"]:
+        raise FormError("Say which answer the condition is waiting for.")
+    if not action["if_question"]:
+        action["if_value"] = ""
+    return action
+
+
+def same_action(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Whether two actions do the same thing, whoever set them up."""
+    return {k: v for k, v in first.items() if k != "by"} == {k: v for k, v in second.items() if k != "by"}
+
+
+def matches(action: dict[str, Any], answers: list[dict[str, Any]]) -> bool:
+    """Whether a response meets the action's condition (always, when it has none).
+    A condition matches an answer, or one of the boxes ticked, ignoring case."""
+    if not action.get("if_question"):
+        return True
+    entry = next((entry for entry in answers if entry.get("id") == action["if_question"]), None)
+    if entry is None:
+        return False
+    wanted = action["if_value"].strip().casefold()
+    values = entry.get("value") if isinstance(entry.get("value"), list) else [entry.get("value"), entry.get("answer")]
+    return any(str(value).strip().casefold() == wanted for value in values if value not in (None, ""))
+
+
+def discord_pages(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """How a form is split over Discord pop-ups: each section heading starts a
+    new page, and a page holds at most DISCORD_PAGE questions and headings.
+    A heading with no question after it is left out."""
+    pages: list[list[dict[str, Any]]] = []
+    page: list[dict[str, Any]] = []
+    for item in items:
+        if item["kind"] == SECTION:
+            if any(entry["kind"] != SECTION for entry in page):
+                pages.append(page)
+            page = [item]
+            continue
+        if len(page) >= DISCORD_PAGE:
+            pages.append(page)
+            page = []
+        page.append(item)
+    if any(entry["kind"] != SECTION for entry in page):
+        pages.append(page)
+    return pages
+
+
+def check_where(items: list[dict[str, Any]], options: dict[str, Any]) -> None:
+    """A form answered in Discord can have up to MAX_DISCORD_QUESTIONS questions."""
+    asked = questions(items)
+    if options.get("answered_in") == DISCORD and len(asked) > MAX_DISCORD_QUESTIONS:
+        raise FormError(f"A Discord form can have up to {MAX_DISCORD_QUESTIONS} questions; this one has {len(asked)}. "
+                        "Remove some, or make it a website form in Settings.", f"item:{items.index(asked[MAX_DISCORD_QUESTIONS])}")
 
 
 class Names:
@@ -256,7 +375,7 @@ class Names:
         return lookup(int(ident)) if lookup and ident else None
 
 
-def clean_answers(items: list[dict[str, Any]], answers: Any, names: Names | None = None) -> list[dict[str, Any]]:
+def clean_answers(items: list[dict[str, Any]], answers: Any, names: Names | None = None, *, partial: bool = False) -> list[dict[str, Any]]:
     """The answers to a form as they are stored: one entry per question, with
     the question as it read at the time, so a response still makes sense after
     the form is edited. `answers` maps question IDs to what was entered.
@@ -284,24 +403,24 @@ def clean_answers(items: list[dict[str, Any]], answers: Any, names: Names | None
                 try:
                     number = int(text)
                 except ValueError:
-                    raise FormError(f"\"{item['text']}\" needs a whole number.") from None
+                    raise FormError(f"\"{plain(item['text'])}\" needs a whole number.") from None
                 if not item["min"] <= number <= item["max"]:
-                    raise FormError(f"\"{item['text']}\" needs a number from {item['min']} to {item['max']}.")
+                    raise FormError(f"\"{plain(item['text'])}\" needs a number from {item['min']} to {item['max']}.")
                 value, shown = number, str(number)
             elif kind == "date" and text:
                 try:
                     value = shown = date.fromisoformat(text).isoformat()
                 except ValueError:
-                    raise FormError(f"\"{item['text']}\" needs a date.") from None
+                    raise FormError(f"\"{plain(item['text'])}\" needs a date, like 2026-12-24.") from None
             elif kind in PICKER_KINDS and text:
                 name = names.name(kind, text)
                 if name is None:
-                    raise FormError(f"\"{item['text']}\" needs a {kind} of this server.")
+                    raise FormError(f"\"{plain(item['text'])}\" needs a {kind} of this server.")
                 value, shown = _digits(text), name
         if item["required"] and shown == "":
-            raise FormError(f"Please answer: {item['text']}")
+            raise FormError(f"Please answer: {plain(item['text'])}")
         stored.append({"id": item["id"], "kind": kind, "question": item["text"], "answer": shown, "value": value})
-    if not any(entry["answer"] != "" for entry in stored):
+    if not partial and not any(entry["answer"] != "" for entry in stored):
         raise FormError("Answer at least one question.")
     return stored
 
@@ -364,6 +483,7 @@ def create_form(storage_path: Path, guild_id: int, created_by: int, *, title: st
         raise FormError("A form needs a title.")
     cleaned = clean_items(items if items is not None else start["items"])
     rules = clean_options({**start.get("options", {}), **(options or {})})
+    check_where(cleaned, rules)
     ensure_tables(storage_path)
     with write_transaction(storage_path) as connection:
         existing = connection.execute("SELECT slug, kind FROM forms WHERE guild_id = ?", (int(guild_id),)).fetchall()
@@ -387,17 +507,19 @@ def update_form(storage_path: Path, guild_id: int, form_id: int, *, title: str |
         raise FormError("That form no longer exists.")
     if title is not None:
         title = title.strip()[:MAX_TITLE]
-        if not title:
-            raise FormError("A form needs a title.")
     new_items = clean_items(items) if items is not None else form["items"]
+    new_options = clean_options(options, form["options"]) if options is not None else form["options"]
+    check_where(new_items, new_options)
     if status == OPEN and not questions(new_items):
-        raise FormError("Add at least one question before opening the form.")
+        raise FormError("Add at least one question before opening the form.", "item:0")
+    if title is not None and not title:
+        raise FormError("A form needs a title.", "title")
     with connect(storage_path) as connection:
         connection.execute(
             "UPDATE forms SET title = ?, description = ?, items = ?, options = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND guild_id = ?",
             (title if title is not None else form["title"],
              description.strip()[:MAX_DESCRIPTION] if description is not None else form["description"],
-             json.dumps(new_items), json.dumps(clean_options(options, form["options"]) if options is not None else form["options"]),
+             json.dumps(new_items), json.dumps(new_options),
              status if status in (OPEN, CLOSED) else form["status"], int(form_id), int(guild_id)),
         )
     return get_form(storage_path, guild_id, int(form_id))
@@ -444,7 +566,7 @@ def is_open(form: dict[str, Any], total: int, now: datetime | None = None) -> tu
     now, options = now or _now(), form["options"]
     opens, closes = _moment(options["opens_at"]), _moment(options["closes_at"])
     if form["status"] != OPEN:
-        return False, "This form is closed."
+        return False, "This form isn't open right now."
     if opens and now < opens:
         return False, f"This form opens on {opens:%B %d, %Y at %H:%M} UTC."
     if closes and now >= closes:
