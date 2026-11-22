@@ -854,6 +854,24 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
         assert interaction.guild is not None
         return await self.connect_to_channel(interaction.guild, target_channel, text_channel_id=interaction.channel_id)
 
+    @staticmethod
+    def check_can_join(guild: discord.Guild, channel: discord.VoiceChannel | discord.StageChannel) -> None:
+        """Raise with a plain reason when the bot can't enter a voice channel. Discord doesn't answer a join it
+        refuses, so without this the bot would wait and then report a timeout."""
+        me = guild.me
+        if me is None:
+            return
+        permissions = channel.permissions_for(me)
+        missing = [name for name, held in (("View Channel", permissions.view_channel), ("Connect", permissions.connect)) if not held]
+        if missing:
+            raise RuntimeError(
+                f"I'm not allowed to join {channel.mention}. I need {' and '.join(missing)} there: "
+                "check the channel's permissions for me and for @everyone."
+            )
+        limit = getattr(channel, "user_limit", 0) or 0
+        if limit and len(channel.members) >= limit and not permissions.move_members:
+            raise RuntimeError(f"{channel.mention} is full.")
+
     async def connect_to_channel(
         self,
         guild: discord.Guild,
@@ -873,6 +891,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                     state.text_channel_id = text_channel_id
 
             if voice_client is None:
+                self.check_can_join(guild, target_channel)
                 self.reset_session_volume(guild.id)
                 remember_text_channel()
                 try:
@@ -880,6 +899,14 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
                         target_channel.connect(self_deaf=True), timeout=VOICE_CONNECT_TIMEOUT_SECONDS
                     )
                 except asyncio.TimeoutError as exc:
+                    # the cancelled attempt leaves a half-made voice client behind, and the next join would mistake
+                    # it for a real connection
+                    stale = guild.voice_client
+                    if stale is not None:
+                        try:
+                            await stale.disconnect(force=True)
+                        except Exception:
+                            LOGGER.debug("Could not clear the unfinished voice connection in guild %s", guild.id, exc_info=True)
                     raise RuntimeError("Timed out connecting to that voice channel.") from exc
                 except discord.ClientException as exc:
                     raise RuntimeError(str(exc)) from exc
@@ -901,6 +928,7 @@ class Music(commands.GroupCog, group_name="music", group_description="Music play
             if voice_client.is_playing() or voice_client.is_paused():
                 raise RuntimeError("I am already playing music in another voice channel.")
 
+            self.check_can_join(guild, target_channel)
             self.reset_session_volume(guild.id)
             remember_text_channel()
             try:
