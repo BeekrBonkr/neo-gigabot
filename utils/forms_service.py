@@ -37,6 +37,9 @@ def days_since(moment: datetime | None) -> int:
     return (datetime.now(timezone.utc) - moment).days if moment else 0
 
 
+SOLVED_PREFIX = "solved-"  # put before a ticket channel's name once it is marked solved
+
+
 class FormsService:
     def __init__(self, bot: Any) -> None:
         self.bot = bot
@@ -501,12 +504,13 @@ class FormsService:
         channel = await guild.create_text_channel(name, category=category, overwrites=overwrites, reason=reason)
         forms.set_thread(self.storage, response["id"], channel.id)
         content, embed = self._opening(guild, form, response, action)
-        view = None
-        if action.get("close_button"):
-            from cogs.forms import ticket_view  # the cog's own button, so presses are handled the same way
+        buttons = forms.ticket_buttons(form, action)
+        if buttons:
+            from cogs.forms import ticket_view  # the cog's own buttons, so presses are handled the same way
 
-            view = ticket_view(response["id"])
-        await channel.send(content, embed=embed, view=view, allowed_mentions=only_them)
+            await channel.send(content, embed=embed, view=ticket_view(response["id"], buttons), allowed_mentions=only_them)
+        else:
+            await channel.send(content, embed=embed, allowed_mentions=only_them)
 
     def summary_embed(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any]) -> discord.Embed:
         """The whole response, one field a question, for a summary posted in a channel."""
@@ -522,7 +526,8 @@ class FormsService:
     # ---------- tickets ----------
 
     def ticket_action(self, form: dict[str, Any]) -> dict[str, Any] | None:
-        return next((action for action in form["options"]["actions"] if action["do"] == "channel" and action.get("close_button")), None)
+        """The action that opens this form's private channels with buttons under them."""
+        return next((action for action in form["options"]["actions"] if action["do"] == "channel" and forms.ticket_buttons(form, action)), None)
 
     def may_close(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], user: Any) -> bool:
         """The person the ticket is for, the staff roles that can see it, and anyone who can manage channels."""
@@ -535,9 +540,11 @@ class FormsService:
         staff = {int(raw) for raw in action.get("roles", [])}
         return any(role.id in staff for role in getattr(user, "roles", []))
 
-    async def close_ticket(self, guild: discord.Guild, channel: Any, form: dict[str, Any], response: dict[str, Any], closer: Any) -> bool:
+    async def close_ticket(self, guild: discord.Guild, channel: Any, form: dict[str, Any], response: dict[str, Any], closer: Any, reason: str = "") -> bool:
         """Save the ticket's conversation to the transcript channel, if one was
-        chosen, then delete the ticket channel. Returns whether a transcript was saved."""
+        chosen, tell the person why it was closed if a reason was given, then
+        delete the ticket channel. Returns whether a transcript was saved."""
+        reason = " ".join(reason.split())[:500]
         action = self.ticket_action(form) or {}
         log_channel = guild.get_channel(int(action["log_channel_id"])) if action.get("log_channel_id") else None
         saved = False
@@ -551,17 +558,39 @@ class FormsService:
                 for attachment in message.attachments:
                     body += f"\n[file] {attachment.url}"
                 lines.append(f"[{when} UTC] {message.author} ({message.author.id}): {body}")
-            text = f"{forms.plain(form['title'])}, response {response.get('number') or response['id']}, in #{channel.name}\n\n" + "\n".join(lines)
+            text = (f"{forms.plain(form['title'])}, response {response.get('number') or response['id']}, in #{channel.name}\n"
+                    + (f"Closed by {closer} ({closer.id}). Reason: {reason}\n" if reason else f"Closed by {closer} ({closer.id}).\n") + "\n" + "\n".join(lines))
             embed = self.bot.embeds.info_embed(
                 f"🎫 Ticket closed: {forms.plain(form['title'])[:200]} #{response.get('number') or response['id']}",
-                f"Opened by <@{response['user_id']}>, closed by {closer.mention}. {len(lines)} message{'s' if len(lines) != 1 else ''}.")
+                f"Opened by <@{response['user_id']}>, closed by {closer.mention}. {len(lines)} message{'s' if len(lines) != 1 else ''}."
+                + (" It was marked solved." if str(getattr(channel, "name", "")).startswith(SOLVED_PREFIX) else "") + (f"\n**Reason:** {reason}" if reason else ""))
             try:
                 await log_channel.send(embed=embed, file=discord.File(io.BytesIO(text.encode("utf-8")), filename=f"ticket-{response.get('number') or response['id']}.txt"))
                 saved = True
             except discord.HTTPException as exc:
                 log.warning("Could not save a ticket transcript in guild %s: %s", guild.id, exc)
-        await channel.delete(reason=f"Ticket closed by {closer} ({closer.id})")
+        if reason and closer.id != int(response["user_id"]):
+            opener = guild.get_member(int(response["user_id"]))
+            try:
+                if opener is not None:
+                    await opener.send(embed=self.bot.embeds.info_embed(
+                        f"Your ticket in {guild.name} was closed"[:256], f"**{forms.plain(form['title'])[:200]}** #{response.get('number') or response['id']}\n**Reason:** {reason}"))
+            except discord.HTTPException:
+                pass  # their direct messages are closed; the reason is in the transcript
+        await channel.delete(reason=f"Ticket closed by {closer} ({closer.id})" + (f": {reason}" if reason else "")[:400])
         return saved
+
+    async def solve_ticket(self, channel: Any, solver: Any) -> None:
+        """Mark a ticket solved: say so in the channel and put it in the
+        channel's name. The channel stays until it is closed."""
+        await channel.send(embed=self.bot.embeds.success_embed("Solved", f"{solver.mention} marked this ticket as solved. It stays open until it is closed."),
+                           allowed_mentions=discord.AllowedMentions.none())
+        name = str(getattr(channel, "name", ""))
+        if name and not name.startswith(SOLVED_PREFIX):
+            try:
+                await channel.edit(name=(SOLVED_PREFIX + name)[:100], reason=f"Ticket marked solved by {solver} ({solver.id})")
+            except discord.HTTPException as exc:
+                log.info("Could not rename a solved ticket channel: %s", exc)  # Discord limits renames; the notice is enough
 
     async def make_ticket(self, guild: discord.Guild, member: discord.Member, *, title: str, button_channel_id: str, staff_roles: list[str],
                           category_id: str, log_channel_id: str, post_now: bool) -> tuple[dict[str, Any], str]:
@@ -572,7 +601,7 @@ class FormsService:
         action = forms.clean_action({
             "on": "submit", "do": "channel", "category_id": category_id, "roles": staff_roles, "name": "ticket-{number}",
             "style": "embed", "title": "Ticket #{number}: {q1}", "text": "{answers}\n\nThe staff will be with you soon. Press the button below when this is sorted.",
-            "close_button": True, "log_channel_id": log_channel_id,
+            "buttons": ["close"], "log_channel_id": log_channel_id,
         })
         button = forms.clean_button_message({"style": "embed", "title": "Need help?", "label": "Open a ticket",
                                              "text": "Press the button below to open a ticket. Only you and the staff will see it."})

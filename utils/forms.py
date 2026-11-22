@@ -293,6 +293,24 @@ def clean_options(value: Any, current: dict[str, Any] | None = None) -> dict[str
     return options
 
 
+TICKET_BUTTONS = ("solved", "close", "reason")  # under the first message of a channel opened for a response, in this order
+
+
+def clean_buttons(raw: dict[str, Any]) -> list[str]:
+    """The buttons a private channel gets. An action saved before there was a
+    choice has only its close button, on or off."""
+    if isinstance(raw.get("buttons"), list):
+        return [button for button in TICKET_BUTTONS if button in raw["buttons"]]
+    return ["close"] if raw.get("close_button") in (True, "1", "true", "on") else []
+
+
+def ticket_buttons(form: dict[str, Any], action: dict[str, Any]) -> list[str]:
+    """The buttons for a channel this action opens. A Ticket form's channel can
+    always be closed, even if its action was saved without a button."""
+    buttons = clean_buttons(action)
+    return buttons or (["close"] if form["options"].get("ticket") else [])
+
+
 def clean_action(raw: dict[str, Any]) -> dict[str, Any]:
     """One action, checked for what it needs. Whether the person saving it may
     set it up is for whoever knows the server (utils/forms_service.py)."""
@@ -303,7 +321,7 @@ def clean_action(raw: dict[str, Any]) -> dict[str, Any]:
         "ping_role_id": _digits(raw.get("ping_role_id")), "roles": [role for role in dict.fromkeys(_digits(r) for r in roles) if role][:MAX_CHANNEL_ROLES],
         "question": str(raw.get("question") or "") if re.fullmatch(r"q\d{1,4}", str(raw.get("question") or "")) else "",
         "name": str(raw.get("name") or "").strip()[:100], "text": str(raw.get("text") or "").strip()[:MAX_ACTION_TEXT],
-        **clean_message(raw), "close_button": raw.get("close_button") in (True, "1", "true", "on"), "log_channel_id": _digits(raw.get("log_channel_id")),
+        **clean_message(raw), "buttons": clean_buttons(raw), "log_channel_id": _digits(raw.get("log_channel_id")),
         "if_question": str(raw.get("if_question") or "") if re.fullmatch(r"q\d{1,4}", str(raw.get("if_question") or "")) else "",
         "if_value": str(raw.get("if_value") or "").strip()[:MAX_OPTION_TEXT], "by": _digits(raw.get("by")),
     }
@@ -322,7 +340,10 @@ def clean_action(raw: dict[str, Any]) -> dict[str, Any]:
     if action["do"] == "post" and not action["text"] and not action["title"]:
         raise FormError("Write the message.")
     if action["do"] != "channel":
-        action["close_button"], action["log_channel_id"] = False, ""
+        action["buttons"] = []
+    if not any(button in action["buttons"] for button in ("close", "reason")):
+        action["log_channel_id"] = ""  # a transcript is saved when the channel is closed
+    action["close_button"] = bool(action["buttons"])  # what earlier versions stored and read
     if action["if_question"] and not action["if_value"]:
         raise FormError("Say which answer the condition is waiting for.")
     if not action["if_question"]:
