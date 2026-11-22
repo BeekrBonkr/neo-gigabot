@@ -37,6 +37,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import site_access
+from utils.bridge_forms import FormsRoutes
 from utils.checks import required_permissions
 from utils.numbers import is_digits
 from utils import appeals as appeal_store
@@ -267,8 +268,10 @@ class BridgeError(Exception):
         self.message = message
 
 
-class PanelBridge(commands.Cog):
+class PanelBridge(FormsRoutes, commands.Cog):
     """Serves the localhost control API used by the owner web panel."""
+
+    Error = BridgeError  # for the routes mixed in from utils/bridge_forms.py
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -360,6 +363,7 @@ class PanelBridge(commands.Cog):
         r.add_post("/v1/guilds/{guild_id}/welcome/card", self.h_welcome_card)
         r.add_post("/v1/guilds/{guild_id}/welcome/background", self.h_welcome_background)
         r.add_post("/v1/guilds/{guild_id}/moderation/action", self.h_moderation_action)
+        self.add_form_routes(r)
         r.add_get("/v1/guilds/{guild_id}/appeal", self.h_appeal_form)
         r.add_post("/v1/guilds/{guild_id}/appeal", self.h_appeal_submit)
         r.add_post("/v1/guilds/{guild_id}/music/action", self.h_music_action)

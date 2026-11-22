@@ -125,6 +125,7 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "starboard_enabled": False,
     "music_enabled": True,
     "tags_enabled": True,
+    "forms_enabled": True,
     "stickies_enabled": True,
     "rolemenus_enabled": True,
     "reactionroles_enabled": True,

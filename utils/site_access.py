@@ -22,6 +22,7 @@ AREAS: dict[str, tuple[str, ...]] = {
     "stats": (VIEW,),
     "modules": (VIEW, MANAGE),
     "commands": (VIEW, MANAGE),
+    "forms": (VIEW, MANAGE),  # view: read responses; manage: build forms and decide responses
 }
 # The permissions an area can be opened to, strongest first.
 PERMISSIONS: tuple[str, ...] = (
