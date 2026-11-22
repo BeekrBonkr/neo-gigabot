@@ -410,6 +410,44 @@ def test_a_ticket_form_is_set_up_in_one_step_and_its_channel_closes_with_a_trans
         log = w.channels[12].sent[-1][1]
         assert "Ticket closed" in log["embed"].title and log["file"].filename == "ticket-1.txt"
 
+        # the form's maker turns on all three buttons; a ticket whose action lost its buttons can still be closed
+        from cogs.forms import ticket_view
+
+        action = dict(form["options"]["actions"][0])
+        assert action["buttons"] == ["close"] and action["close_button"] is True
+        assert forms.clean_action({**action, "buttons": ["reason", "bogus", "solved", "close"]})["buttons"] == ["solved", "close", "reason"]
+        assert forms.clean_action({**action, "buttons": []})["log_channel_id"] == ""                         # no closing, no transcript
+        old = {key: value for key, value in action.items() if key != "buttons"}                               # as saved before there was a choice
+        assert forms.clean_action(old)["buttons"] == ["close"] and forms.clean_action({**old, "close_button": False})["buttons"] == []
+        assert forms.ticket_buttons(form, {**old, "close_button": False}) == ["close"]                       # a Ticket form always gets one
+        assert forms.ticket_buttons({"options": {"ticket": False}}, {**old, "close_button": False}) == []
+        ids = [child.item.custom_id.split(":")[1] for child in ticket_view(7, ["solved", "close", "reason"]).children]
+        assert ids == ["solved", "close", "reason"] and ticket_view(7, ["solved"], solved=True).children[0].item.disabled
+        second = made_channels[1]
+        edits = []
+
+        async def edit(**kwargs):
+            edits.append(kwargs)
+            second.name = kwargs.get("name", second.name)
+
+        second.edit = edit
+        await service.solve_ticket(second, w.people[STAFF])
+        assert "marked this ticket as solved" in second.sent[-1][1]["embed"].description and second.name == "solved-ticket-2"
+        await service.solve_ticket(second, w.people[STAFF])
+        assert len(edits) == 1                                                                                # renamed once
+        told = []
+
+        async def dm(content=None, **kwargs):
+            told.append(kwargs["embed"])
+
+        w.people[SAM].send = dm
+        sams = forms.responses_of(storage, form["id"], SAM)[0]
+        assert await service.close_ticket(w.guild, second, form, sams, w.people[STAFF], "  Sorted   in voice chat ")
+        log = w.channels[12].sent[-1][1]
+        assert "marked solved" in log["embed"].description and "**Reason:** Sorted in voice chat" in log["embed"].description
+        assert "Reason: Sorted in voice chat" in log["file"].fp.read().decode() and second.deleted
+        assert len(told) == 1 and "Sorted in voice chat" in told[0].description                               # the person is told why
+
     run(storage, scenario)
 
 

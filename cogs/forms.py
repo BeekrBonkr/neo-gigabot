@@ -85,10 +85,63 @@ class CloseTicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gf
             await cog.ask_to_close(interaction, self.response_id)
 
 
-def ticket_view(response_id: int) -> discord.ui.View:
+class SolvedTicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gform:solved:(?P<response_id>\d+)"):
+    """Marks the ticket solved. The channel stays until it is closed."""
+
+    def __init__(self, response_id: int, *, done: bool = False) -> None:
+        super().__init__(discord.ui.Button(label="Solved" if done else "Mark as solved", emoji="✅", style=discord.ButtonStyle.success, disabled=done,
+                                           custom_id=f"gform:solved:{response_id}"))
+        self.response_id = response_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str]) -> "SolvedTicketButton":
+        return cls(int(match["response_id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("Forms")
+        if cog is not None:
+            await cog.solve(interaction, self.response_id)
+
+
+class ReasonCloseButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gform:reason:(?P<response_id>\d+)"):
+    """Closes the ticket after asking why. The reason goes in the transcript and to the person."""
+
+    def __init__(self, response_id: int) -> None:
+        super().__init__(discord.ui.Button(label="Close with reason", emoji="📝", style=discord.ButtonStyle.secondary, custom_id=f"gform:reason:{response_id}"))
+        self.response_id = response_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str]) -> "ReasonCloseButton":
+        return cls(int(match["response_id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("Forms")
+        if cog is not None:
+            await cog.ask_reason(interaction, self.response_id)
+
+
+def ticket_view(response_id: int, buttons: list[str] | tuple[str, ...] = ("close",), *, solved: bool = False) -> discord.ui.View:
+    """The buttons under a ticket's first message: the ones its form turned on."""
     view = discord.ui.View(timeout=None)
-    view.add_item(CloseTicketButton(response_id))
+    if "solved" in buttons:
+        view.add_item(SolvedTicketButton(response_id, done=solved))
+    if "close" in buttons:
+        view.add_item(CloseTicketButton(response_id))
+    if "reason" in buttons:
+        view.add_item(ReasonCloseButton(response_id))
     return view
+
+
+class CloseReason(discord.ui.Modal, title="Close this ticket"):
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, max_length=500, required=True,
+                                  placeholder="Why is it being closed? The person who opened it is told.")
+
+    def __init__(self, cog: "Forms", response_id: int) -> None:
+        super().__init__(timeout=600)
+        self.cog, self.response_id = cog, response_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.close(interaction, self.response_id, str(self.reason.value))
 
 
 class ConfirmClose(discord.ui.View):
@@ -237,12 +290,12 @@ class Forms(commands.Cog):
         self._progress: dict[tuple[int, int], dict[str, Any]] = {}  # (user, form) -> pages answered so far
 
     async def cog_load(self) -> None:
-        self.bot.add_dynamic_items(OpenFormButton, CloseTicketButton)
+        self.bot.add_dynamic_items(OpenFormButton, CloseTicketButton, SolvedTicketButton, ReasonCloseButton)
         self._tidy.start()
 
     async def cog_unload(self) -> None:
         self._tidy.cancel()
-        self.bot.remove_dynamic_items(OpenFormButton, CloseTicketButton)
+        self.bot.remove_dynamic_items(OpenFormButton, CloseTicketButton, SolvedTicketButton, ReasonCloseButton)
 
     @tasks.loop(hours=1)
     async def _tidy(self) -> None:
@@ -404,27 +457,51 @@ class Forms(commands.Cog):
         form = self.service.get(guild.id, response["form_id"]) if response is not None else None
         return guild, form, response
 
-    async def ask_to_close(self, interaction: discord.Interaction, response_id: int) -> None:
+    async def _allowed(self, interaction: discord.Interaction, response_id: int) -> tuple[Any, dict[str, Any], dict[str, Any]] | None:
+        """The ticket a button belongs to, if this person may use its buttons; otherwise they are told why not."""
         guild, form, response = self._ticket(interaction, response_id)
         if form is None or response is None:
             await self.bot.embeds.error_interaction(interaction, "Ticket", "This ticket's form no longer exists. Delete the channel by hand.", ephemeral=True)
-            return
+            return None
         if not self.service.may_close(guild, form, response, interaction.user):
-            await self.bot.embeds.error_interaction(interaction, "Ticket", "Only the person who opened this ticket and the staff can close it.", ephemeral=True)
+            await self.bot.embeds.error_interaction(interaction, "Ticket", "Only the person who opened this ticket and the staff can do that.", ephemeral=True)
+            return None
+        return guild, form, response
+
+    async def solve(self, interaction: discord.Interaction, response_id: int) -> None:
+        found = await self._allowed(interaction, response_id)
+        if found is None:
             return
+        _guild, form, _response = found
+        buttons = forms.ticket_buttons(form, self.service.ticket_action(form) or {})
+        await interaction.response.edit_message(view=ticket_view(response_id, buttons or ["solved"], solved=True))
+        try:
+            await self.service.solve_ticket(interaction.channel, interaction.user)
+        except discord.HTTPException as exc:
+            LOGGER.info("Could not say a ticket was solved: %s", exc)
+
+    async def ask_reason(self, interaction: discord.Interaction, response_id: int) -> None:
+        if await self._allowed(interaction, response_id) is not None:
+            await interaction.response.send_modal(CloseReason(self, response_id))
+
+    async def ask_to_close(self, interaction: discord.Interaction, response_id: int) -> None:
+        found = await self._allowed(interaction, response_id)
+        if found is None:
+            return
+        guild, form, response = found
         action = self.service.ticket_action(form) or {}
         saved = " A transcript is saved for the staff first." if action.get("log_channel_id") else ""
         await interaction.response.send_message(embed=self.bot.embeds.warning_embed("Close This Ticket?", f"This channel will be deleted.{saved}"),
                                                 view=ConfirmClose(self, response_id, interaction.user.id), ephemeral=True)
 
-    async def close(self, interaction: discord.Interaction, response_id: int) -> None:
+    async def close(self, interaction: discord.Interaction, response_id: int, reason: str = "") -> None:
         guild, form, response = self._ticket(interaction, response_id)
         if form is None or response is None or not self.service.may_close(guild, form, response, interaction.user):
             await self.bot.embeds.error_interaction(interaction, "Ticket", "This ticket can't be closed from here.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            await self.service.close_ticket(guild, interaction.channel, form, response, interaction.user)
+            await self.service.close_ticket(guild, interaction.channel, form, response, interaction.user, reason)
         except discord.HTTPException as exc:
             await interaction.followup.send(embed=self.bot.embeds.error_embed("Not Closed", f"Discord refused: {exc}"), ephemeral=True)
 
