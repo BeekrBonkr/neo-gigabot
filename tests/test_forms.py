@@ -192,3 +192,10 @@ def test_old_responses_and_departed_servers_are_cleaned_up(storage):
         connection.execute("UPDATE form_departures SET left_at = datetime('now', '-40 days')")
     assert forms.delete_departed(storage, present=set()) == [GUILD]
     assert forms.list_forms(storage, GUILD) == [] and forms.list_responses(storage, form["id"])[1] == 0
+
+
+def test_one_template_shows_every_kind_of_question(storage):
+    form = forms.create_form(storage, GUILD, MAKER, template="everything")
+    assert {item["kind"] for item in form["items"]} == set(forms.KINDS)
+    assert [item["kind"] for item in forms.questions(form["items"])].count("short") == 1 and len(forms.questions(form["items"])) == len(forms.QUESTION_KINDS)
+    assert list(forms.TEMPLATES)[:2] == ["blank", "everything"]
