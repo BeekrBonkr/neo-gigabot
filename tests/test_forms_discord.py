@@ -113,15 +113,45 @@ def test_answering_page_by_page(storage):
         after = interaction_for(guild, robin)
         await second.on_submit(after)
         last_view = after.response.sent[-1][1]["view"]
+        assert [child.label for child in last_view.children if isinstance(child, discord.ui.Button)] == ["Continue to page 3 of 3"]
+        (menu,) = [child for child in last_view.children if isinstance(child, discord.ui.Select)]     # two pages to go back to
+        assert [option.label for option in menu.options] == ["Page 1", "Page 2"] and menu.options[0].description == "Name, Likes, Happy, Age"
+        returned = interaction_for(guild, robin)
+        await last_view.back(returned, 0)
+        (first_again,) = returned.modals
+        assert first_again.title == "Quick one 1/3" and first_again.fields[0][1].default == "Robin"   # going back shows what was answered
+        fill(first_again, Name="Robin B", Likes=["0"], Happy=["2"], Age="30")
+        changed = interaction_for(guild, robin)
+        await first_again.on_submit(changed)
+        last_view = changed.response.sent[-1][1]["view"]
+        assert last_view.children[0].label == "Continue to page 3 of 3"                               # on to the first page not yet filled in
+        nosy = interaction_for(guild, boss)
+        await last_view.back(nosy, 0)
+        assert nosy.modals == [] and "someone else's" in nosy.response.sent[-1][0]
         final_open = interaction_for(guild, robin)
         await last_view.go(final_open)
         (third,) = final_open.modals
         fill(third, Who="300", Team="7", More="thanks")
+        review = interaction_for(guild, robin)
+        await third.on_submit(review)
+        assert "All 3 pages are filled in" in said(review) and forms.count_responses(storage, form["id"]) == 0
+        review_view = review.response.sent[-1][1]["view"]
+        assert review_view.children[0].label == "Send my answers" and len(review_view.children[1].options) == 3
+        second_thoughts = interaction_for(guild, robin)
+        await review_view.back(second_thoughts, 2)
+        (third,) = second_thoughts.modals
+        assert third.fields[2][1].default == "thanks"
+        fill(third, Who="300", Team="7", More="thank you")
+        review = interaction_for(guild, robin)
+        await third.on_submit(review)
         sent = interaction_for(guild, robin)
-        await third.on_submit(sent)
+        await review.response.sent[-1][1]["view"].send(sent)
         assert "were sent" in said(sent)
         (stored,) = forms.responses_of(storage, form["id"], 100)
-        assert [entry["answer"] for entry in stored["answers"]] == ["Robin", "Tea, Coffee", "3", "30", "2026-12-24", "pal", "@Blue", "thanks"]
+        assert [entry["answer"] for entry in stored["answers"]] == ["Robin B", "Tea", "3", "30", "2026-12-24", "pal", "@Blue", "thank you"]
+        late = interaction_for(guild, robin)
+        await review.response.sent[-1][1]["view"].send(late)                                          # a second press finds nothing kept
+        assert "no longer kept" in said(late) and forms.count_responses(storage, form["id"]) == 1
         again = interaction_for(guild, robin)
         await cog.open(again, form["id"])
         assert again.modals == [] and "already answered" in said(again)
