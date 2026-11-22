@@ -132,3 +132,13 @@ def test_a_command_that_changes_only_the_sound_has_no_example():
     by_name = {command.qualified_name: command for command in cog.walk_app_commands()}
     assert not samples.can_sample(by_name["animate bitcrush"])   # its result is a sound: nothing to show in a picture
     assert samples.can_sample(by_name["animate datamosh"])
+
+
+def test_commands_without_a_picture_say_why_instead():
+    from cogs.image_animate import ImageAnimate
+
+    cog = ImageAnimate(SimpleNamespace())
+    by_name = {command.qualified_name: command for command in cog.walk_app_commands()}
+    assert "changes the sound" in samples.sample_note(by_name["animate bitcrush"])
+    assert samples.sample_note(by_name["animate datamosh"]) == ""
+    assert all(note and len(note) < 300 for note in samples.NO_SAMPLE.values())

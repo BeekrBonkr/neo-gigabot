@@ -31,9 +31,17 @@ SAMPLE_OPTIONS: dict[str, dict[str, Any]] = {
     "edit resize": {"percent": 50},
     "image transform crop": {"left": 25, "right": 25},
 }
-# Commands whose result says nothing as a picture (a change of file format, a
-# change to the sound), or that no stock picture suits (swapping needs two faces).
-NO_SAMPLE = {"image effects convert", "image effects faceswap", "animate bitcrush"}
+# Commands with no picture to show: the result says nothing as a picture (a
+# change of file format, a change to the sound), or no stock picture suits it
+# (swapping needs two faces). Each has a few words the website shows in the
+# place where the example picture would have been.
+NO_SAMPLE: dict[str, str] = {
+    "image effects convert": "This one changes the file's format, not how the picture looks, so there is nothing to show here. "
+                             "Give it a picture, GIF or video and choose png, jpg, bmp, gif, webp or mp4.",
+    "image effects faceswap": "This one needs a picture with at least two faces in it, and swaps them. Try it on a photo of two people.",
+    "animate bitcrush": "This one changes the sound, so there is no picture to show. Give it a video or an audio file and it comes back "
+                        "with its sound crushed: lower bits for more crunch, raise downsample for a rougher, lo-fi tone.",
+}
 SAMPLE_TIMEOUT_SECONDS = 45.0
 MAX_SAMPLE_BYTES = 6 * 1024 * 1024
 
@@ -147,6 +155,11 @@ def _arguments(command: app_commands.Command, picture: _Picture) -> dict[str, An
     if not takes_picture:
         return None
     return {**values, **SAMPLE_OPTIONS.get(command.qualified_name, {})}
+
+
+def sample_note(command: app_commands.Command) -> str:
+    """What to say where the example would be, for a command with no picture to show."""
+    return NO_SAMPLE.get(command.qualified_name, "")
 
 
 def can_sample(command: app_commands.Command) -> bool:
