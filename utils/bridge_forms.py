@@ -115,7 +115,8 @@ class FormsRoutes:
             return web.json_response({
                 "staff": True, "can_manage": self._staff(guild, user_id, "manage"), "forms": [self._summary_line(form) for form in listed],
                 "templates": [{"key": key, "label": template["label"], "description": template["description"],
-                               "questions": len(forms.questions(forms.clean_items(template["items"])))} for key, template in forms.TEMPLATES.items()],
+                               "questions": len(forms.questions(forms.clean_items(template["items"])))} for key, template in forms.TEMPLATES.items()
+                              if not template.get("hidden")],  # the ticket template is reached through the Ticket form type
                 "limits": {"forms": forms.MAX_FORMS_PER_GUILD, "questions": forms.MAX_QUESTIONS, "responses": forms.MAX_RESPONSES_PER_FORM},
             })
         member = guild.get_member(user_id)
@@ -145,6 +146,7 @@ class FormsRoutes:
             self._site_access(guild, "forms", "view", user_id)
             return web.json_response({"form": {**self._summary_line(form), "items": form["items"], "options": form["options"]},
                                       "pages": [[item["id"] for item in page] for page in forms.discord_pages(form["items"])],
+                                      "data": service.DATA,
                                       "can_manage": self._staff(guild, user_id, "manage"), "responses": forms.count_responses(self.storage, form["id"]),
                                       "kinds": list(forms.QUESTION_KINDS), "action_moments": list(forms.ACTION_MOMENTS), "action_kinds": list(forms.ACTION_KINDS)})
         preview = request.query.get("preview") == "1"
@@ -198,6 +200,24 @@ class FormsRoutes:
         member = self._site_access(guild, "forms", "manage", self._user_id(request, str(body.get("user_id", ""))))
         action, service = str(body.get("action", "")), self.forms_service
         try:
+            if action == "create" and body.get("form_type") == "ticket":
+                ticket = body.get("ticket") if isinstance(body.get("ticket"), dict) else {}
+                post_now = ticket.get("post_now") is not False
+                made, note = await service.make_ticket(
+                    guild, member, title=str(body.get("title") or "").strip()[:forms.MAX_TITLE], button_channel_id=str(ticket.get("button_channel_id") or ""),
+                    staff_roles=[str(role) for role in ticket.get("staff_roles") or []][:forms.MAX_CHANNEL_ROLES],
+                    category_id=str(ticket.get("category_id") or ""), log_channel_id=str(ticket.get("log_channel_id") or ""), post_now=post_now)
+                detail = f"Created the ticket form {made['title']}"
+                if post_now:
+                    try:
+                        await self._post_form_button(guild, member, made, str(ticket.get("button_channel_id") or ""), made["options"]["button_message"])
+                        channel = guild.get_channel(int(ticket["button_channel_id"]))
+                        detail += f" and posted its button in #{channel.name}"
+                    except self.Error as exc:
+                        detail += f". Its button was not posted: {exc.message}"
+                else:
+                    detail += f". {note}"
+                return web.json_response({"ok": True, "detail": detail, "form": self._summary_line(made)})
             if action == "create":
                 where = forms.DISCORD if body.get("answered_in") == forms.DISCORD else forms.WEBSITE
                 made = forms.create_form(self.storage, guild.id, member.id, title=str(body.get("title") or ""), template=str(body.get("template") or "blank"),
@@ -224,12 +244,17 @@ class FormsRoutes:
                 return web.json_response({"ok": True, "detail": f"Saved the form {changed['title']}", "form": self._summary_line(changed),
                                           "before": {"title": form["title"], "status": form["status"], "questions": len(forms.questions(form["items"]))}})
             if action == "post":
-                return await self._post_form_button(guild, member, form, str(body.get("channel_id", "")))
+                message = forms.clean_button_message(body.get("message")) if body.get("message") is not None else form["options"]["button_message"]
+                result = await self._post_form_button(guild, member, form, str(body.get("channel_id", "")), message)
+                if form["kind"] == forms.GENERAL and body.get("message") is not None:
+                    forms.update_form(self.storage, guild.id, form["id"], options={"button_message": message})  # offered again next time
+                return result
         except FormError as exc:
             raise self.Error(400, str(exc), field=exc.field) from exc
         raise self.Error(400, "Unknown action.")
 
-    async def _post_form_button(self, guild: discord.Guild, member: discord.Member, form: dict[str, Any], channel_raw: str) -> web.Response:
+    async def _post_form_button(self, guild: discord.Guild, member: discord.Member, form: dict[str, Any], channel_raw: str,
+                                message: dict[str, Any] | None = None) -> web.Response:
         channel = guild.get_channel(int(channel_raw)) if is_digits(channel_raw) else None
         if channel is None or not hasattr(channel, "send"):
             raise self.Error(400, "Choose a text channel of this server.")
@@ -242,9 +267,9 @@ class FormsRoutes:
             raise self.Error(409, "Open the form before posting its button.")
         from cogs.forms import form_message  # the cog's own button, so presses are handled the same way
 
-        embed, view = form_message(self.bot, form)
+        content, embed, view = form_message(self.bot, form, message)
         try:
-            message = await channel.send(embed=embed, view=view)
+            message = await channel.send(content, embed=embed, view=view)
         except discord.HTTPException as exc:
             raise self.Error(502, f"Discord refused the message: {exc}") from exc
         return web.json_response({"ok": True, "detail": f"Posted the form's button in #{channel.name}", "url": message.jump_url})

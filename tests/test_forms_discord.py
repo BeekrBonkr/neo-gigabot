@@ -75,7 +75,7 @@ def test_a_discord_form_is_split_into_pages_of_five(storage):
     assert [option.label for option in first.fields[2][1].options] == ["1", "2", "3", "4", "5"] and first.fields[2][1].options[0].description == "No"
     last = cog.popup(form, 2, 100, test=False)
     assert [type(component).__name__ for _item, component in last.fields] == ["UserSelect", "RoleSelect", "TextInput"]
-    embed, view = form_message(cog.bot, form)
+    _content, embed, view = form_message(cog.bot, form)
     assert embed.title == "📝 Quick one" and view.children[0].custom_id == f"gform:open:{form['id']}"
     assert forms_cog.BUTTON_ID.fullmatch(view.children[0].custom_id) and isinstance(OpenFormButton(5).item, discord.ui.Button)
     with __import__("pytest").raises(forms.FormError, match="up to 25 questions"):

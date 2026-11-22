@@ -70,6 +70,8 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "when_full": "close",  # or "rotate": the oldest response makes room
     "keep_days": 0,  # 0: until deleted
     "answered_in": WEBSITE,  # or DISCORD: answered in pop-ups in the Discord app, a page of up to five at a time
+    "ticket": False,  # a Discord form set up to open a private channel for each response (made with the Ticket type)
+    "button_message": {},  # what was last posted above the form's button, offered again next time
     "actions": [],
 }
 
@@ -125,6 +127,13 @@ class FormError(ValueError):
 def ensure_tables(storage_path: Path) -> None:
     with connect(storage_path) as connection:
         connection.executescript(CREATE_SQL)
+        if "number" not in {row[1] for row in connection.execute("PRAGMA table_info(form_responses)")}:
+            # Each response's number within its form, counting from 1; a test response has none (0).
+            connection.execute("ALTER TABLE form_responses ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
+            connection.execute(
+                "UPDATE form_responses SET number = (SELECT COUNT(*) FROM form_responses AS earlier WHERE earlier.form_id = form_responses.form_id"
+                " AND earlier.test = 0 AND earlier.id <= form_responses.id) WHERE test = 0"
+            )
 
 
 def _now() -> datetime:
@@ -250,8 +259,12 @@ def clean_options(value: Any, current: dict[str, Any] | None = None) -> dict[str
     }
     for flag in ("multiple", "editable", "anonymous", "review", "notify_outcome"):
         options[flag] = merged[flag] is True or str(merged[flag]).lower() in ("1", "true", "on", "yes")
+    options["ticket"] = merged.get("ticket") is True or str(merged.get("ticket")).lower() in ("1", "true", "on")
+    options["button_message"] = clean_button_message(merged.get("button_message"))
     legacy_discord = merged.get("in_discord") is True and "answered_in" not in given and (current or {}).get("answered_in") is None
     options["answered_in"] = DISCORD if merged.get("answered_in") == DISCORD or legacy_discord else WEBSITE
+    if options["answered_in"] != DISCORD:
+        options["ticket"] = False  # a ticket is answered in Discord
     if options["answered_in"] == DISCORD:
         options["audience"] = "members"  # a form in a Discord pop-up is opened from the server itself
     for key in ("opens_at", "closes_at"):
@@ -290,6 +303,7 @@ def clean_action(raw: dict[str, Any]) -> dict[str, Any]:
         "ping_role_id": _digits(raw.get("ping_role_id")), "roles": [role for role in dict.fromkeys(_digits(r) for r in roles) if role][:MAX_CHANNEL_ROLES],
         "question": str(raw.get("question") or "") if re.fullmatch(r"q\d{1,4}", str(raw.get("question") or "")) else "",
         "name": str(raw.get("name") or "").strip()[:100], "text": str(raw.get("text") or "").strip()[:MAX_ACTION_TEXT],
+        **clean_message(raw), "close_button": raw.get("close_button") in (True, "1", "true", "on"), "log_channel_id": _digits(raw.get("log_channel_id")),
         "if_question": str(raw.get("if_question") or "") if re.fullmatch(r"q\d{1,4}", str(raw.get("if_question") or "")) else "",
         "if_value": str(raw.get("if_value") or "").strip()[:MAX_OPTION_TEXT], "by": _digits(raw.get("by")),
     }
@@ -305,13 +319,39 @@ def clean_action(raw: dict[str, Any]) -> dict[str, Any]:
     }
     if action["do"] in needs and not action[needs[action["do"]][0]]:
         raise FormError(needs[action["do"]][1])
-    if action["do"] == "post" and not action["text"]:
+    if action["do"] == "post" and not action["text"] and not action["title"]:
         raise FormError("Write the message.")
+    if action["do"] != "channel":
+        action["close_button"], action["log_channel_id"] = False, ""
     if action["if_question"] and not action["if_value"]:
         raise FormError("Say which answer the condition is waiting for.")
     if not action["if_question"]:
         action["if_value"] = ""
     return action
+
+
+MESSAGE_STYLES = ("text", "embed")
+HEX_COLOR = re.compile(r"#?([0-9a-fA-F]{6})")
+
+
+def clean_message(raw: dict[str, Any]) -> dict[str, Any]:
+    """How a message the bot posts looks: plain text, or an embed with a
+    title, an accent color, an image and a footer (its text is the embed's
+    body). Used by actions and by a form's posted button."""
+    style = raw.get("style") if raw.get("style") in MESSAGE_STYLES else "text"
+    color = HEX_COLOR.fullmatch(str(raw.get("color") or "").strip())
+    image = str(raw.get("image") or "").strip()
+    if image and (not image.startswith("https://") or len(image) > 500 or any(c.isspace() for c in image)):
+        raise FormError("An embed's image has to be an https:// link to a picture.")
+    return {"style": style, "title": str(raw.get("title") or "").strip()[:256] if style == "embed" else "",
+            "color": f"#{color.group(1).lower()}" if color and style == "embed" else "", "image": image if style == "embed" else "",
+            "footer": str(raw.get("footer") or "").strip()[:200] if style == "embed" else ""}
+
+
+def clean_button_message(raw: Any) -> dict[str, Any]:
+    """The message posted above a form's "Open form" button."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {**clean_message(raw), "text": str(raw.get("text") or "").strip()[:2000], "label": str(raw.get("label") or "").strip()[:80]}
 
 
 def same_action(first: dict[str, Any], second: dict[str, Any]) -> bool:
@@ -621,8 +661,9 @@ def submit(storage_path: Path, form: dict[str, Any], user_id: int, user_name: st
                     (form["id"], total - limit + 1),
                 )
         cursor = connection.execute(
-            "INSERT INTO form_responses (form_id, guild_id, user_id, user_name, answers, status, test) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (form["id"], form["guild_id"], int(user_id), str(user_name)[:100], json.dumps(answers), status, 1 if test else 0),
+            "INSERT INTO form_responses (form_id, guild_id, user_id, user_name, answers, status, test, number) VALUES (?, ?, ?, ?, ?, ?, ?,"
+            " CASE WHEN ? THEN 0 ELSE (SELECT COALESCE(MAX(number), 0) + 1 FROM form_responses WHERE form_id = ?) END)",
+            (form["id"], form["guild_id"], int(user_id), str(user_name)[:100], json.dumps(answers), status, 1 if test else 0, 1 if test else 0, form["id"]),
         )
         return int(cursor.lastrowid)
 
@@ -792,6 +833,15 @@ def _q(kind: str, text: str, required: bool = False, **more: Any) -> dict[str, A
 
 TEMPLATES: dict[str, dict[str, Any]] = {
     "blank": {"label": "Blank form", "title": "Untitled form", "description": "", "items": []},
+    "ticket": {
+        "label": "Ticket", "title": "Support ticket", "hidden": True,
+        "description": "Tell us what you need, and a private channel opens for you and the staff.",
+        "options": {"answered_in": DISCORD, "ticket": True, "multiple": True},
+        "items": [
+            _q("dropdown", "What do you need help with?", True, options=["A question", "Report a problem", "Report a member", "Something else"]),
+            _q("paragraph", "Tell us more", True, help="The more detail, the faster we can help."),
+        ],
+    },
     "everything": {
         "label": "Every question type", "title": "Every question type",
         "description": "One of each kind of question a form can ask, to see how they look and behave. Change or remove whatever you like.",
