@@ -161,7 +161,11 @@ def test_submit_notifies_mods_and_approval_unbans(storage):
             assert (await (await decide(client, 4, "deny_appeal", second)).json())["detail"] == "Denied the appeal" and unbanned == [5]
 
     asyncio.run(run())
-    assert store.latest_appeal(storage, 77, 5)["status"] == "denied"
+    from utils import forms
+    from utils.forms_service import FormsService
+
+    appeal_form = FormsService(cog.bot).appeal_form(77)   # appeals are kept as responses to the server's built-in form now
+    assert forms.responses_of(storage, appeal_form["id"], 5)[0]["status"] == "denied"
 
 
 def test_admins_can_preview_the_form_and_send_a_test(storage):

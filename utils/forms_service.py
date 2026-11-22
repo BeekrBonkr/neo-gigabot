@@ -196,7 +196,7 @@ class FormsService:
             return False
         test = bool(response["test"])
         if form["kind"] == forms.APPEAL:
-            where = site_link(self.bot, "Review it on the website", f"/app/{guild.id}/forms/{form['id']}/responses") or "Review it on the website's Forms tab"
+            where = site_link(self.bot, "Review it on the website", f"/app/{guild.id}/moderation#appeals") or "Review it on the website's Moderation tab"
             title = "🧪 Test Ban Appeal" if test else "📨 New Ban Appeal"
             text = (f"<@{response['user_id']}> sent a test appeal to try the form out. Nobody was banned or unbanned. {where}." if test
                     else f"<@{response['user_id']}> (`{response['user_id']}`) appealed their ban. {where}.")
@@ -212,7 +212,7 @@ class FormsService:
                 + (f"\n\n{link}." if link else ""),
             )
         try:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await channel.send(embed=embed)  # an embed pings nobody
             return True
         except discord.HTTPException:
             return False

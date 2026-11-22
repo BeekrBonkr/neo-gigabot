@@ -231,3 +231,48 @@ def test_who_a_form_is_for(storage):
         assert preview[1]["preview"] is True and (await get(f"forms/{form_id}", user_id=ROBIN, preview=1))[0] == 403
 
     run(storage, scenario)
+
+
+def test_ban_appeals_are_the_servers_built_in_form_and_old_ones_come_along(storage):
+    from utils import appeals as old_appeals
+    from utils.forms_service import FormsService
+    from utils.settings import get_guild_settings
+
+    update_guild_settings(storage, GUILD, {"appeals_enabled": True, "appeals_intro": "Be honest.", "appeals_reappeal_days": 14,
+                                           "appeals_form": [{"text": "Why?", "type": "paragraph", "required": True},
+                                                            {"text": "Which rule?", "type": "choice", "options": ["Spam", "Other"]}]})
+    settings = get_guild_settings(storage, GUILD)
+    earlier = old_appeals.submit(storage, GUILD, 555, "old-user", old_appeals.questions_for(settings), ["I was rude", "Other"])
+    old_appeals.decide(storage, GUILD, earlier, False, ADMIN, "not yet")
+
+    async def scenario(w, get, post):
+        service = FormsService(w.cog.bot)
+        form = service.appeal_form(GUILD)
+        assert form["kind"] == "appeal" and [item["text"] for item in form["items"]] == ["Why?", "Which rule?"]
+        assert form["status"] == "open" and form["description"] == "Be honest." and form["options"]["retry_days"] == 14 and form["options"]["review"]
+        assert service.appeal_form(GUILD)["id"] == form["id"]                                              # made once
+        _, read = await get("forms/appeal/responses", user_id=ADMIN)
+        assert read["total"] == 1 and read["responses"][0]["status"] == "denied" and read["responses"][0]["decision_note"] == "not yet"
+        assert read["responses"][0]["answers"][0] == {"id": "", "kind": "paragraph", "question": "Why?", "answer": "I was rude", "value": "I was rude"}
+
+        # staff give the appeal a question of a new kind, in the same builder as any form
+        items = form["items"] + [{"kind": "scale", "text": "How sorry are you?", "min": 1, "max": 5}]
+        assert (await post("forms", user_id=str(ADMIN), action="update", form_id=form["id"], items=items, title="Renamed", status="closed"))[0] == 200
+        form = service.appeal_form(GUILD)
+        assert form["title"] == "Ban appeal" and form["status"] == "open" and len(form["items"]) == 3      # its name and switch are not the builder's
+        assert (await post("forms", user_id=str(ADMIN), action="delete", form_id=form["id"]))[1]["error"].startswith("This form is built in")
+
+        status, page = await get("appeal", user_id=OUTSIDER)
+        assert status == 200 and page["can_appeal"] and [q["type"] for q in page["questions"]] == ["paragraph", "choice", "scale"]
+        assert (await get("appeal", user_id=ROBIN))[0] == 404                                              # not banned: no such page
+        ids = [item["id"] for item in page["form"]["items"]]
+        status, sent = await post("appeal", user_id=str(OUTSIDER), user_name="out", answers={ids[0]: "Sorry", ids[2]: "5"})
+        assert status == 200 and sent["appeal_id"]
+        assert (await post("appeal", user_id=str(OUTSIDER), user_name="out", answers=["again"]))[1]["error"] == "Your appeal is waiting for the moderators to read it."
+        assert (await post(f"forms/{form['id']}/decide", user_id=str(ROBIN), action="approve", response_id=sent["appeal_id"]))[0] == 403
+        status, done = await post(f"forms/{form['id']}/decide", user_id=str(ADMIN), action="approve", response_id=sent["appeal_id"])
+        assert status == 200 and done["detail"] == "Approved the appeal and unbanned the user" and OUTSIDER not in w.banned
+        assert "was approved. You can rejoin" in w.outsider.dms[0].description
+        assert (await post(f"forms/{form['id']}/decide", user_id=str(ADMIN), action="remove", response_id=sent["appeal_id"]))[0] == 404   # a real appeal stays on record
+
+    run(storage, scenario)

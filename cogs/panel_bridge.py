@@ -41,6 +41,7 @@ from utils.bridge_forms import FormsRoutes
 from utils.checks import required_permissions
 from utils.numbers import is_digits
 from utils import appeals as appeal_store
+from utils import forms as forms_store
 from utils import cases as case_store
 from utils import command_dates
 from utils import samples
@@ -2088,110 +2089,95 @@ class PanelBridge(FormsRoutes, commands.Cog):
         }
 
     # ---------- ban appeals ----------
+    #
+    # A ban appeal is a form (utils/forms_service.py): the server's built-in
+    # one, which only a banned user can answer and whose approval unbans.
+    # These routes are the ones the appeal page and the Moderation tab have
+    # always used; they now read and write that form.
 
-    async def _appeal_context(self, request: web.Request, user_id: int) -> tuple[discord.Guild, dict[str, Any]]:
-        """The server and its settings, for a user who is banned there. Anyone
-        else gets the same 404 as for a server that doesn't exist or doesn't
-        take appeals, so the form can't be used to look servers up."""
+    def _appeal_preview(self, request: web.Request, user_id: int) -> discord.Guild:
+        """The server, for staff trying the appeal form out. Works whether or not appeals are switched on yet."""
+        guild = self._guild(request)
+        self._site_access(guild, ("modules", "forms", "moderation"), "view", user_id)
+        return guild
+
+    def _appeal_guild(self, request: web.Request) -> discord.Guild:
+        """The server an appeal is for. One the bot is not in, or that takes no
+        appeals, gets the same 404 as any other reason not to show the form."""
         raw = request.match_info["guild_id"]
         guild = self.bot.get_guild(int(raw)) if is_digits(raw) else None
-        settings = get_guild_settings(self.storage, guild.id) if guild else {}
-        if guild is None or not settings.get("appeals_enabled"):
+        if guild is None or not get_guild_settings(self.storage, guild.id).get("appeals_enabled"):
             raise BridgeError(404, "This server isn't taking appeals.")
-        try:
-            await guild.fetch_ban(discord.Object(id=user_id))
-        except discord.NotFound:
-            raise BridgeError(404, "This server isn't taking appeals.") from None
-        except discord.HTTPException as exc:
-            raise BridgeError(409, "The bot can't read this server's ban list right now.") from exc
-        return guild, settings
+        return guild
 
-    def _appeal_preview(self, request: web.Request, user_id: int) -> tuple[discord.Guild, dict[str, Any]]:
-        """The server and its settings for an admin trying the form out. Works
-        whether or not appeals are switched on yet."""
-        guild = self._guild(request)
-        self._site_access(guild, "modules", "view", user_id)
-        return guild, get_guild_settings(self.storage, guild.id)
+    @staticmethod
+    def _appeal_questions(form: dict[str, Any]) -> list[dict[str, Any]]:
+        return [{**item, "type": item["kind"], "options": item.get("options", [])} for item in forms_store.questions(form["items"])]
 
     async def h_appeal_form(self, request: web.Request) -> web.Response:
         user_id = self._user_id(request, request.query.get("user_id", ""))
         preview = request.query.get("preview") == "1"
+        service = self.forms_service
         if preview:
-            guild, settings = self._appeal_preview(request, user_id)
-            latest, allowed, why = None, True, ""
+            guild = self._appeal_preview(request, user_id)
+            form = service.appeal_form(guild.id)
+            standing = {"can_respond": True, "reason": "", "mine": []}
         else:
-            guild, settings = await self._appeal_context(request, user_id)
-            latest = appeal_store.latest_appeal(self.storage, guild.id, user_id)
-            allowed, why = appeal_store.can_appeal(latest, wait_days=appeal_store.reappeal_days(settings))
+            guild = self._appeal_guild(request)
+            form = service.appeal_form(guild.id)
+            try:
+                standing = await service.standing(guild, form, user_id)
+            except forms_store.FormError as exc:
+                raise BridgeError(409, str(exc)) from exc
+            if not standing["available"]:
+                raise BridgeError(404, "This server isn't taking appeals.")
+        latest = standing["mine"][0] if standing["mine"] else None
+        reason = standing["reason"].replace("Your response is waiting to be read.", "Your appeal is waiting for the moderators to read it.") \
+            .replace("Your last response was not accepted.", "Your last appeal was denied.")
         return web.json_response({
             "guild": {"id": str(guild.id), "name": guild.name, "icon": _asset_url(guild.icon)},
-            "questions": appeal_store.questions_for(settings),
-            "intro": str(settings.get("appeals_intro") or ""), "preview": preview,
-            "can_appeal": allowed, "reason": why,
+            "form": self._for_answering(form), "questions": self._appeal_questions(form),
+            "intro": form["description"], "preview": preview, "can_appeal": standing["can_respond"], "reason": reason,
             "latest": {"status": latest["status"], "created_at": latest["created_at"], "decision_note": latest["decision_note"]} if latest else None,
-            "limits": {"answer": appeal_store.MAX_ANSWER_LENGTH, "short": appeal_store.MAX_SHORT_ANSWER_LENGTH},
+            "limits": {"answer": forms_store.MAX_ANSWER, "short": forms_store.MAX_SHORT_ANSWER},
+            "pickers": {},
         })
 
     async def h_appeal_submit(self, request: web.Request) -> web.Response:
         body = await self._json(request)
         user_id = self._user_id(request, str(body.get("user_id", "")))
         test = bool(body.get("test"))
-        if test:
-            guild, settings = self._appeal_preview(request, user_id)
-        else:
-            guild, settings = await self._appeal_context(request, user_id)
+        guild = self._appeal_preview(request, user_id) if test else self._appeal_guild(request)
+        service = self.forms_service
+        form = service.appeal_form(guild.id)
         answers = body.get("answers")
-        if not isinstance(answers, list):
+        if isinstance(answers, list):  # the older shape: one answer per question, in order
+            answers = {question["id"]: answer for question, answer in zip(forms_store.questions(form["items"]), answers)}
+        if not isinstance(answers, dict):
             raise BridgeError(400, "Answers are required.")
         try:
-            appeal_id = appeal_store.submit(
-                self.storage, guild.id, user_id, str(body.get("user_name", "")), appeal_store.questions_for(settings),
-                [[str(v) for v in a] if isinstance(a, list) else str(a) for a in answers],
-                wait_days=appeal_store.reappeal_days(settings), test=test,
-            )
-        except appeal_store.AppealError as exc:
-            raise BridgeError(409, str(exc)) from exc
-        # Let the moderators know there is something to read: in the channel
-        # chosen for appeals, else the mod log.
-        raw = str(settings.get("appeals_channel_id") or "")
+            result = await service.respond(guild, form, user_id, str(body.get("user_name", "")), answers, test=test)
+        except forms_store.FormError as exc:
+            text = str(exc)
+            if text == "That form isn't available.":
+                raise BridgeError(404, "This server isn't taking appeals.") from exc
+            raise BridgeError(409, text.replace("Your response is waiting to be read.", "Your appeal is waiting for the moderators to read it.")
+                              .replace("Your last response was not accepted.", "Your last appeal was denied.")) from exc
+        raw = str(form["options"]["channel_id"] or "")
         channel_id = int(raw) if is_digits(raw) else get_mod_log_channel_id(self.storage, guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
-        notified = False
-        if channel is not None:
-            where = site_link(self.bot, "Review it on the website", f"/app/{guild.id}/moderation#appeals") or "Review it on the website's Moderation tab"
-            title = "🧪 Test Ban Appeal" if test else "📨 New Ban Appeal"
-            text = (f"<@{user_id}> sent a test appeal to try the form out. Nobody was banned or unbanned. {where}." if test
-                    else f"<@{user_id}> (`{user_id}`) appealed their ban. {where}.")
-            try:
-                await channel.send(embed=self.bot.embeds.info_embed(title, text))
-                notified = True
-            except discord.HTTPException:
-                pass
-        return web.json_response({"ok": True, "appeal_id": appeal_id, "notified": notified,
-                                  "channel": getattr(channel, "name", None) if channel is not None else None})
+        return web.json_response({"ok": True, "appeal_id": result["response_id"], "notified": result["notified"],
+                                  "channel": getattr(channel, "name", None) if channel is not None and result["notified"] else None})
 
     async def _decide_appeal(self, guild: discord.Guild, admin: discord.Member, approved: bool, appeal_raw: str, note: str, mod_log) -> web.Response:
         if not is_digits(appeal_raw):
             raise BridgeError(400, "An appeal ID is required.")
-        appeal_store.ensure_table(self.storage)
-        if approved:
-            # Unban first: if Discord refuses, the appeal stays open instead of
-            # reading "approved" while the user is still banned.
-            with connect(self.storage) as connection:
-                row = connection.execute("SELECT user_id FROM ban_appeals WHERE id = ? AND guild_id = ? AND status = 'pending'",
-                                         (int(appeal_raw), guild.id)).fetchone()
-            if row is None:
-                raise BridgeError(404, "That appeal was already decided.")
-            try:
-                await guild.unban(discord.Object(id=int(row["user_id"])), reason=f"Ban appeal approved by {admin} ({admin.id})")
-            except discord.NotFound:
-                pass  # already unbanned by hand
-            except discord.HTTPException as exc:
-                raise BridgeError(409, f"Discord refused the unban: {exc}") from exc
-            tempban_store.remove_tempban(self.storage, guild.id, int(row["user_id"]))
-        decided = appeal_store.decide(self.storage, guild.id, int(appeal_raw), approved, admin.id, note)
-        if decided is None:
-            raise BridgeError(404, "That appeal was already decided.")
+        service = self.forms_service
+        try:
+            result = await service.decide(guild, service.appeal_form(guild.id), int(appeal_raw), approved, admin, note)
+        except forms_store.FormError as exc:
+            raise BridgeError(409 if "refused" in str(exc) else 404, str(exc).replace("That response", "That appeal")) from exc
+        decided = result["response"]
         target = self.bot.get_user(decided["user_id"])
         if target is None:
             try:
@@ -2199,13 +2185,6 @@ class PanelBridge(FormsRoutes, commands.Cog):
             except discord.HTTPException:
                 target = None
         await mod_log("ban", "🔓 Ban Appeal Approved" if approved else "📪 Ban Appeal Denied", target)
-        if target is not None:
-            text = (f"Your ban appeal for **{guild.name}** was approved. You can rejoin the server." if approved
-                    else f"Your ban appeal for **{guild.name}** was denied.") + (f"\nNote from the moderators: {decided['decision_note']}" if decided["decision_note"] else "")
-            try:
-                await target.send(embed=self.bot.embeds.info_embed("Ban Appeal", text))
-            except discord.HTTPException:
-                pass  # they share no server with the bot, or have DMs closed
         return web.json_response({"ok": True, "detail": "Approved the appeal and unbanned the user" if approved else "Denied the appeal", "before": decided})
 
     async def h_moderation_action(self, request: web.Request) -> web.Response:
@@ -2232,7 +2211,11 @@ class PanelBridge(FormsRoutes, commands.Cog):
             return await self._decide_appeal(guild, admin, action == "approve_appeal", str(body.get("appeal_id", "")), str(body.get("note", "")), mod_log)
         if action == "remove_appeal":
             appeal_raw = str(body.get("appeal_id", ""))
-            removed = appeal_store.remove_test(self.storage, guild.id, int(appeal_raw)) if is_digits(appeal_raw) else None
+            removed = forms_store.get_response(self.storage, guild.id, int(appeal_raw)) if is_digits(appeal_raw) else None
+            if removed is not None and (not removed["test"] or removed["form_id"] != self.forms_service.appeal_form(guild.id)["id"]):
+                removed = None
+            if removed is not None:
+                forms_store.remove_response(self.storage, guild.id, removed["id"])
             if removed is None:
                 raise BridgeError(404, "Only test appeals can be removed, and that one no longer exists.")
             return web.json_response({"ok": True, "detail": "Removed the test appeal", "before": removed})
