@@ -32,3 +32,19 @@ def may_manage_channel(interaction: discord.Interaction, channel: discord.abc.Gu
     """Whether the person may manage `channel` itself, which need not be the
     channel the command was run in."""
     return bool(channel.permissions_for(interaction.user).manage_channels)
+
+
+def required_permissions(command: app_commands.Command) -> list[str]:
+    """The member permissions a command checks before it runs, by their code
+    names. Read from its `has_permissions` or `server_permissions` check,
+    which keeps them in the check's closure."""
+    required: list[str] = []
+    for check in getattr(command, "checks", []):
+        name = getattr(check, "__qualname__", "")
+        if "bot_has" in name or not ("has_permissions" in name or "server_permissions" in name):
+            continue
+        for cell in check.__closure__ or ():
+            if isinstance(cell.cell_contents, dict):
+                required += [permission for permission, wanted in cell.cell_contents.items() if wanted]
+    return list(dict.fromkeys(required))
+
