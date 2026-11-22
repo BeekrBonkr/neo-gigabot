@@ -7,6 +7,7 @@ same wherever it is filled in.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import re
@@ -305,6 +306,8 @@ class FormsService:
         elif do == "channel":
             if not (is_owner or perms.manage_channels):
                 raise FormError("Opening a channel needs the Manage Channels permission.")
+            if action["log_channel_id"]:
+                text_channel(action["log_channel_id"], "the transcripts")
             if action["category_id"]:
                 category = guild.get_channel(int(action["category_id"]))
                 if not isinstance(category, discord.CategoryChannel):
@@ -336,13 +339,41 @@ class FormsService:
         return role
 
     PLACEHOLDER = re.compile(r"\{([^{}\n]{1,200})\}")
+    # The form data a message can use besides the answers, and what each is, for the builder's list.
+    DATA = {
+        "user": "Their name", "mention": "Pings them", "name": "Their name in this server", "user_id": "Their Discord ID",
+        "number": "The response's number in this form", "answers": "Every question and answer", "date": "The day it was sent (UTC)",
+        "time": "The time it was sent (UTC)", "form": "This form's title", "form_link": "This form's link", "responses_link": "Where staff read the responses",
+        "responses": "How many responses the form has", "server": "The server's name", "members": "How many members the server has",
+        "status": "submitted, pending, approved or denied", "note": "The staff's note when deciding", "decided_by": "Who decided it",
+        "account_created": "When their Discord account was made", "joined": "When they joined the server",
+    }
+
+    def data(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any]) -> dict[str, str]:
+        """Everything a message can say about a response, by name. On an anonymous form, nothing that says who answered."""
+        hidden = form["options"]["anonymous"] and not response.get("test")
+        member = guild.get_member(int(response["user_id"]))
+        sent = forms._moment(response.get("created_at")) or datetime.now(timezone.utc)
+        decider = response.get("decided_by")
+        lines = [f"**{forms.plain(entry['question'])}**\n{entry['answer'] or '(no answer)'}" for entry in response["answers"]]
+        values = {
+            "user": self.who(form, response, mention=False), "mention": self.who(form, response),
+            "name": "Someone" if hidden else (member.display_name if member else (response["user_name"] or str(response["user_id"]))),
+            "user_id": "" if hidden else str(response["user_id"]), "number": str(response.get("number") or "test"),
+            "answers": "\n\n".join(lines), "date": f"{sent:%Y-%m-%d}", "time": f"{sent:%H:%M} UTC", "form": forms.plain(form["title"]),
+            "form_link": self.link(form), "responses_link": site_url(self.bot, f"/app/{form['guild_id']}/forms/{form['id']}/responses"),
+            "responses": str(forms.count_responses(self.storage, form["id"])), "server": guild.name, "members": f"{guild.member_count or 0:,}",
+            "status": response["status"], "note": response.get("decision_note") or "", "decided_by": f"<@{decider}>" if decider else "",
+            "account_created": "" if hidden else f"{discord.utils.snowflake_time(int(response['user_id'])):%Y-%m-%d}",
+            "joined": "" if hidden or member is None or member.joined_at is None else f"{member.joined_at:%Y-%m-%d}",
+        }
+        return values
 
     def fill(self, text: str, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any]) -> str:
-        """A message with its placeholders filled in: {user}, {mention},
-        {form}, {server}, {status}, {note}, and any answer, by its question's
-        ID ({q3}) or by the question itself ({What should we call you?})."""
-        fixed = {"mention": self.who(form, response), "user": self.who(form, response, mention=False), "form": forms.plain(form["title"]),
-                 "server": guild.name, "status": response["status"], "note": response.get("decision_note") or ""}
+        """A message with its form data filled in: the names in DATA, and any
+        answer, by its question's ID ({q3}) or by the question itself
+        ({What should we call you?}). Anything else is left as it is."""
+        fixed = self.data(guild, form, response)
         answers = {entry["id"]: entry["answer"] for entry in response["answers"] if entry.get("id")}
         by_text = {forms.plain(entry["question"]).strip().casefold(): entry["answer"] for entry in response["answers"]}
 
@@ -355,6 +386,24 @@ class FormsService:
             return by_text.get(forms.plain(key).strip().casefold(), match.group(0))
 
         return self.PLACEHOLDER.sub(one, text)
+
+    def compose(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any] | None, message: dict[str, Any],
+                *, prefix: str = "") -> tuple[str | None, discord.Embed | None]:
+        """A message as the bot posts it: plain text, or an embed with its
+        title, color, image and footer. Form data is filled in where there is a
+        response to take it from. `prefix` goes before it as plain text (a ping)."""
+        fill = (lambda text: self.fill(text, guild, form, response)) if response is not None else (lambda text: text)
+        text = fill(message.get("text") or "")
+        if message.get("style") != "embed":
+            content = (prefix + text)[:2000]
+            return content or None, None
+        embed = discord.Embed(title=fill(message.get("title") or "")[:256] or None, description=text[:4096] or None,
+                              color=discord.Color(int(message["color"][1:], 16)) if message.get("color") else discord.Color.blurple())
+        if message.get("image"):
+            embed.set_image(url=message["image"])
+        if message.get("footer"):
+            embed.set_footer(text=fill(message["footer"])[:2048])
+        return prefix or None, embed
 
     async def run_actions(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], moment: str) -> list[str]:
         """Do what the form says should happen at this moment, where the
@@ -390,9 +439,9 @@ class FormsService:
                     if channel is None:
                         raise FormError("the channel is gone")
                     ping = guild.get_role(int(action["ping_role_id"])) if action["ping_role_id"] else None
-                    text = (f"{ping.mention} " if ping else "") + self.fill(action["text"], guild, form, response)
-                    await channel.send(text[:2000], allowed_mentions=discord.AllowedMentions(everyone=False, roles=[ping] if ping else False,
-                                                                                            users=[discord.Object(id=int(response["user_id"]))]))
+                    content, embed = self.compose(guild, form, response, action, prefix=f"{ping.mention} " if ping else "")
+                    await channel.send(content, embed=embed, allowed_mentions=discord.AllowedMentions(
+                        everyone=False, roles=[ping] if ping else False, users=[discord.Object(id=int(response["user_id"]))]))
                 elif do == "summary":
                     channel = guild.get_channel(int(action["channel_id"]))
                     if channel is None:
@@ -402,7 +451,8 @@ class FormsService:
                                        allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[ping] if ping else False))
                 elif do == "dm":
                     user = member or await self.bot.fetch_user(int(response["user_id"]))
-                    await user.send(embed=self.bot.embeds.info_embed(forms.plain(form["title"])[:200], self.fill(action["text"], guild, form, response)[:4000]))
+                    content, embed = self.compose(guild, form, response, action)
+                    await user.send(content, embed=embed)
                 elif do == "thread":
                     channel = guild.get_channel(int(action["channel_id"]))
                     if channel is None or not hasattr(channel, "create_thread"):
@@ -410,7 +460,8 @@ class FormsService:
                     name = self.fill(action["name"], guild, form, response) if action["name"] else f"{forms.plain(form['title'])[:60]} - {response['user_name'] or response['user_id']}"
                     thread = await channel.create_thread(name=name[:100], type=discord.ChannelType.private_thread, invitable=False, reason=reason)
                     forms.set_thread(self.storage, response["id"], thread.id)
-                    await thread.send(self._opening(guild, form, response, action), allowed_mentions=only_them)
+                    content, embed = self._opening(guild, form, response, action)
+                    await thread.send(content, embed=embed, allowed_mentions=only_them)
                 elif do == "channel":
                     await self._open_channel(guild, form, response, action, member, reason, only_them)
             except (discord.HTTPException, FormError) as exc:
@@ -421,9 +472,14 @@ class FormsService:
                 log.exception("A form action broke in guild %s (form %s, %s on %s)", guild.id, form["id"], do, moment)
         return failed
 
-    def _opening(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any]) -> str:
+    def _opening(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any]) -> tuple[str | None, discord.Embed | None]:
+        """The first message in a thread or channel opened for a response: it pings them, and says what the action says."""
         link = self.responses_link(form, "Their response")
-        return ((self.fill(action["text"], guild, form, response) + "\n\n") if action["text"] else "") + f"<@{response['user_id']}>" + (f" · {link}" if link else "")
+        ping = f"<@{response['user_id']}>"
+        if action.get("style") == "embed":
+            content, embed = self.compose(guild, form, response, action, prefix=ping)
+            return content, embed
+        return ((self.fill(action["text"], guild, form, response) + "\n\n") if action["text"] else "") + ping + (f" · {link}" if link else ""), None
 
     async def _open_channel(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any],
                             member: discord.Member | None, reason: str, only_them: discord.AllowedMentions) -> None:
@@ -444,7 +500,13 @@ class FormsService:
         name = re.sub(r"[^a-z0-9_-]+", "-", wanted.lower()).strip("-")[:90] or "form-response"
         channel = await guild.create_text_channel(name, category=category, overwrites=overwrites, reason=reason)
         forms.set_thread(self.storage, response["id"], channel.id)
-        await channel.send(self._opening(guild, form, response, action), allowed_mentions=only_them)
+        content, embed = self._opening(guild, form, response, action)
+        view = None
+        if action.get("close_button"):
+            from cogs.forms import ticket_view  # the cog's own button, so presses are handled the same way
+
+            view = ticket_view(response["id"])
+        await channel.send(content, embed=embed, view=view, allowed_mentions=only_them)
 
     def summary_embed(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any]) -> discord.Embed:
         """The whole response, one field a question, for a summary posted in a channel."""
@@ -456,6 +518,74 @@ class FormsService:
         if len(response["answers"]) > 24 or link:
             embed.add_field(name="More", value=(f"{len(response['answers']) - 24} more answers. " if len(response["answers"]) > 24 else "") + (link or ""), inline=False)
         return embed
+
+    # ---------- tickets ----------
+
+    def ticket_action(self, form: dict[str, Any]) -> dict[str, Any] | None:
+        return next((action for action in form["options"]["actions"] if action["do"] == "channel" and action.get("close_button")), None)
+
+    def may_close(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], user: Any) -> bool:
+        """The person the ticket is for, the staff roles that can see it, and anyone who can manage channels."""
+        if user.id in (int(response["user_id"]), guild.owner_id):
+            return True
+        permissions = getattr(user, "guild_permissions", None)
+        if permissions is not None and (permissions.administrator or permissions.manage_channels):
+            return True
+        action = self.ticket_action(form) or {}
+        staff = {int(raw) for raw in action.get("roles", [])}
+        return any(role.id in staff for role in getattr(user, "roles", []))
+
+    async def close_ticket(self, guild: discord.Guild, channel: Any, form: dict[str, Any], response: dict[str, Any], closer: Any) -> bool:
+        """Save the ticket's conversation to the transcript channel, if one was
+        chosen, then delete the ticket channel. Returns whether a transcript was saved."""
+        action = self.ticket_action(form) or {}
+        log_channel = guild.get_channel(int(action["log_channel_id"])) if action.get("log_channel_id") else None
+        saved = False
+        if log_channel is not None:
+            lines = []
+            async for message in channel.history(limit=2000, oldest_first=True):
+                when = f"{message.created_at:%Y-%m-%d %H:%M}"
+                body = message.content or ""
+                for embed in message.embeds:
+                    body += "".join(f"\n[embed] {part}" for part in (embed.title, embed.description) if part)
+                for attachment in message.attachments:
+                    body += f"\n[file] {attachment.url}"
+                lines.append(f"[{when} UTC] {message.author} ({message.author.id}): {body}")
+            text = f"{forms.plain(form['title'])}, response {response.get('number') or response['id']}, in #{channel.name}\n\n" + "\n".join(lines)
+            embed = self.bot.embeds.info_embed(
+                f"🎫 Ticket closed: {forms.plain(form['title'])[:200]} #{response.get('number') or response['id']}",
+                f"Opened by <@{response['user_id']}>, closed by {closer.mention}. {len(lines)} message{'s' if len(lines) != 1 else ''}.")
+            try:
+                await log_channel.send(embed=embed, file=discord.File(io.BytesIO(text.encode("utf-8")), filename=f"ticket-{response.get('number') or response['id']}.txt"))
+                saved = True
+            except discord.HTTPException as exc:
+                log.warning("Could not save a ticket transcript in guild %s: %s", guild.id, exc)
+        await channel.delete(reason=f"Ticket closed by {closer} ({closer.id})")
+        return saved
+
+    async def make_ticket(self, guild: discord.Guild, member: discord.Member, *, title: str, button_channel_id: str, staff_roles: list[str],
+                          category_id: str, log_channel_id: str, post_now: bool) -> tuple[dict[str, Any], str]:
+        """A Ticket form, set up and ready: a Discord form whose responses each
+        open a private channel for the person and the staff, with a close
+        button, and an "Open a ticket" message in a channel. Returns the form
+        and a sentence about what was done."""
+        action = forms.clean_action({
+            "on": "submit", "do": "channel", "category_id": category_id, "roles": staff_roles, "name": "ticket-{number}",
+            "style": "embed", "title": "Ticket #{number}: {q1}", "text": "{answers}\n\nThe staff will be with you soon. Press the button below when this is sorted.",
+            "close_button": True, "log_channel_id": log_channel_id,
+        })
+        button = forms.clean_button_message({"style": "embed", "title": "Need help?", "label": "Open a ticket",
+                                             "text": "Press the button below to open a ticket. Only you and the staff will see it."})
+        options = forms.clean_options({"answered_in": forms.DISCORD, "ticket": True, "multiple": True, "actions": [action], "button_message": button})
+        template = forms.TEMPLATES["ticket"]
+        self.prepare_actions(guild, options, member, forms.clean_items(template["items"]), [])
+        if not button_channel_id or guild.get_channel(int(button_channel_id)) is None:
+            raise FormError("Choose the channel for the 'Open a ticket' message.", "option:button_channel_id")
+        made = forms.create_form(self.storage, guild.id, member.id, title=title or template["title"], template="ticket", options=options,
+                                 status=forms.OPEN if post_now else forms.CLOSED)
+        if not post_now:
+            return made, "It is a draft: open it and post its button when you are ready"
+        return made, ""
 
     # ---------- deciding ----------
 

@@ -119,7 +119,7 @@ def test_staff_build_a_form_and_members_answer_it(storage):
         assert status == 200 and made["form"]["status"] == "closed" and made["form"]["link"] == f"https://site.test/forms/{GUILD}/game-night"
         _, listed = await get("forms", user_id=STAFF)
         assert listed["staff"] and listed["can_manage"] and [f["kind"] for f in listed["forms"]] == ["appeal", "general"]
-        assert {t["key"] for t in listed["templates"]} == set(forms.TEMPLATES) and listed["limits"]["forms"] == 20
+        assert {t["key"] for t in listed["templates"]} == {k for k, t in forms.TEMPLATES.items() if not t.get("hidden")} and listed["limits"]["forms"] == 20
         assert (await get("forms", user_id=ROBIN))[1] == {"staff": False, "can_manage": False, "forms": []}   # nothing open yet
         assert (await get(f"forms/{form_id}", user_id=ROBIN))[1]["can_respond"] is False
 
@@ -193,7 +193,7 @@ def test_review_actions_and_anonymous_forms(storage):
         assert "was approved" in w.people[ROBIN].dms[0].description and "Welcome!" in w.people[ROBIN].dms[0].description
         assert (await post(f"forms/{form_id}/decide", user_id=str(STAFF), action="approve", response_id=ids[ROBIN]))[0] == 409   # once only
         await post(f"forms/{form_id}/decide", user_id=str(STAFF), action="deny", response_id=ids[SAM])
-        assert [dm.description for dm in w.people[SAM].dms] == ["Sorry, not this time.", "Your response to **Staff application** in **Server** was not accepted."]
+        assert [getattr(dm, "description", dm) for dm in w.people[SAM].dms] == ["Sorry, not this time.", "Your response to **Staff application** in **Server** was not accepted."]
         assert STAFF_ROLE not in w.people[SAM].roles
         assert "You can send another after" in (await get(f"forms/{form_id}", user_id=SAM))[1]["reason"]
 
@@ -353,5 +353,85 @@ def test_actions_use_the_answers_and_only_run_when_they_match(storage):
         assert status == 400 and refused["field"] == "action:5" and "at or above your own highest role" in refused["error"]
         status, refused = await post("forms", user_id=str(ADMIN), action="update", form_id=form_id, items=items + [{"kind": "short", "text": ""}])
         assert status == 400 and refused["field"] == "item:3"
+
+    run(storage, scenario)
+
+
+def test_a_ticket_form_is_set_up_in_one_step_and_its_channel_closes_with_a_transcript(storage):
+    async def scenario(w, get, post):
+        made_channels = []
+
+        async def create_text_channel(name, category=None, overwrites=None, reason=None):
+            channel = Channel(5000 + len(made_channels), name)
+            channel.overwrites, channel.deleted = overwrites, False
+
+            async def delete(reason=None):
+                channel.deleted = True
+
+            async def history(limit=None, oldest_first=False):
+                for content, kwargs in channel.sent:
+                    yield NS(created_at=datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc), author=NS(id=999, __str__=lambda self: "bot"),
+                             content=content or "", embeds=[kwargs["embed"]] if kwargs.get("embed") else [], attachments=[])
+
+            channel.delete, channel.history = delete, history
+            made_channels.append(channel)
+            return channel
+
+        w.guild.create_text_channel, w.guild.default_role = create_text_channel, EVERYONE
+        category = discord.CategoryChannel.__new__(discord.CategoryChannel)
+        category.id = 30
+        w.channels[30] = category
+        status, missing = await post("forms", user_id=str(ADMIN), action="create", form_type="ticket", ticket={"staff_roles": [str(STAFF_ROLE.id)]})
+        assert status == 400 and missing["field"] == "option:button_channel_id"
+        status, made = await post("forms", user_id=str(ADMIN), action="create", form_type="ticket", title="Help desk",
+                                  ticket={"button_channel_id": "11", "staff_roles": [str(STAFF_ROLE.id)], "category_id": "30", "log_channel_id": "12"})
+        assert status == 200 and made["detail"] == "Created the ticket form Help desk and posted its button in #announcements"
+        assert made["form"]["answered_in"] == "discord" and made["form"]["status"] == "open"
+        posted = w.channels[11].sent[-1]
+        assert posted[1]["embed"].title == "Need help?" and posted[1]["view"].children[0].item.label == "Open a ticket"
+        _, full = await get(f"forms/{made['form']['id']}", user_id=ADMIN, staff=1)
+        assert full["form"]["options"]["ticket"] is True and "number" in full["data"]
+
+        from utils.forms_service import FormsService
+
+        service = FormsService(w.cog.bot)
+        form = service.get(GUILD, made["form"]["id"])
+        for user in (ROBIN, SAM):
+            await service.respond(w.guild, form, user, f"user{user}", {"q1": "A question", "q2": f"help me {user}"}, via="discord")
+        assert [channel.name for channel in made_channels] == ["ticket-1", "ticket-2"]                        # numbered in order
+        first = made_channels[0].sent[0]
+        assert first[0] == f"<@{ROBIN}>" and first[1]["embed"].title == "Ticket #1: A question" and "help me 100" in first[1]["embed"].description
+        assert first[1]["view"].children[0].item.custom_id.startswith("gform:close:")
+        response = forms.responses_of(storage, form["id"], ROBIN)[0]
+        assert service.may_close(w.guild, form, response, w.people[ROBIN]) and service.may_close(w.guild, form, response, w.people[STAFF])
+        assert not service.may_close(w.guild, form, response, w.people[SAM])                                  # someone else's ticket
+        saved = await service.close_ticket(w.guild, made_channels[0], form, response, w.people[STAFF])
+        assert saved and made_channels[0].deleted
+        log = w.channels[12].sent[-1][1]
+        assert "Ticket closed" in log["embed"].title and log["file"].filename == "ticket-1.txt"
+
+    run(storage, scenario)
+
+
+def test_form_data_and_embed_messages(storage):
+    from utils.forms_service import FormsService
+
+    async def scenario(w, get, post):
+        service = FormsService(w.cog.bot)
+        _, made = await post("forms", user_id=str(ADMIN), action="create", template="blank", title="Sign up", answered_in="website")
+        items = [{"kind": "short", "text": "Name", "required": True}]
+        actions = [{"on": "submit", "do": "post", "channel_id": "10", "style": "embed", "title": "#{number} {q1}", "color": "ff8800",
+                    "image": "https://cdn.example/banner.png", "footer": "{date}", "text": "{mention} ({user_id}) joined {server} as #{number} of {responses}.\n{answers}"}]
+        assert (await post("forms", user_id=str(ADMIN), action="update", form_id=made["form"]["id"], items=items, status="open", options={"actions": actions}))[0] == 200
+        bad = await post("forms", user_id=str(ADMIN), action="update", form_id=made["form"]["id"], options={"actions": [{**actions[0], "image": "javascript:x"}]})
+        assert bad[0] == 400 and bad[1]["field"] == "action:0" and "https://" in bad[1]["error"]
+        form = service.get(GUILD, made["form"]["id"])
+        await service.respond(w.guild, form, ROBIN, "robin", {"q1": "Rob"})
+        content, kwargs = w.channels[10].sent[-1]
+        embed = kwargs["embed"]
+        assert embed.title == "#1 Rob" and embed.color.value == 0xFF8800 and embed.image.url == "https://cdn.example/banner.png"
+        assert embed.description.startswith(f"<@{ROBIN}> ({ROBIN}) joined Server as #1 of 1.") and "**Name**\nRob" in embed.description
+        assert len(embed.footer.text) == 10                                                                    # the date
+        assert set(FormsService.DATA) >= {"number", "answers", "date", "user_id", "joined", "account_created", "members", "form_link"}
 
     run(storage, scenario)
