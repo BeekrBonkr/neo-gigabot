@@ -36,6 +36,7 @@ from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
+from utils import site_access
 from utils.checks import required_permissions
 from utils.numbers import is_digits
 from utils import appeals as appeal_store
@@ -591,11 +592,37 @@ class PanelBridge(commands.Cog):
         cleaned = sync_command_modules(before, validate_settings(body.get("settings"), defaults))
         if cleaned.get("welcome_card_background") == "image" and welcome_card.read_background(self.storage, raw) is None:
             cleaned["welcome_card_background"] = "gradient"  # nothing was uploaded to show
+        if body.get("user_id") is not None:
+            self._may_change(int(raw), self._user_id(request, str(body.get("user_id", ""))), before, cleaned)
         # Goes through the bot's own save path so its in-memory cache updates
         # immediately - the change is live for the very next command.
         save_guild_settings(self.storage, int(raw), cleaned)
         log.info("Panel updated settings for guild %s", raw)
         return web.json_response({"before": before, "settings": get_guild_settings(self.storage, int(raw))})
+
+    def _may_change(self, guild_id: int, user_id: int, before: dict[str, Any], after: dict[str, Any]) -> None:
+        """Refuse a settings save that changes more than this person may. The
+        website names who is saving; the owner panel does not, and may change
+        anything. Who can open which page is for administrators alone to
+        decide, the command switches need the Commands area, everything else
+        the Modules area."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            raise BridgeError(404, "The bot is not in a server with that ID.")
+        changed = {key for key in after if before.get(key) != after.get(key)}
+        if not changed:
+            return
+        standing = self._member_access(guild, user_id)
+        if not standing["member"]:
+            raise BridgeError(403, "You are not a member of this server.")
+        if standing["admin"]:
+            return
+        if any(key.startswith(site_access.PREFIX) for key in changed):
+            raise BridgeError(403, "Only an administrator can change who may open which page.")
+        # a module's switch also turns its commands on or off, so the Modules area covers that much
+        area = "commands" if changed <= {"blocked_commands"} else "modules"
+        if not standing["access"][area]["manage"]:
+            raise BridgeError(403, "You don't have the permission this server asks for to change that on the website.")
 
     async def h_defaults_get(self, request: web.Request) -> web.Response:
         return web.json_response({"settings": get_default_settings(self.storage)})
@@ -694,12 +721,14 @@ class PanelBridge(commands.Cog):
         matches the bot's /settings gate (Administrator), plus the guild owner."""
         member = guild.get_member(user_id)
         if member is None:
-            return {"member": False, "owner": False, "admin": False}
+            return {"member": False, "owner": False, "admin": False, "access": site_access.no_access()}
         is_owner = guild.owner_id == member.id
         return {
             "member": True,
             "owner": is_owner,
             "admin": bool(is_owner or member.guild_permissions.administrator),
+            # what the server lets this person open on its pages (utils/site_access.py)
+            "access": site_access.access_for(member.guild_permissions, get_guild_settings(self.storage, guild.id), is_owner=is_owner),
             "name": member.display_name,
         }
 
@@ -1127,7 +1156,7 @@ class PanelBridge(commands.Cog):
         unsaved card settings to try out."""
         guild = self._guild(request)
         body = await self._json(request)
-        member = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        member = self._site_access(guild, "modules", "manage", self._user_id(request, str(body.get("user_id", ""))))
         settings = get_guild_settings(self.storage, guild.id)
         tryout = body.get("settings")
         if isinstance(tryout, dict):
@@ -1148,7 +1177,7 @@ class PanelBridge(commands.Cog):
         it. remove: delete it and go back to the gradient."""
         guild = self._guild(request)
         body = await self._json(request)
-        self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        self._site_access(guild, "modules", "manage", self._user_id(request, str(body.get("user_id", ""))))
         action = str(body.get("action", ""))
         before = get_guild_settings(self.storage, guild.id)
         if action == "upload":
@@ -1812,7 +1841,7 @@ class PanelBridge(commands.Cog):
         timed out right now, and whether the bot could lift it. Warnings and
         temp bans are in the bot's database, which the panel reads itself."""
         guild = self._guild(request)
-        self._rr_admin(guild, self._user_id(request, request.query.get("user_id", "")))
+        self._site_access(guild, "moderation", "view", self._user_id(request, request.query.get("user_id", "")))
         muted = [
             {"user_id": str(member.id), "name": member.display_name, "avatar": _asset_url(getattr(member, "display_avatar", None)),
              "until": _iso(member.timed_out_until)}
@@ -1909,7 +1938,7 @@ class PanelBridge(commands.Cog):
         notice: post (or re-post) the warning with the count in the current one."""
         guild = self._guild(request)
         body = await self._json(request)
-        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        admin = self._site_access(guild, "modules", "manage", self._user_id(request, str(body.get("user_id", ""))))
         action = str(body.get("action", ""))
         cog = self.bot.get_cog("Honeypot")
         if cog is None:
@@ -2054,7 +2083,7 @@ class PanelBridge(commands.Cog):
         are, their roles, and how much moderation history they have. An exact
         ID also finds someone who has left, as far as the bot still knows them."""
         guild = self._guild(request)
-        self._rr_admin(guild, self._user_id(request, request.query.get("user_id", "")))
+        self._site_access(guild, ("members", "moderation"), "view", self._user_id(request, request.query.get("user_id", "")))
         query = str(request.query.get("q", "")).strip().lower()[:60]
         if not query:
             return web.json_response({"members": [], "more": False})
@@ -2116,7 +2145,7 @@ class PanelBridge(commands.Cog):
         """The server and its settings for an admin trying the form out. Works
         whether or not appeals are switched on yet."""
         guild = self._guild(request)
-        self._rr_admin(guild, user_id)
+        self._site_access(guild, "modules", "view", user_id)
         return guild, get_guild_settings(self.storage, guild.id)
 
     async def h_appeal_form(self, request: web.Request) -> web.Response:
@@ -2219,7 +2248,7 @@ class PanelBridge(commands.Cog):
         server admin. Both are reported to the mod log like the commands."""
         guild = self._guild(request)
         body = await self._json(request)
-        admin = self._rr_admin(guild, self._user_id(request, str(body.get("user_id", ""))))
+        admin = self._site_access(guild, "moderation", "manage", self._user_id(request, str(body.get("user_id", ""))))
         action, target_raw = str(body.get("action", "")), str(body.get("target_id", ""))
         moderation = self.bot.get_cog("Moderation")
 
@@ -2286,6 +2315,19 @@ class PanelBridge(commands.Cog):
 
     RR_MAX_PAIRS = 10
     RR_BOT_PERMISSIONS = ("view_channel", "send_messages", "embed_links", "add_reactions", "read_message_history")
+
+    def _site_access(self, guild: discord.Guild, areas: str | tuple[str, ...], level: str, user_id: int) -> discord.Member:
+        """The acting member, who must be allowed that much of one of these
+        areas of the server's pages (utils/site_access.py): the permission the
+        server's admins chose for it, Administrator until they choose. The
+        panel checks this too; the bot never relies on its caller for it."""
+        member = guild.get_member(user_id)
+        if member is None:
+            raise BridgeError(403, "You are not a member of this server.")
+        access = site_access.access_for(member.guild_permissions, get_guild_settings(self.storage, guild.id), is_owner=guild.owner_id == member.id)
+        if not any(access[area][level] for area in ((areas,) if isinstance(areas, str) else areas)):
+            raise BridgeError(403, "You don't have the permission this server asks for to do that on the website.")
+        return member
 
     def _rr_admin(self, guild: discord.Guild, user_id: int) -> discord.Member:
         """The acting member, who must hold Administrator (or own the server).
