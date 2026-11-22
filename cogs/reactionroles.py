@@ -157,6 +157,8 @@ class ReactionRoleBuilderView(discord.ui.View):
         )
 
 
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.guild_only()
 class ReactionRoles(
     commands.GroupCog,
     group_name="reactionrole",

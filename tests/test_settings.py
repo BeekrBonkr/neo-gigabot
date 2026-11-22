@@ -338,3 +338,55 @@ def test_the_dashboard_reports_modules_as_the_bot_treats_them(storage):
     update_guild_settings(storage, 7, {"welcome_enabled": False})  # as the website's switch does
     assert "switched off on the website" in state(get_guild_settings(storage, 7), "welcome", True, "<#555>")
     assert state(get_guild_settings(storage, 7), "welcome", False) == "⚫ Off"
+
+
+def test_commands_that_need_a_permission_are_hidden_from_people_without_it(tmp_path):
+    """A run-time permission check alone leaves a command in everyone's list,
+    where it can only ever answer "Missing Permissions". The default
+    permission is what hides it, and what Server Settings > Integrations
+    starts from when an admin chooses who may use a command."""
+    import asyncio
+
+    import discord
+    from discord import app_commands
+    from discord.ext import commands
+
+    import main
+
+    def checked(command):
+        found = {}
+        for check in command.checks:
+            if "bot_has" in check.__qualname__:
+                continue
+            for cell in check.__closure__ or ():
+                value = cell.cell_contents
+                if isinstance(value, dict) and value and all(isinstance(flag, bool) for flag in value.values()):
+                    found.update(value)
+        return found
+
+    async def load():
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none(), help_command=None)
+        bot.project_root = main.Path(main.__file__).resolve().parent
+        bot.storage_path = tmp_path
+        for extension in main.COGS:
+            await bot.load_extension(extension)
+        shown, wrong = [], []
+        for top in bot.tree.get_commands():
+            leaves = [c for c in top.walk_commands() if isinstance(c, app_commands.Command)] if isinstance(top, app_commands.Group) else [top]
+            needs = [checked(leaf) for leaf in leaves]
+            if all(needs) and top.default_permissions is None:
+                shown.append(top.name)
+            if not isinstance(top, app_commands.Group) and needs[0] and top.default_permissions is not None:
+                if discord.Permissions(**needs[0]) != top.default_permissions:
+                    wrong.append(top.name)
+        state = {name: bot.tree.get_command(name) for name in ("ban", "settings", "reactionrole", "music", "ping")}
+        result = shown, wrong, {name: (command.default_permissions, command.guild_only) for name, command in state.items()}
+        for extension in main.COGS:
+            await bot.unload_extension(extension)
+        return result
+
+    shown, wrong, state = asyncio.run(load())
+    assert shown == [] and wrong == []
+    assert state["ban"][0] == discord.Permissions(ban_members=True) and state["settings"][0] == discord.Permissions(administrator=True)
+    assert state["reactionrole"] == (discord.Permissions(manage_roles=True), True)
+    assert state["music"][0] is None and state["ping"][0] is None   # open to everyone, as before
