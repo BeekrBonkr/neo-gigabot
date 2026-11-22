@@ -13,14 +13,14 @@ from discord.ext import commands
 from PIL import Image
 
 import main
-from cogs import image_animate, image_edit, image_filters, image_memes, image_menu, images
+from cogs import audio, image_animate, image_edit, image_filters, image_memes, image_menu, images
 from cogs.image_menu import NOT_GIVEN, EffectForm, EffectPicker, build_catalog, form_parameters, parse_field
 from utils.embeds import EmbedManager
 from utils.imaging import ImageToolkit
 from utils.settings import update_guild_settings
 
 GUILD_ID = 4242
-IMAGE_COGS = [images, image_filters, image_animate, image_memes, image_edit, image_menu]
+IMAGE_COGS = [images, image_filters, image_animate, image_memes, image_edit, audio, image_menu]
 # What a person would type into the form for each command that asks.
 FORM_ANSWERS = {
     "image transform rotate": {"angle": "90"},
@@ -216,10 +216,10 @@ def test_every_command_with_settings_shows_them_in_a_form(storage):
             if any(p.name not in ("attachment", "message_link", "user", "into") for p in command.parameters)
         }
         assert asking == with_settings and set(FORM_ANSWERS) <= asking
-        assert {"filter hue", "animate spin", "animate bitcrush", "image effects jpegify", "edit border"} <= asking  # optional settings count
+        assert {"filter hue", "animate spin", "audio bitcrush", "image effects jpegify", "edit border"} <= asking  # optional settings count
         assert not {"filter invert", "image transform flip", "memegen jail", "image template doom"} & asking  # nothing to set: runs at once
         assert [p.name for p in form_parameters(offered["image text toptext"])] == ["text", "max_size"]  # required first
-        assert len(form_parameters(offered["image transform crop"])) == 5 and len(form_parameters(offered["animate bitcrush"])) == 5
+        assert len(form_parameters(offered["image transform crop"])) == 5 and len(form_parameters(offered["audio bitcrush"])) == 5
         hue = EffectForm(harness.cog, None, offered["filter hue"], form_parameters(offered["filter hue"]))
         assert hue.fields[0][1].default == "180" and hue.fields[0][1].required is False  # filled in with what the command does unasked
         for name in asking:  # every form can be built, within Discord's limits
@@ -252,7 +252,7 @@ def test_every_offered_command_runs_on_the_clicked_image(storage):
     async def body(harness):
         results = {}
         for name, command in harness.offered().items():
-            if name == "animate bitcrush":
+            if name == "audio bitcrush":
                 continue  # needs a video or a sound file in the message: test_bitcrush clicks one
             harness.sent.clear(), harness.errors.clear()
             interaction, origin = FakeInteraction(), FakeInteraction()

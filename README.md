@@ -75,7 +75,7 @@ old bot's data (see [Migrating from legacy gigabot](#migrating-from-legacy-gigab
   and `into`, a second clip whose motion drags the first one's picture around. Right-click a message, then
   Apps → Datamosh, for a private panel with all of those but `into`: set it up, press Mosh, change
   something and go again
-- **Bit crush** (`/animate bitcrush`): crushes the sound of a video or an audio file (MP3, WAV, OGG, FLAC,
+- **Bit crush** (`/audio bitcrush`): crushes the sound of a video or an audio file (MP3, WAV, OGG, FLAC,
   M4A) with `bits`, `downsample`, `mix`, `shape` and `drive`. A video keeps its picture untouched, whole
   and at full size; only the sound is made again. `/animate datamosh` has a `bitcrush` option (light,
   heavy, destroyed) that does the same to its video's sound

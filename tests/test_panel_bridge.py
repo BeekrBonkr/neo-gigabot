@@ -562,7 +562,7 @@ def test_command_catalogue_has_categories_parameters_and_permissions(storage):
     assert by_name["ping"]["category"] == "fun" and by_name["ping"]["requires"] == []
     assert by_name["owner restart"]["category"] == "owner"
     assert by_name["Set Image Source"]["kind"] == "menu" and by_name["Set Image Source"]["category"] == "images"
-    assert [c["key"] for c in body["categories"]][:3] == ["fun", "images", "music"]
+    assert [c["key"] for c in body["categories"]][:4] == ["fun", "images", "audio", "music"]
 
 
 async def _menu_callback(interaction, message: "discord.Message") -> None: ...

@@ -66,7 +66,7 @@ def test_marking_opens_whole_top_level_commands_and_nothing_else(tmp_path):
         assert marked[name] == ([0, 1], [0, 1, 2]), name
     for name in ("kick", "owner", "help", "reddit", "insult", "settings", "tag"):
         assert marked[name][0] is None and 2 not in (marked[name][1] or []), name  # server installs only, as before
-    assert sum(1 for installs, _ in marked.values() if installs) == 20 + 5 + 1 + 5
+    assert sum(1 for installs, _ in marked.values() if installs) == 20 + 6 + 1 + 5
 
 
 class Refusals:

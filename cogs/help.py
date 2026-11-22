@@ -40,6 +40,7 @@ CATEGORY_DEFS: Final[list[tuple[str, str, str, list[str]]]] = [
         ],
     ),
     ("images", "🖼️", "Images & Memes", ["image", "filter", "animate", "memegen", "edit"]),
+    ("audio", "🔊", "Audio", ["audio"]),
     ("music", "🎵", "Music", ["music"]),
     (
         "moderation",

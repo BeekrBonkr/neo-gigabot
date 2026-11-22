@@ -31,6 +31,7 @@ COGS = [
     "cogs.image_animate",
     "cogs.image_memes",
     "cogs.image_edit",
+    "cogs.audio",
     "cogs.image_menu",
     "cogs.logging",
     "cogs.moderation",
