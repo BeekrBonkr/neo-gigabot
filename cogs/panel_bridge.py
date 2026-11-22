@@ -263,10 +263,11 @@ PLAYLIST_SEARCH_RESULTS = 30
 
 
 class BridgeError(Exception):
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, *, field: str | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.field = field  # what was wrong, for a form the panel can point into
 
 
 class PanelBridge(FormsRoutes, commands.Cog):
@@ -402,7 +403,7 @@ class PanelBridge(FormsRoutes, commands.Cog):
         try:
             return await handler(request)
         except BridgeError as exc:
-            return web.json_response({"error": exc.message}, status=exc.status)
+            return web.json_response({"error": exc.message, **({"field": exc.field} if exc.field else {})}, status=exc.status)
         except playlist_store.PlaylistError as exc:
             # The store's messages use `backticks` for Discord; plain quotes read better on a web page.
             return web.json_response({"error": str(exc).replace("`", '"')}, status=400)

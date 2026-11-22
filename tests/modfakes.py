@@ -14,6 +14,7 @@ class Role:
         self.id, self.name, self.position, self.managed, self._default = role_id, name, position, managed, default
         self.permissions = perms or discord.Permissions.none()
         self.mention = f"<@&{role_id}>"
+        self.mentionable = False
 
     def is_default(self):
         return self._default
@@ -50,6 +51,9 @@ class Member:
 
     async def kick(self, reason=None):
         self.kicked = True
+
+    async def edit(self, nick=None, reason=None):
+        self.nick = nick
 
     async def send(self, *args, **kwargs):
         self.dms.append(kwargs.get("embed") or (args[0] if args else None))

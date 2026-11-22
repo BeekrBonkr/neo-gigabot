@@ -60,6 +60,7 @@ class FormsRoutes:
             "status": form["status"], "questions": len(forms.questions(form["items"])), "responses": form.get("responses", 0),
             "waiting": form.get("waiting", 0), "review": form["options"]["review"], "anonymous": form["options"]["anonymous"],
             "audience": form["options"]["audience"], "link": self.forms_service.link(form), "updated_at": form["updated_at"],
+            "answered_in": form["options"].get("answered_in", forms.WEBSITE),
         }
 
     def _for_answering(self, form: dict[str, Any]) -> dict[str, Any]:
@@ -69,6 +70,7 @@ class FormsRoutes:
             "id": form["id"], "slug": form["slug"], "kind": form["kind"], "title": form["title"], "description": form["description"],
             "items": form["items"], "review": options["review"], "anonymous": options["anonymous"], "editable": options["editable"],
             "multiple": options["multiple"], "limits": {"answer": forms.MAX_ANSWER, "short": forms.MAX_SHORT_ANSWER},
+            "answered_in": options.get("answered_in", forms.WEBSITE), "pages": len(forms.discord_pages(form["items"])),
         }
 
     @staticmethod
@@ -141,6 +143,7 @@ class FormsRoutes:
         if request.query.get("staff") == "1":
             self._site_access(guild, "forms", "view", user_id)
             return web.json_response({"form": {**self._summary_line(form), "items": form["items"], "options": form["options"]},
+                                      "pages": [[item["id"] for item in page] for page in forms.discord_pages(form["items"])],
                                       "can_manage": self._staff(guild, user_id, "manage"), "responses": forms.count_responses(self.storage, form["id"]),
                                       "kinds": list(forms.QUESTION_KINDS), "action_moments": list(forms.ACTION_MOMENTS), "action_kinds": list(forms.ACTION_KINDS)})
         preview = request.query.get("preview") == "1"
@@ -154,6 +157,9 @@ class FormsRoutes:
                 raise self.Error(409, str(exc)) from exc
             if not standing["available"]:
                 raise self.Error(404, NOT_AVAILABLE)
+            elsewhere = service.wrong_place(form, forms.WEBSITE)
+            if elsewhere and standing["can_respond"]:
+                standing = {**standing, "can_respond": False, "reason": elsewhere}
         return web.json_response({
             "guild": {"id": str(guild.id), "name": guild.name, "icon": str(guild.icon.url) if guild.icon else None},
             "form": self._for_answering(form), "preview": preview, "can_respond": standing["can_respond"], "reason": standing["reason"],
@@ -192,7 +198,9 @@ class FormsRoutes:
         action, service = str(body.get("action", "")), self.forms_service
         try:
             if action == "create":
-                made = forms.create_form(self.storage, guild.id, member.id, title=str(body.get("title") or ""), template=str(body.get("template") or "blank"))
+                where = forms.DISCORD if body.get("answered_in") == forms.DISCORD else forms.WEBSITE
+                made = forms.create_form(self.storage, guild.id, member.id, title=str(body.get("title") or ""), template=str(body.get("template") or "blank"),
+                                         options={"answered_in": where})
                 return web.json_response({"ok": True, "detail": f"Created the form {made['title']}", "form": self._summary_line(made)})
             form = self._form(guild, str(body.get("form_id", "")))
             if action == "delete":
@@ -202,11 +210,11 @@ class FormsRoutes:
                 options = body.get("options")
                 if options is not None:
                     cleaned = forms.clean_options(options, form["options"])
-                    problem = service.action_problem(guild, cleaned, member)
-                    if problem:
-                        raise FormError(problem)
-                    if form["kind"] == forms.APPEAL:
-                        cleaned["actions"] = [action_ for action_ in cleaned["actions"] if action_["do"] != "thread"]
+                    items = forms.clean_items(body["items"]) if body.get("items") is not None else form["items"]
+                    service.prepare_actions(guild, cleaned, member, items, form["options"]["actions"])
+                    if form["kind"] == forms.APPEAL:  # a banned user is not in the server: nothing that needs them there
+                        cleaned["actions"] = [entry for entry in cleaned["actions"] if entry["do"] in ("post", "summary", "dm")]
+                        cleaned["answered_in"] = forms.WEBSITE
                     options = cleaned
                 status = body.get("status") if form["kind"] == forms.GENERAL else None  # a built-in form is switched by its module
                 changed = forms.update_form(self.storage, guild.id, form["id"], title=body.get("title") if form["kind"] == forms.GENERAL else None,
@@ -217,7 +225,7 @@ class FormsRoutes:
             if action == "post":
                 return await self._post_form_button(guild, member, form, str(body.get("channel_id", "")))
         except FormError as exc:
-            raise self.Error(400, str(exc)) from exc
+            raise self.Error(400, str(exc), field=exc.field) from exc
         raise self.Error(400, "Unknown action.")
 
     async def _post_form_button(self, guild: discord.Guild, member: discord.Member, form: dict[str, Any], channel_raw: str) -> web.Response:
@@ -253,7 +261,7 @@ class FormsRoutes:
         raw_edit = str(body.get("response_id") or "")
         try:
             result = await self.forms_service.respond(guild, form, user_id, str(body.get("user_name", "")), body.get("answers"), test=test,
-                                                      response_id=int(raw_edit) if is_digits(raw_edit) else None)
+                                                      response_id=int(raw_edit) if is_digits(raw_edit) else None, via=forms.WEBSITE)
         except FormError as exc:
             raise self.Error(404 if str(exc) == NOT_AVAILABLE else 409, str(exc)) from exc
         channel = guild.get_channel(int(form["options"]["channel_id"])) if is_digits(str(form["options"]["channel_id"])) else None

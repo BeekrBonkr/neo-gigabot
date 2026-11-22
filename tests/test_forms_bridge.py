@@ -22,7 +22,7 @@ ADMIN, STAFF, ROBIN, SAM, OUTSIDER = 4, 5, 100, 101, 900
 
 EVERYONE = Role(1, "@everyone", 0, default=True)
 MEMBER_ROLE = Role(2, "Member", 1)
-STAFF_ROLE = Role(3, "Staff", 4, discord.Permissions(kick_members=True, manage_messages=True))
+STAFF_ROLE = Role(3, "Staff", 4, discord.Permissions(kick_members=True, manage_messages=True, manage_roles=True))
 ADMIN_ROLE = Role(4, "Admin", 8, discord.Permissions(administrator=True))
 BOT_ROLE = Role(5, "Bot", 9)
 ROLES = (EVERYONE, MEMBER_ROLE, STAFF_ROLE, ADMIN_ROLE, BOT_ROLE)
@@ -199,7 +199,7 @@ def test_review_actions_and_anonymous_forms(storage):
 
         _, survey = await post("forms", user_id=str(ADMIN), action="create", template="feedback")
         sid = survey["form"]["id"]
-        assert "anonymous form can't open one" in (await post("forms", user_id=str(ADMIN), action="update", form_id=sid, options={"actions": actions[:1]}))[1]["error"]
+        assert "anonymous form can't do it" in (await post("forms", user_id=str(ADMIN), action="update", form_id=sid, options={"actions": actions[:1]}))[1]["error"]
         await post("forms", user_id=str(ADMIN), action="update", form_id=sid, status="open", options={"channel_id": "10"})
         _, page = await get(f"forms/{sid}", user_id=ROBIN)
         await post(f"forms/{sid}/respond", user_id=str(ROBIN), user_name="robin", answers={page["form"]["items"][0]["id"]: "5"})
@@ -274,5 +274,84 @@ def test_ban_appeals_are_the_servers_built_in_form_and_old_ones_come_along(stora
         assert status == 200 and done["detail"] == "Approved the appeal and unbanned the user" and OUTSIDER not in w.banned
         assert "was approved. You can rejoin" in w.outsider.dms[0].description
         assert (await post(f"forms/{form['id']}/decide", user_id=str(ADMIN), action="remove", response_id=sent["appeal_id"]))[0] == 404   # a real appeal stays on record
+
+    run(storage, scenario)
+
+
+def test_actions_use_the_answers_and_only_run_when_they_match(storage):
+    async def scenario(w, get, post):
+        nick_log = []
+
+        async def edit(nick=None, reason=None):
+            nick_log.append(nick)
+
+        w.people[ROBIN].edit = edit
+        w.guild.default_role = EVERYONE
+        made_channels = []
+
+        async def create_text_channel(name, category=None, overwrites=None, reason=None):
+            channel = Channel(5000 + len(made_channels), name)
+            channel.overwrites = overwrites
+            made_channels.append(channel)
+            return channel
+
+        w.guild.create_text_channel = create_text_channel
+        category = discord.CategoryChannel.__new__(discord.CategoryChannel)
+        category.id = 30
+        w.channels[30] = category
+
+        _, made = await post("forms", user_id=str(ADMIN), action="create", template="blank", title="Join a team", answered_in="discord")
+        form_id = made["form"]["id"]
+        assert made["form"]["answered_in"] == "discord"
+        items = [{"kind": "short", "text": "What should we call you?", "required": True},
+                 {"kind": "dropdown", "text": "Which team?", "required": True, "options": ["Red", "Blue"]},
+                 {"kind": "role", "text": "Pick a colour role"}]
+        _, full = await get(f"forms/{form_id}", user_id=ADMIN, staff=1)
+        actions = [
+            {"on": "submit", "do": "nickname", "text": "{What should we call you?} | {q2}"},
+            {"on": "submit", "do": "summary", "channel_id": "10", "ping_role_id": str(STAFF_ROLE.id), "text": "New sign-up from {user} for {q2}."},
+            {"on": "submit", "do": "post", "channel_id": "10", "text": "Blue team, welcome {mention}!", "if_question": "q2", "if_value": "blue"},
+            {"on": "submit", "do": "picked_role", "question": "q3"},
+            {"on": "submit", "do": "channel", "category_id": "30", "roles": [str(STAFF_ROLE.id)], "name": "team {q1}", "text": "Your team chat, {user}."},
+        ]
+        status, saved = await post("forms", user_id=str(ADMIN), action="update", form_id=form_id, items=items, status="open", options={"actions": actions})
+        assert status == 200, saved
+        _, full = await get(f"forms/{form_id}", user_id=ADMIN, staff=1)
+        assert all(action["by"] == str(ADMIN) for action in full["form"]["options"]["actions"])     # who set each one up is kept
+        assert full["pages"] == [["q1", "q2", "q3"]]
+
+        # the website does not take answers to a Discord form
+        _, page = await get(f"forms/{form_id}", user_id=ROBIN)
+        assert page["can_respond"] is False and "answered in Discord" in page["reason"]
+        refused = await post(f"forms/{form_id}/respond", user_id=str(ROBIN), user_name="robin", answers={"q1": "Rob", "q2": "Red"})
+        assert refused[0] == 409 and "answered in Discord" in refused[1]["error"]
+
+        from utils.forms_service import FormsService
+
+        service = FormsService(w.cog.bot)
+        form = service.get(GUILD, form_id)
+        w.guild.get_role = lambda rid: next((r for r in (*ROLES, Role(77, "Purple", 2)) if r.id == rid), None)
+        await service.respond(w.guild, form, ROBIN, "robin", {"q1": "Rob", "q2": "Red", "q3": "77"}, via="discord")
+        assert nick_log == ["Rob | Red"]
+        summary = w.channels[10].sent[-1]
+        assert summary[0] == STAFF_ROLE.mention and summary[1]["embed"].description == "New sign-up from robin for Red."
+        assert [field.name for field in summary[1]["embed"].fields][:3] == ["What should we call you?", "Which team?", "Pick a colour role"]
+        assert not any("Blue team" in str(content) for content, _ in w.channels[10].sent)                # the condition was not met
+        assert any(role.id == 77 for role in w.people[ROBIN].roles)                                          # the role they picked
+        (room,) = made_channels
+        assert room.name == "team-rob" and room.overwrites[EVERYONE].view_channel is False and room.overwrites[STAFF_ROLE].view_channel is True
+        assert room.sent[0][0].startswith("Your team chat, robin.")
+
+        await service.respond(w.guild, {**form, "options": {**form["options"], "multiple": True}}, SAM, "sam", {"q1": "Sam", "q2": "Blue", "q3": str(ADMIN_ROLE.id)}, via="discord")
+        assert w.channels[10].sent[-1][0] == f"Blue team, welcome <@{SAM}>!"                                 # matched, ignoring case
+        assert ADMIN_ROLE not in w.people[SAM].roles                                                        # never a moderation role from someone's own pick
+
+        # someone with less rank can still edit the questions of a form an administrator gave actions
+        assert (await post("forms", user_id=str(STAFF), action="update", form_id=form_id, items=items, options={"actions": full["form"]["options"]["actions"]}))[0] == 200
+        status, refused = await post("forms", user_id=str(STAFF), action="update", form_id=form_id, items=items,
+                                     options={"actions": full["form"]["options"]["actions"] + [{"on": "submit", "do": "add_role", "role_id": str(STAFF_ROLE.id)}]})
+        assert status == 400 and refused["field"] == "action:5" and "at or above your own highest role" in refused["error"]
+        status, refused = await post("forms", user_id=str(ADMIN), action="update", form_id=form_id, items=items + [{"kind": "short", "text": ""}])
+        assert status == 400 and refused["field"] == "item:3"
 
     run(storage, scenario)

@@ -65,10 +65,11 @@ def test_a_forms_own_rules_are_checked():
                                    "closes_at": "2027-01-01T10:00", "actions": [{"on": "approve", "do": "add_role", "role_id": "55"}]})
     assert (options["audience"], options["retry_days"], options["review"], options["channel_id"]) == ("members", 365, True, "")
     assert options["max_responses"] == forms.MAX_RESPONSES_PER_FORM and options["closes_at"] == "2027-01-01T10:00:00+00:00"
-    assert options["actions"] == [{"on": "approve", "do": "add_role", "role_id": "55", "channel_id": "", "text": ""}]
+    (action,) = options["actions"]
+    assert (action["on"], action["do"], action["role_id"], action["if_question"], action["by"]) == ("approve", "add_role", "55", "", "")
     for bad in ({"actions": [{"on": "approve", "do": "add_role", "role_id": "55"}]},          # not reviewed: nothing to approve
                 {"review": True, "actions": [{"on": "submit", "do": "explode"}]}, {"actions": [{"on": "submit", "do": "post", "channel_id": "5"}]},
-                {"opens_at": "2027-02-01", "closes_at": "2027-01-01"}, {"actions": [{"on": "submit", "do": "dm", "text": "hi"}] * 6}):
+                {"opens_at": "2027-02-01", "closes_at": "2027-01-01"}, {"actions": [{"on": "submit", "do": "dm", "text": "hi"}] * 11}):
         with pytest.raises(forms.FormError):
             forms.clean_options(bad)
     assert forms.clean_options({"anonymous": True}, current=options)["review"] is True         # what is not given stays
@@ -114,7 +115,7 @@ def test_who_may_answer_and_when(storage):
     assert forms.can_respond(many, forms.responses_of(storage, many["id"], ROBIN), 1)[0] is True
 
     closed = make(storage, items=[{"kind": "short", "text": "Hi"}], status=forms.CLOSED)
-    assert forms.can_respond(closed, [], 0) == (False, "This form is closed.")
+    assert forms.can_respond(closed, [], 0) == (False, "This form isn't open right now.")
     now = datetime(2027, 1, 10, tzinfo=timezone.utc)
     later = make(storage, items=[{"kind": "short", "text": "Hi"}], opens_at="2027-01-20T00:00", closes_at="2027-01-25T00:00")
     assert "opens on January 20, 2027" in forms.can_respond(later, [], 0, now)[1]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -90,7 +91,7 @@ class FormsService:
         form = {**form, "options": dict(form["options"])}
         form["status"] = forms.OPEN if settings.get("appeals_enabled") else forms.CLOSED
         form["description"] = str(settings.get("appeals_intro") or "")
-        form["options"].update(review=True, multiple=False, audience="anyone", anonymous=False, editable=False,
+        form["options"].update(review=True, multiple=False, audience="anyone", anonymous=False, editable=False, answered_in=forms.WEBSITE,
                                retry_days=appeal_store.reappeal_days(settings), channel_id=str(settings.get("appeals_channel_id") or ""))
         return form
 
@@ -132,7 +133,7 @@ class FormsService:
                 raise FormError("The bot can't read this server's ban list right now.") from exc
             return True, ""
         member = guild.get_member(user_id)
-        if member is None and (options["audience"] != "anyone" or options["require_role_id"] or options["min_member_days"]):
+        if member is None and (options["audience"] != "anyone" or options["require_role_id"] or options["min_member_days"] or options.get("answered_in") == forms.DISCORD):
             return False, NOT_AVAILABLE
         if options["require_role_id"] and not any(str(role.id) == options["require_role_id"] for role in member.roles):
             role = guild.get_role(int(options["require_role_id"]))
@@ -156,11 +157,25 @@ class FormsService:
 
     # ---------- answering ----------
 
+    def wrong_place(self, form: dict[str, Any], via: str) -> str:
+        """Why a form can't be answered from here, or "" when it can."""
+        where = form["options"].get("answered_in", forms.WEBSITE)
+        if where == via:
+            return ""
+        if where == forms.DISCORD:
+            return f"This form is answered in Discord: run /form in the server and pick \"{forms.plain(form['title'])}\", or use its button."
+        link = self.link(form)
+        return "This form is answered on the website" + (f": {link}" if link else ".")
+
     async def respond(self, guild: discord.Guild, form: dict[str, Any], user_id: int, user_name: str, answers: Any,
-                      *, test: bool = False, response_id: int | None = None) -> dict[str, Any]:
+                      *, test: bool = False, response_id: int | None = None, via: str = forms.WEBSITE) -> dict[str, Any]:
         """Take one person's answers. `test` is staff trying the form out: it
         skips who-may-answer and is kept apart. With `response_id`, the
-        answers replace those of the person's own earlier response."""
+        answers replace those of the person's own earlier response. `via` is
+        where they were given; a form only takes answers from its own place."""
+        refused = "" if test else self.wrong_place(form, via)
+        if refused:
+            raise FormError(refused)
         if not test:
             allowed, why = await self.eligible(guild, form, user_id)
             if not allowed:
@@ -219,82 +234,228 @@ class FormsService:
 
     # ---------- what a form does in Discord ----------
 
-    def action_problem(self, guild: discord.Guild, options: dict[str, Any], member: discord.Member | None) -> str | None:
-        """Why this person may not save a form with these actions, or None.
-        Roles follow the rules of the role commands: none at or above the
-        saver's own highest role or the bot's, none managed, and none that
-        carries moderation permissions unless a person approves each one."""
-        for action in options["actions"]:
-            if action["do"] in ("add_role", "remove_role"):
-                role = guild.get_role(int(action["role_id"]))
-                if role is None or role.is_default() or role.managed:
-                    return "One of the roles in the actions can't be given or removed by a bot."
-                if not role < guild.me.top_role:
-                    return f"{role.name} is above the bot's highest role, so the bot can't give or remove it."
-                if member is not None and member.id != guild.owner_id and role >= member.top_role:
-                    return f"{role.name} is at or above your own highest role."
-                if action["do"] == "add_role" and action["on"] == "submit" and role.permissions.value & ELEVATED:
-                    return f"{role.name} carries moderation permissions, so it can only be given when a response is approved."
-            if action["do"] in ("post", "thread"):
-                channel = guild.get_channel(int(action["channel_id"]))
-                if channel is None or not hasattr(channel, "send"):
-                    return "One of the actions points at a channel that isn't a text channel of this server."
-                if member is not None and not channel.permissions_for(member).send_messages:
-                    return f"You can't post in #{channel.name} yourself, so a form of yours can't either."
-            if action["do"] == "thread" and options["anonymous"]:
-                return "A thread shows who answered, so an anonymous form can't open one."
+    def prepare_actions(self, guild: discord.Guild, options: dict[str, Any], member: discord.Member, items: list[dict[str, Any]],
+                        before: list[dict[str, Any]]) -> None:
+        """Check the form's actions before they are saved, and note who set each
+        one up. An action already on the form, unchanged, keeps whoever set it
+        up and is not checked again, so someone with fewer permissions can
+        still edit the questions of a form an administrator gave actions.
+        Raises FormError pointing at the action that is not allowed."""
+        perms, is_owner = member.guild_permissions, member.id == guild.owner_id
+        if perms.administrator:
+            perms = discord.Permissions.all()  # Administrator counts as every permission
+        kinds = {item["id"]: item["kind"] for item in items}
+        for index, action in enumerate(options["actions"]):
+            kept = next((old for old in before if forms.same_action(old, action)), None)
+            if kept is not None:
+                action["by"] = kept.get("by", "")
+                continue
+            action["by"] = str(member.id)
+            try:
+                self._check_action(guild, action, member, perms, is_owner, kinds)
+            except FormError as exc:
+                exc.field = f"action:{index}"
+                raise
         if options["channel_id"]:
             channel = guild.get_channel(int(options["channel_id"]))
             if channel is None or not hasattr(channel, "send"):
-                return "The channel for new responses isn't a text channel of this server."
+                raise FormError("The channel for new responses isn't a text channel of this server.", "option:channel_id")
         if options["require_role_id"] and guild.get_role(int(options["require_role_id"])) is None:
-            return "The role people need to answer isn't a role of this server."
-        return None
+            raise FormError("The role people need to answer isn't a role of this server.", "option:require_role_id")
 
-    def _fill(self, text: str, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any]) -> str:
-        return (text.replace("{mention}", self.who(form, response)).replace("{user}", self.who(form, response, mention=False))
-                .replace("{form}", form["title"]).replace("{server}", guild.name).replace("{status}", response["status"]))
+    def _check_action(self, guild: discord.Guild, action: dict[str, Any], member: discord.Member, perms: discord.Permissions,
+                      is_owner: bool, kinds: dict[str, str]) -> None:
+        def role_ok(role: discord.Role | None, label: str = "That role") -> discord.Role:
+            if role is None or role.is_default() or role.managed:
+                raise FormError(f"{label} can't be given or removed by a bot.")
+            if not role < guild.me.top_role:
+                raise FormError(f"{role.name} is above the bot's highest role, so the bot can't give or remove it.")
+            if not is_owner and role >= member.top_role:
+                raise FormError(f"{role.name} is at or above your own highest role.")
+            return role
+
+        def text_channel(raw: str, label: str = "the channel") -> Any:
+            channel = guild.get_channel(int(raw)) if raw else None
+            if channel is None or not hasattr(channel, "send"):
+                raise FormError(f"Choose a text channel of this server for {label}.")
+            if not channel.permissions_for(member).send_messages:
+                raise FormError(f"You can't post in #{channel.name} yourself, so a form of yours can't either.")
+            return channel
+
+        for question, what in ((action["if_question"], "condition"), (action["question"], "role question")):
+            if question and question not in kinds:
+                raise FormError(f"The {what} points at a question that is no longer on the form.")
+        do = action["do"]
+        if do in ("add_role", "remove_role", "picked_role") and not (is_owner or perms.manage_roles):
+            raise FormError("Giving or removing roles needs the Manage Roles permission.")
+        if do in ("add_role", "remove_role"):
+            role = role_ok(guild.get_role(int(action["role_id"])))
+            if do == "add_role" and action["on"] == "submit" and role.permissions.value & ELEVATED:
+                raise FormError(f"{role.name} carries moderation permissions, so it can only be given when a response is approved.")
+        elif do == "picked_role":
+            if kinds.get(action["question"]) != "role":
+                raise FormError("Choose a 'Pick a role' question: its answer is the role that is given.")
+        elif do == "nickname":
+            if not (is_owner or perms.manage_nicknames):
+                raise FormError("Changing nicknames needs the Manage Nicknames permission.")
+        elif do in ("post", "summary", "thread"):
+            channel = text_channel(action["channel_id"])
+            if do == "thread" and not hasattr(channel, "create_thread"):
+                raise FormError(f"#{channel.name} can't hold threads.")
+        elif do == "channel":
+            if not (is_owner or perms.manage_channels):
+                raise FormError("Opening a channel needs the Manage Channels permission.")
+            if action["category_id"]:
+                category = guild.get_channel(int(action["category_id"]))
+                if not isinstance(category, discord.CategoryChannel):
+                    raise FormError("Choose a category of this server for the new channels, or none.")
+            for raw in action["roles"]:
+                if guild.get_role(int(raw)) is None:
+                    raise FormError("One of the roles that can see the new channel isn't a role of this server.")
+        if action["ping_role_id"]:
+            role = guild.get_role(int(action["ping_role_id"]))
+            if role is None:
+                raise FormError("The role to ping isn't a role of this server.")
+            if not role.mentionable and not (is_owner or perms.mention_everyone):
+                raise FormError(f"@{role.name} can't be pinged by everyone, and pinging it anyway needs the Mention @everyone permission.")
+
+    def _role_for(self, guild: discord.Guild, action: dict[str, Any], role: discord.Role | None, *, picked: bool) -> discord.Role:
+        """A role an action is about to give or remove, checked again now: the
+        server may have changed since the action was set up. It has to be below
+        the bot, and below whoever set the action up (unless that is the owner).
+        A role someone picked in their own answer can never carry moderation permissions."""
+        if role is None or role.is_default() or role.managed or not role < guild.me.top_role:
+            raise FormError("the role can't be changed by the bot")
+        if picked and role.permissions.value & ELEVATED:
+            raise FormError(f"{role.name} carries moderation permissions, so it is never given from someone's own answer")
+        setter = guild.get_member(int(action["by"])) if action.get("by") else None
+        if setter is None:
+            raise FormError("whoever set this action up is no longer in the server")
+        if setter.id != guild.owner_id and role >= setter.top_role:
+            raise FormError(f"{role.name} is no longer below the highest role of whoever set this action up")
+        return role
+
+    PLACEHOLDER = re.compile(r"\{([^{}\n]{1,200})\}")
+
+    def fill(self, text: str, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any]) -> str:
+        """A message with its placeholders filled in: {user}, {mention},
+        {form}, {server}, {status}, {note}, and any answer, by its question's
+        ID ({q3}) or by the question itself ({What should we call you?})."""
+        fixed = {"mention": self.who(form, response), "user": self.who(form, response, mention=False), "form": forms.plain(form["title"]),
+                 "server": guild.name, "status": response["status"], "note": response.get("decision_note") or ""}
+        answers = {entry["id"]: entry["answer"] for entry in response["answers"] if entry.get("id")}
+        by_text = {forms.plain(entry["question"]).strip().casefold(): entry["answer"] for entry in response["answers"]}
+
+        def one(match: re.Match[str]) -> str:
+            key = match.group(1).strip()
+            if key in fixed:
+                return fixed[key]
+            if key in answers:
+                return answers[key]
+            return by_text.get(forms.plain(key).strip().casefold(), match.group(0))
+
+        return self.PLACEHOLDER.sub(one, text)
 
     async def run_actions(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], moment: str) -> list[str]:
-        """Do what the form says should happen at this moment. One action
-        failing never stops the others; what failed is returned and logged."""
+        """Do what the form says should happen at this moment, where the
+        response meets the action's condition. One action failing never stops
+        the others; what failed is returned and logged."""
         failed: list[str] = []
         member = guild.get_member(int(response["user_id"]))
+        only_them = discord.AllowedMentions(everyone=False, roles=False, users=[discord.Object(id=int(response["user_id"]))])
+        reason = f"Form \"{forms.plain(form['title'])[:60]}\": response {moment}"
         for action in form["options"]["actions"]:
-            if action["on"] != moment:
+            if action["on"] != moment or not forms.matches(action, response["answers"]):
                 continue
+            do = action["do"]
             try:
-                if action["do"] in ("add_role", "remove_role"):
-                    role = guild.get_role(int(action["role_id"]))
-                    if member is None or role is None or role.managed or role.is_default() or not role < guild.me.top_role:
-                        raise FormError("the role can't be changed for this person")
-                    change = member.add_roles if action["do"] == "add_role" else member.remove_roles
-                    await change(role, reason=f"Form \"{form['title'][:60]}\": response {moment}")
-                elif action["do"] == "post":
+                if do in ("add_role", "remove_role", "picked_role", "nickname") and member is None:
+                    raise FormError("they are not in the server")
+                if do in ("add_role", "remove_role"):
+                    role = self._role_for(guild, action, guild.get_role(int(action["role_id"])), picked=False)
+                    await (member.add_roles if do == "add_role" else member.remove_roles)(role, reason=reason)
+                elif do == "picked_role":
+                    entry = next((entry for entry in response["answers"] if entry.get("id") == action["question"]), None)
+                    raw = str((entry or {}).get("value") or "")
+                    if not is_digits(raw):
+                        continue  # the question was left unanswered: nothing to give
+                    await member.add_roles(self._role_for(guild, action, guild.get_role(int(raw)), picked=True), reason=reason)
+                elif do == "nickname":
+                    if member.id == guild.owner_id or not member.top_role < guild.me.top_role:
+                        raise FormError("the bot can't change this person's nickname")
+                    nick = " ".join(self.fill(action["text"], guild, form, response).split())[:32]
+                    await member.edit(nick=nick or None, reason=reason)
+                elif do == "post":
                     channel = guild.get_channel(int(action["channel_id"]))
                     if channel is None:
                         raise FormError("the channel is gone")
-                    await channel.send(self._fill(action["text"], guild, form, response),
-                                       allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[discord.Object(id=int(response["user_id"]))]))
-                elif action["do"] == "dm":
+                    ping = guild.get_role(int(action["ping_role_id"])) if action["ping_role_id"] else None
+                    text = (f"{ping.mention} " if ping else "") + self.fill(action["text"], guild, form, response)
+                    await channel.send(text[:2000], allowed_mentions=discord.AllowedMentions(everyone=False, roles=[ping] if ping else False,
+                                                                                            users=[discord.Object(id=int(response["user_id"]))]))
+                elif do == "summary":
+                    channel = guild.get_channel(int(action["channel_id"]))
+                    if channel is None:
+                        raise FormError("the channel is gone")
+                    ping = guild.get_role(int(action["ping_role_id"])) if action["ping_role_id"] else None
+                    await channel.send(ping.mention if ping else None, embed=self.summary_embed(guild, form, response, action),
+                                       allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[ping] if ping else False))
+                elif do == "dm":
                     user = member or await self.bot.fetch_user(int(response["user_id"]))
-                    await user.send(embed=self.bot.embeds.info_embed(form["title"][:200], self._fill(action["text"], guild, form, response)))
-                elif action["do"] == "thread":
+                    await user.send(embed=self.bot.embeds.info_embed(forms.plain(form["title"])[:200], self.fill(action["text"], guild, form, response)[:4000]))
+                elif do == "thread":
                     channel = guild.get_channel(int(action["channel_id"]))
                     if channel is None or not hasattr(channel, "create_thread"):
                         raise FormError("the channel can't hold threads")
-                    name = f"{form['title'][:60]} - {response['user_name'] or response['user_id']}"[:100]
-                    thread = await channel.create_thread(name=name, type=discord.ChannelType.private_thread, invitable=False,
-                                                         reason=f"Form \"{form['title'][:60]}\"")
+                    name = self.fill(action["name"], guild, form, response) if action["name"] else f"{forms.plain(form['title'])[:60]} - {response['user_name'] or response['user_id']}"
+                    thread = await channel.create_thread(name=name[:100], type=discord.ChannelType.private_thread, invitable=False, reason=reason)
                     forms.set_thread(self.storage, response["id"], thread.id)
-                    link = self.responses_link(form, "Their response")
-                    await thread.send((self._fill(action["text"], guild, form, response) + "\n\n" if action["text"] else "")
-                                      + f"<@{response['user_id']}>" + (f" · {link}" if link else ""),
-                                      allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[discord.Object(id=int(response["user_id"]))]))
+                    await thread.send(self._opening(guild, form, response, action), allowed_mentions=only_them)
+                elif do == "channel":
+                    await self._open_channel(guild, form, response, action, member, reason, only_them)
             except (discord.HTTPException, FormError) as exc:
-                failed.append(f"{action['do']}: {exc}")
-                log.warning("A form action failed in guild %s (form %s, %s on %s): %s", guild.id, form["id"], action["do"], moment, exc)
+                failed.append(f"{do}: {exc}")
+                log.warning("A form action failed in guild %s (form %s, %s on %s): %s", guild.id, form["id"], do, moment, exc)
+            except Exception:  # noqa: BLE001 - the response is already stored; one broken action must not stop the others
+                failed.append(f"{do}: something went wrong")
+                log.exception("A form action broke in guild %s (form %s, %s on %s)", guild.id, form["id"], do, moment)
         return failed
+
+    def _opening(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any]) -> str:
+        link = self.responses_link(form, "Their response")
+        return ((self.fill(action["text"], guild, form, response) + "\n\n") if action["text"] else "") + f"<@{response['user_id']}>" + (f" · {link}" if link else "")
+
+    async def _open_channel(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any],
+                            member: discord.Member | None, reason: str, only_them: discord.AllowedMentions) -> None:
+        """A text channel only the person, the chosen roles and the bot can see, like a ticket."""
+        if member is None:
+            raise FormError("they are not in the server")
+        category = guild.get_channel(int(action["category_id"])) if action["category_id"] else None
+        if action["category_id"] and not isinstance(category, discord.CategoryChannel):
+            raise FormError("the category is gone")
+        seen = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
+        overwrites: dict[Any, discord.PermissionOverwrite] = {guild.default_role: discord.PermissionOverwrite(view_channel=False), member: seen,
+                                                               guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)}
+        for raw in action["roles"]:
+            role = guild.get_role(int(raw))
+            if role is not None:
+                overwrites[role] = seen
+        wanted = self.fill(action["name"], guild, form, response) if action["name"] else f"{forms.plain(form['title'])}-{response['user_name'] or response['user_id']}"
+        name = re.sub(r"[^a-z0-9_-]+", "-", wanted.lower()).strip("-")[:90] or "form-response"
+        channel = await guild.create_text_channel(name, category=category, overwrites=overwrites, reason=reason)
+        forms.set_thread(self.storage, response["id"], channel.id)
+        await channel.send(self._opening(guild, form, response, action), allowed_mentions=only_them)
+
+    def summary_embed(self, guild: discord.Guild, form: dict[str, Any], response: dict[str, Any], action: dict[str, Any]) -> discord.Embed:
+        """The whole response, one field a question, for a summary posted in a channel."""
+        intro = self.fill(action["text"], guild, form, response) if action["text"] else f"{self.who(form, response)} answered."
+        embed = self.bot.embeds.create(title=f"📝 {forms.plain(form['title'])}"[:256], description=intro[:4000])
+        for entry in response["answers"][:24]:
+            embed.add_field(name=forms.plain(entry["question"])[:256] or "Question", value=(entry["answer"] or "*(no answer)*")[:1024], inline=False)
+        link = self.responses_link(form, "All responses")
+        if len(response["answers"]) > 24 or link:
+            embed.add_field(name="More", value=(f"{len(response['answers']) - 24} more answers. " if len(response["answers"]) > 24 else "") + (link or ""), inline=False)
+        return embed
 
     # ---------- deciding ----------
 
