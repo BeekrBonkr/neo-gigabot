@@ -55,7 +55,7 @@ def payload_size(node: dict) -> int:
     return total + sum(payload_size(option) for option in node.get("options") or [])
 
 
-IMAGE_COGS = ["cogs.images", "cogs.image_filters", "cogs.image_animate", "cogs.image_memes", "cogs.image_edit"]
+IMAGE_COGS = ["cogs.images", "cogs.image_filters", "cogs.image_animate", "cogs.image_memes", "cogs.image_edit", "cogs.audio"]
 
 
 def test_image_command_groups_fit_discords_limits():

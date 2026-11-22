@@ -39,7 +39,7 @@ NO_SAMPLE: dict[str, str] = {
     "image effects convert": "This one changes the file's format, not how the picture looks, so there is nothing to show here. "
                              "Give it a picture, GIF or video and choose png, jpg, bmp, gif, webp or mp4.",
     "image effects faceswap": "This one needs a picture with at least two faces in it, and swaps them. Try it on a photo of two people.",
-    "animate bitcrush": "This one changes the sound, so there is no picture to show. Give it a video or an audio file and it comes back "
+    "audio bitcrush": "This one changes the sound, so there is no picture to show. Give it a video or an audio file and it comes back "
                         "with its sound crushed: lower bits for more crunch, raise downsample for a rougher, lo-fi tone.",
 }
 SAMPLE_TIMEOUT_SECONDS = 45.0

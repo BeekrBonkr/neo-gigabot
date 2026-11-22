@@ -23,7 +23,7 @@ COMMANDS = frozenset({
     "gif", "cute", "beans", "meme", "hug", "tictactoe", "simon", "about", "feedback",
 })
 # Groups where every command works, apart from the ones in SERVER_ONLY.
-GROUPS = frozenset({"image", "filter", "edit", "animate", "memegen"})
+GROUPS = frozenset({"image", "filter", "edit", "animate", "memegen", "audio"})
 SERVER_ONLY = frozenset({"image text quote", "image misc clearimagesource"})  # these two are right-click menus instead
 # Groups opened for a few of their commands only: /music for a person's own playlists.
 PARTIAL_GROUPS = {

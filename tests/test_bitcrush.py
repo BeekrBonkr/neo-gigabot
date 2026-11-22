@@ -1,4 +1,4 @@
-"""Bit crushing: /animate bitcrush on videos and sound files, and as an option of /animate datamosh."""
+"""Bit crushing: /audio bitcrush on videos and sound files, and as an option of /animate datamosh."""
 
 import shutil
 import subprocess
@@ -107,9 +107,9 @@ def test_sound_files_come_back_as_sound_files(sounds, tmp_path):
 
 
 def test_the_command_on_an_attachment_and_on_a_clicked_message(storage, clips, sounds, tmp_path):
-    data, filename = video.run_command(storage, clips["sound"], "animate bitcrush", bits=4)
+    data, filename = video.run_command(storage, clips["sound"], "audio bitcrush", bits=4)
     assert filename == "bitcrushed.mp4" and set(video.streams(data, tmp_path)) == {"video:h264", "audio:aac"}
-    data, filename = video.run_command(storage, sounds["wav"], "animate bitcrush", filename="tone.wav")
+    data, filename = video.run_command(storage, sounds["wav"], "audio bitcrush", filename="tone.wav")
     assert filename == "bitcrushed.mp3"
 
     async def clicked(harness):
@@ -124,7 +124,7 @@ def test_the_command_on_an_attachment_and_on_a_clicked_message(storage, clips, s
         with tools.pinned_source(types.SimpleNamespace(attachments=[menu.FakeAttachment(menu.png_bytes(), "only.png")], embeds=[])):
             with pytest.raises(ValueError, match="no video or audio"):
                 await tools.get_media_source(menu.FakeInteraction())
-        assert "animate bitcrush" in harness.offered()  # and Edit Image lists it
+        assert "audio bitcrush" in harness.offered()  # and Edit Image lists it
 
     menu.run(storage, clicked)
 
@@ -153,3 +153,19 @@ def test_datamosh_can_crush_the_sound_of_its_video(storage, clips, tmp_path):
         assert filename == "datamosh.gif" and seen[0][1] is False
     finally:
         image_animate.set_video_sound_filter = real
+
+
+def test_bit_crush_lives_under_audio_everywhere_commands_are_grouped(storage):
+    from types import SimpleNamespace
+
+    from cogs.audio import Audio
+    from cogs.help import CATEGORY_DEFS
+    from cogs.image_menu import CATEGORIES, category_of
+    from utils import user_app
+
+    (command,) = list(Audio(SimpleNamespace()).walk_app_commands())
+    assert command.qualified_name == "audio bitcrush"
+    assert category_of(command) == "Animate and audio" and "Animate and audio" in CATEGORIES and len(CATEGORIES) == 5
+    by_root = {name: label for _key, _emoji, label, names in CATEGORY_DEFS for name in names}
+    assert by_root["audio"] == "Audio" and by_root["animate"] == "Images & Memes"
+    assert user_app.works_as_user_app("audio bitcrush")

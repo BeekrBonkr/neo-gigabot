@@ -650,8 +650,9 @@ class Images(commands.GroupCog, group_name="image", group_description="Image man
             self.bot.embeds.field("Color Filters", "`/filter invert/grayscale/sepia/hue/adjust/posterize/edges/emboss/vaporwave`"),
             self.bot.embeds.field(
                 "Animations & GIF Tools",
-                "`/animate spin/rainbow/wave/zoom/pet/bonk/boom/triggered` • `/animate speed/reverse/frames/togif/datamosh/bitcrush`",
+                "`/animate spin/rainbow/wave/zoom/pet/bonk/boom/triggered` • `/animate speed/reverse/frames/togif/datamosh`",
             ),
+            self.bot.embeds.field("Audio", "`/audio bitcrush` for the sound of a video or an audio file"),
             self.bot.embeds.field("More Meme Formats", "`/memegen speechbubble/wanted/drake/changemymind/jail/wasted`"),
             self.bot.embeds.field(
                 "Meme Templates",

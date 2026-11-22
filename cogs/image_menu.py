@@ -23,14 +23,15 @@ MAX_FORM_FIELDS = 5  # and on one pop-up form
 PICKER_TIMEOUT_SECONDS = 300
 
 # The picker's dropdowns, in order. A message holds five rows, so five is the most there can be.
-CATEGORIES = ("Filters and effects", "Resize, rotate and crop", "Animate", "Memes and text", "Faces and templates")
+CATEGORIES = ("Filters and effects", "Resize, rotate and crop", "Animate and audio", "Memes and text", "Faces and templates")
 # Which dropdown each command group's commands go in.
 GROUP_CATEGORY = {
     "filter": "Filters and effects",
     "image effects": "Filters and effects",
     "image transform": "Resize, rotate and crop",
     "edit": "Resize, rotate and crop",
-    "animate": "Animate",
+    "animate": "Animate and audio",
+    "audio": "Animate and audio",
     "image text": "Memes and text",
     "memegen": "Memes and text",
     "image template": "Faces and templates",
