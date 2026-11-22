@@ -31,9 +31,9 @@ SAMPLE_OPTIONS: dict[str, dict[str, Any]] = {
     "edit resize": {"percent": 50},
     "image transform crop": {"left": 25, "right": 25},
 }
-# Commands whose result says nothing as a picture (a change of file format), or
-# that no stock picture suits (swapping needs two faces).
-NO_SAMPLE = {"image effects convert", "image effects faceswap"}
+# Commands whose result says nothing as a picture (a change of file format, a
+# change to the sound), or that no stock picture suits (swapping needs two faces).
+NO_SAMPLE = {"image effects convert", "image effects faceswap", "animate bitcrush"}
 SAMPLE_TIMEOUT_SECONDS = 45.0
 MAX_SAMPLE_BYTES = 6 * 1024 * 1024
 
