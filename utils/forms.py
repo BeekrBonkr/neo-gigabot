@@ -670,6 +670,26 @@ def _q(kind: str, text: str, required: bool = False, **more: Any) -> dict[str, A
 
 TEMPLATES: dict[str, dict[str, Any]] = {
     "blank": {"label": "Blank form", "title": "Untitled form", "description": "", "items": []},
+    "everything": {
+        "label": "Every question type", "title": "Every question type",
+        "description": "One of each kind of question a form can ask, to see how they look and behave. Change or remove whatever you like.",
+        "items": [
+            _q(SECTION, "Typed answers", help="A section heading groups the questions under it. This line is its optional text."),
+            _q("short", "Short answer", True, help="One line of text. This question has to be answered."),
+            _q("paragraph", "Long answer", help="Several lines of text, up to 2,000 characters."),
+            _q("number", "Number", min=0, max=100, help="A whole number between a smallest and a largest that you set."),
+            _q("date", "Date", help="Picked from a calendar."),
+            _q(SECTION, "Choosing from a list"),
+            _q("choice", "Multiple choice", options=["First option", "Second option", "Third option"], help="Pick exactly one."),
+            _q("checkboxes", "Checkboxes", options=["First option", "Second option", "Third option"], help="Pick any number."),
+            _q("dropdown", "Dropdown", options=["First option", "Second option", "Third option"], help="Pick one from a list that folds away. Good for long lists."),
+            _q("scale", "Rating scale", min=1, max=5, low="Lowest", high="Highest", help="A number on a scale, with a label at each end."),
+            _q(SECTION, "From this server", help="These three can only be answered by people who are in the server."),
+            _q("member", "Pick a member", help="Type a name, then choose the member."),
+            _q("role", "Pick a role"),
+            _q("channel", "Pick a channel"),
+        ],
+    },
     "staff": {
         "label": "Staff application", "title": "Staff application",
         "description": "Thanks for wanting to help out. Take your time: there are no trick questions.",
