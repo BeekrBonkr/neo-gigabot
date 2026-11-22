@@ -1073,6 +1073,12 @@ class SettingsDashboardView(discord.ui.View):
                 blocked.pop()
                 value = _format_commands(blocked) + " …"
             embed.add_field(name=f"Disabled Commands ({len(settings.get('blocked_commands') or [])})", value=value, inline=False)
+            embed.add_field(
+                name="Who Can Use A Command",
+                value="Disabling a command here turns it off for everyone. To choose which roles, members or channels may use one, "
+                      f"open **Server Settings > Integrations > {self.bot.user.name if self.bot.user else 'this bot'}** in Discord.",
+                inline=False,
+            )
         elif self.category == "logging":
             logging_enabled = bool(settings.get("logging_enabled")) and bool(settings.get("logging_channel_id"))
             detail = f"<#{int(settings['logging_channel_id'])}>" if logging_enabled else None
