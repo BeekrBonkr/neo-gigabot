@@ -110,6 +110,7 @@ class FormPopup(discord.ui.Modal):
 
     def __init__(self, cog: "Forms", form: dict[str, Any], page: int, *, test: bool = False) -> None:
         pages = forms.discord_pages(form["items"])
+        page = min(page, max(len(pages) - 1, 0))  # the form may have shrunk since the button was shown
         title = forms.plain(form["title"])
         title = f"{title[:38].rstrip()} {page + 1}/{len(pages)}" if len(pages) > 1 else title
         super().__init__(title=title[:45], timeout=PROGRESS_SECONDS)
@@ -175,22 +176,56 @@ class FormPopup(discord.ui.Modal):
 
 
 class NextPage(discord.ui.View):
-    """Between two pop-ups: Discord opens a pop-up only in answer to a press."""
+    """Between two pop-ups: Discord opens a pop-up only in answer to a press.
+    It leads on to the next page (or, once every page is filled in, sends the
+    response), and leads back to any page already filled in."""
 
-    def __init__(self, cog: "Forms", form: dict[str, Any], page: int, user_id: int, *, test: bool, again: bool = False) -> None:
+    def __init__(self, cog: "Forms", form: dict[str, Any], page: int | None, user_id: int, *, test: bool, again: bool = False,
+                 done: tuple[int, ...] = ()) -> None:
         super().__init__(timeout=PROGRESS_SECONDS)
         self.cog, self.form, self.page, self.user_id, self.test = cog, form, page, user_id, test
-        total = len(forms.discord_pages(form["items"]))
-        button = discord.ui.Button(label="Try again" if again else f"Continue to page {page + 1} of {total}", style=discord.ButtonStyle.primary,
-                                   emoji="✏️" if again else "➡️")
-        button.callback = self.go
+        pages = forms.discord_pages(form["items"])
+        if page is None:
+            button = discord.ui.Button(label="Send my answers", style=discord.ButtonStyle.success, emoji="📨")
+            button.callback = self.send
+        else:
+            button = discord.ui.Button(label="Try again" if again else f"Continue to page {page + 1} of {len(pages)}", style=discord.ButtonStyle.primary,
+                                       emoji="✏️" if again else "➡️")
+            button.callback = self.go
         self.add_item(button)
+        earlier = [number for number in sorted(done) if number != page and number < len(pages)]
+        if len(earlier) == 1:
+            back = discord.ui.Button(label=f"Back to page {earlier[0] + 1}", style=discord.ButtonStyle.secondary, emoji="⬅️")
+            back.callback = lambda interaction, number=earlier[0]: self.back(interaction, number)
+            self.add_item(back)
+        elif earlier:
+            menu = discord.ui.Select(placeholder="Go back and change a page", min_values=1, max_values=1, options=[
+                discord.SelectOption(label=f"Page {number + 1}", value=str(number), description=self._about(pages[number])) for number in earlier[:25]])
+            menu.callback = lambda interaction: self.back(interaction, int(menu.values[0]))
+            self.add_item(menu)
+
+    @staticmethod
+    def _about(page: list[dict[str, Any]]) -> str | None:
+        asked = [label(item["text"], 40) for item in page if item["kind"] != forms.SECTION]
+        return label(", ".join(asked), 100) or None
+
+    async def _mine(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("This form is someone else's to fill in.", ephemeral=True)
+        return False
 
     async def go(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This form is someone else's to fill in.", ephemeral=True)
-            return
-        await interaction.response.send_modal(self.cog.popup(self.form, self.page, interaction.user.id, test=self.test))
+        if await self._mine(interaction):
+            await interaction.response.send_modal(self.cog.popup(self.form, self.page, interaction.user.id, test=self.test))
+
+    async def back(self, interaction: discord.Interaction, page: int) -> None:
+        if await self._mine(interaction):
+            await interaction.response.send_modal(self.cog.popup(self.form, page, interaction.user.id, test=self.test))
+
+    async def send(self, interaction: discord.Interaction) -> None:
+        if await self._mine(interaction):
+            await self.cog.send_all(interaction, self.form["id"], test=self.test)
 
 
 class Forms(commands.Cog):
@@ -284,7 +319,7 @@ class Forms(commands.Cog):
         if not forms.discord_pages(form["items"]):
             await self.bot.embeds.error_interaction(interaction, "Form", "This form has no questions yet.", ephemeral=True)
             return
-        self._progress[(interaction.user.id, form["id"])] = {"answers": {}, "at": time.monotonic()}
+        self._progress[(interaction.user.id, form["id"])] = {"answers": {}, "done": set(), "at": time.monotonic()}
         await interaction.response.send_modal(self.popup(form, 0, interaction.user.id, test=test))
 
     async def _send_link(self, interaction: discord.Interaction, form: dict[str, Any]) -> None:
@@ -311,21 +346,39 @@ class Forms(commands.Cog):
             return
         pages = forms.discord_pages(fresh["items"])
         key = (interaction.user.id, fresh["id"])
-        progress = self._progress.setdefault(key, {"answers": {}, "at": time.monotonic()})
+        progress = self._progress.setdefault(key, {"answers": {}, "done": set(), "at": time.monotonic()})
         progress["answers"].update(answers)
         progress["at"] = time.monotonic()
+        done = progress.setdefault("done", set())
         try:
             forms.clean_answers(pages[page] if page < len(pages) else [], answers, self.service.names(guild), partial=True)
         except FormError as exc:
+            done.discard(page)
             await interaction.response.send_message(embed=self.bot.embeds.error_embed("Check That Page", str(exc)),
-                                                    view=NextPage(self, fresh, page, interaction.user.id, test=test, again=True), ephemeral=True)
+                                                    view=NextPage(self, fresh, page, interaction.user.id, test=test, again=True, done=tuple(done)), ephemeral=True)
             return
-        if page + 1 < len(pages):
-            await interaction.response.send_message(
-                embed=self.bot.embeds.info_embed(label(fresh["title"], 200), f"Page {page + 1} of {len(pages)} is saved. Nothing is sent until the last page."),
-                view=NextPage(self, fresh, page + 1, interaction.user.id, test=test), ephemeral=True)
+        done.add(page)
+        if len(pages) == 1:
+            await self.take(interaction, fresh, dict(progress["answers"]), test=test)
             return
-        await self.take(interaction, fresh, dict(progress["answers"]), test=test)
+        ahead = next((number for number in range(len(pages)) if number not in done), None)
+        if ahead is None:
+            words = f"All {len(pages)} pages are filled in. Nothing is sent until you press **Send my answers**. You can still go back and change a page."
+        else:
+            words = f"Page {page + 1} of {len(pages)} is saved. Nothing is sent until the end, and you can go back to a page you have filled in."
+        await interaction.response.send_message(embed=self.bot.embeds.info_embed(label(fresh["title"], 200), words),
+                                                view=NextPage(self, fresh, ahead, interaction.user.id, test=test, done=tuple(done)), ephemeral=True)
+
+    async def send_all(self, interaction: discord.Interaction, form_id: int, *, test: bool) -> None:
+        """Every page is filled in and the person pressed Send."""
+        guild = home_guild(interaction)
+        fresh = self.service.get(guild.id, form_id) if guild is not None else None
+        answers = self.saved(form_id, interaction.user.id)
+        if fresh is None or not answers:
+            await self.bot.embeds.error_interaction(interaction, "Not Sent", "Those answers are no longer kept (they are held for 30 minutes). Open the form again.",
+                                                    ephemeral=True)
+            return
+        await self.take(interaction, fresh, dict(answers), test=test)
 
     async def take(self, interaction: discord.Interaction, form: dict[str, Any], answers: dict[str, Any], *, test: bool = False) -> None:
         """A whole response from the pop-ups, through the same checks as any other."""
