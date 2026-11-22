@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from utils.db import connect as _db_connect
+from utils import site_access
 
 DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "bot_channels": [],
@@ -83,6 +84,8 @@ DEFAULT_GUILD_SETTINGS: dict[str, Any] = {
     "appeals_channel_id": "",
     # How long the website's searchable copy of the activity log is kept. 0 keeps no copy.
     "logging_keep_days": 30,
+    # Which Discord permission opens each part of the server's pages on the website (utils/site_access.py).
+    **{key: site_access.DEFAULT_PERMISSION for key in site_access.KEYS},
     # Where /suggest posts. Empty turns suggestions off.
     "suggestions_channel_id": "",
     # Richer welcomes: which forms the join greeting takes (any of text,
@@ -181,6 +184,7 @@ def derive_module_flags(data: dict[str, Any]) -> dict[str, Any]:
 AUTOMOD_ACTIONS = ("off", "delete", "warn", "mute")
 WELCOME_STYLES = ("text", "embed", "image")
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {
+    **{key: site_access.PERMISSIONS for key in site_access.KEYS},
     "automod_invites_action": AUTOMOD_ACTIONS,
     "automod_words_action": AUTOMOD_ACTIONS,
     "automod_mentions_action": AUTOMOD_ACTIONS,
