@@ -124,7 +124,8 @@ class FormsRoutes:
         open_ones = [form for form in forms.list_forms(self.storage, guild.id)
                      if form["kind"] == forms.GENERAL and forms.is_open(form, form["responses"])[0]]
         return web.json_response({"staff": False, "can_manage": False, "forms": [
-            {"id": form["id"], "slug": form["slug"], "title": form["title"], "description": form["description"], "link": service.link(form)}
+            {"id": form["id"], "slug": form["slug"], "title": form["title"], "description": form["description"], "link": service.link(form),
+             "answered_in": form["options"].get("answered_in", forms.WEBSITE)}
             for form in open_ones]})
 
     def _settings(self, guild: discord.Guild) -> dict[str, Any]:
