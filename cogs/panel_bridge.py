@@ -1193,6 +1193,7 @@ class PanelBridge(commands.Cog):
                     "kind": "slash",
                     "added": command_dates.added_on(command.qualified_name),
                     "sample": samples.can_sample(command),
+                    "sample_note": samples.sample_note(command),
                     "requires": self._required_permissions(command),
                     "params": [
                         {"name": p.display_name, "description": p.description if p.description != "…" else "", "required": p.required}
