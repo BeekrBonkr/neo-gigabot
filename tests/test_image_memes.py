@@ -172,6 +172,13 @@ def test_watermarks_keep_the_size_and_land_where_they_should():
     assert mm.watermark(plain, "hypercam").getpixel((390, 290)) == plain.getpixel((390, 290))
     assert mm.watermark(plain, "ifunny").getpixel((10, 297))[:3] != plain.getpixel((10, 297))[:3]  # a strip along the bottom
     assert mm.watermark(plain, "bandicam").getpixel((10, 150)) == plain.getpixel((10, 150))
+    for style in ("worldstar", "liveleak"):  # a logo in the top left, nothing anywhere else
+        stamped = mm.watermark(plain, style)
+        assert stamped.crop((0, 0, 120, 90)).tobytes() != plain.crop((0, 0, 120, 90)).tobytes()
+        assert stamped.crop((0, 150, 400, 300)).tobytes() == plain.crop((0, 150, 400, 300)).tobytes()
+    activated = mm.watermark(plain, "windows")  # the notice in the bottom right
+    assert activated.crop((200, 220, 400, 300)).tobytes() != plain.crop((200, 220, 400, 300)).tobytes()
+    assert activated.crop((0, 0, 400, 150)).tobytes() == plain.crop((0, 0, 400, 150)).tobytes()
 
 
 def test_kirby_goes_under_the_picture():

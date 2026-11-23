@@ -26,6 +26,8 @@ Overlays and meme templates the image commands open at run time.
 | `hypercam.png` | `/memegen watermark` | The Unregistered HyperCam 2 label, from imgflip (Unregistered-HyperCam-2-Watermark) |
 | `bandicam.png` | `/memegen watermark` | The Bandicam address, cut from imgflip's Bandicam-Watermark |
 | `ifunny.png` | `/memegen watermark` | The iFunny strip, from imgflip (iFunny-Watermark) |
+| `worldstar.png` | `/memegen watermark` | The WorldStarHipHop logo from English Wikipedia (en.wikipedia.org/wiki/File:WorldStarHipHoplogo.png), with the black lettering turned white and a dark edge added |
+| `liveleak.png` | `/memegen watermark` | The LiveLeak logo from English Wikipedia (en.wikipedia.org/wiki/File:Logo_of_LiveLeak_(2008-2021).svg), without the camera and the tagline above it |
 | `kirby.jpg` | `/memegen kirby` | Kirby's Calling the Police, from imgflip (KIRBYS-CALLING-THE-POLICE) |
 | `excuse.jpg` | `/memegen excuse` | The "excuse me what" panel from Dank Memer's image generator (github.com/DankMemer/imgen, MIT) |
 | `museum.png` | `/memegen scene` | A gold frame on a gallery wall, from imgflip (Blank-Painting) |

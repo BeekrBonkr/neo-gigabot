@@ -21,6 +21,9 @@ WATERMARKS = [
     app_commands.Choice(name="Unregistered HyperCam 2", value="hypercam"),
     app_commands.Choice(name="Bandicam", value="bandicam"),
     app_commands.Choice(name="iFunny", value="ifunny"),
+    app_commands.Choice(name="WorldStar", value="worldstar"),
+    app_commands.Choice(name="LiveLeak", value="liveleak"),
+    app_commands.Choice(name="Activate Windows", value="windows"),
 ]
 SCENES = [
     app_commands.Choice(name="Museum", value="museum"),
@@ -352,7 +355,7 @@ class ImageMemes(commands.GroupCog, group_name="memegen", group_description="Mak
     ) -> None:
         await self._poster(interaction, "watchmojo", "WatchMojo", mm.watchmojo, attachment, message_link, user=user, texts=(title,))
 
-    @app_commands.command(name="watermark", description="Stamp an image like a screen recorder or a meme site would.")
+    @app_commands.command(name="watermark", description="Stamp an image like a screen recorder, a video site or a meme site would.")
     @app_commands.describe(style="Whose watermark to add.", **SOURCE_HELP)
     @app_commands.choices(style=WATERMARKS)
     @app_commands.checks.cooldown(1, 3.0)

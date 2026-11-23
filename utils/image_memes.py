@@ -455,11 +455,29 @@ def watchmojo(picture: Image.Image, title: "richtext.RichText | str") -> Image.I
 
 # ---------- watermarks ----------
 
-WATERMARKS = ("hypercam", "bandicam", "ifunny")
+WATERMARKS = ("hypercam", "bandicam", "ifunny", "worldstar", "liveleak", "windows")
+
+
+def _activate_windows(frame: Image.Image) -> Image.Image:
+    """The "Activate Windows" notice in the bottom right. It is text, so it is
+    written here rather than loaded."""
+    layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    big, small = max(4, round(frame.width * 0.034)), max(3, round(frame.width * 0.021))
+    lines = (("Activate Windows", load_font("arial.ttf", big)), ("Go to Settings to activate Windows.", load_font("arial.ttf", small)))
+    left = frame.width - max(draw.textlength(text, font=font) for text, font in lines) - round(frame.width * 0.03)
+    top = frame.height - round(big * 1.25 + small * 1.25) - round(frame.height * 0.06)
+    for text, font in lines:
+        draw.text((left + 1, top + 1), text, font=font, fill=(0, 0, 0, 60))
+        draw.text((left, top), text, font=font, fill=(255, 255, 255, 170))
+        top += round(big * 1.25)
+    return Image.alpha_composite(frame, layer)
 
 
 def watermark(frame: Image.Image, style: str) -> Image.Image:
-    """Stamp a frame the way a screen recorder or a meme site would."""
+    """Stamp a frame the way a screen recorder, a video site or a meme site would."""
+    if style == "windows":
+        return _activate_windows(frame.convert("RGBA"))
     result = frame.copy()
     mark = _template(f"{style}.png")
 
@@ -472,6 +490,10 @@ def watermark(frame: Image.Image, style: str) -> Image.Image:
     elif style == "bandicam":  # the address across the top, in the middle
         stamp = scaled(round(frame.width * 0.36))
         result.alpha_composite(stamp, ((frame.width - stamp.width) // 2, max(0, round(frame.height * 0.012))))
+    elif style in ("worldstar", "liveleak"):  # the site's logo, just in from the top left corner
+        stamp = scaled(round(frame.width * (0.20 if style == "worldstar" else 0.24)))
+        inset = round(frame.width * 0.02)
+        result.alpha_composite(stamp.crop((0, 0, min(stamp.width, frame.width - inset), min(stamp.height, frame.height - inset))), (inset, inset))
     else:  # ifunny: a strip over the bottom edge
         strip = scaled(frame.width)
         result.paste(strip, (0, frame.height - strip.height))
